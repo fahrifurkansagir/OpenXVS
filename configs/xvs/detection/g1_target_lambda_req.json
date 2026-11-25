@@ -1,0 +1,33 @@
+{
+  "schema": "xvs.detection.g1_target_lambda_req/1",
+  "batch": "ARGON_B7",
+  "wp": "WP-05_G1_TO_WP-04_G1",
+  "description": "WP-05 G1 re-derived false-alarm density requirement lambda_req under Decisions D29, D32, D33 across frame-independent and persistent 3D WGS-84 terrain clutter",
+  "lambda_req_g1": 0.0005,
+  "lambda_req_g1_numeric": 0.0005,
+  "lambda_req_g1_statement": "0.0005 (< 0.005)",
+  "limiting_regime": "primary_1hz_hold",
+  "lambda_req_indep": 0.05,
+  "lambda_req_indep_numeric": 0.05,
+  "lambda_req_indep_statement": "0.05",
+  "lambda_req_persist_1hz": 0.0005,
+  "lambda_req_persist_1hz_numeric": 0.0005,
+  "lambda_req_persist_1hz_statement": "0.0005 (< 0.005)",
+  "lambda_req_persist_10hz": 0.0005,
+  "lambda_req_persist_10hz_numeric": 0.0005,
+  "lambda_req_persist_10hz_statement": "0.0005 (< 0.005)",
+  "g0_lambda_req_indep": 0.05,
+  "g0_lambda_req_persist_1hz": "< 0.0005",
+  "g0_lambda_req_persist_10hz": "< 0.0005",
+  "wp04_g1_suppression_target_factor": 1000.0,
+  "provenance": {
+    "git_commit": "19078d39d25d246b81395e61166a6e7fbd2ba758",
+    "timestamp_utc": "2026-11-07T10:54:34Z",
+    "indep_sweep_json": "output/xvs/wp05/g1_lambda_sweep_v2/lambda_sweep_v2_results.json",
+    "indep_sweep_sha256": "a3f144bee0c9254447eb975c6eed7a0b3274d3aaf2cfed21ee5fcab8f553f276",
+    "persistent_sweep_json": "output/xvs/wp05/g1_lambda_sweep_v2/lambda_sweep_persistent_clutter.json",
+    "persistent_sweep_sha256": "aa78336e0ff565b1a8fe61cb91ae3343ef1c7dacd6453732bc8ef129cb492315",
+    "tracking_config_json": "configs/xvs/tracking/g1.json",
+    "tracking_config_sha256": "56e73b002965a92a78fc3e8fd55e2418ff13b15f3463066d9ea9103cac2ed0b7"
+  }
+}

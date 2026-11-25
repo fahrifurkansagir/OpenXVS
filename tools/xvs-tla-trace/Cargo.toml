@@ -1,0 +1,17 @@
+[workspace]
+
+[package]
+name = "xvs-tla-trace"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Standalone zero-modification Rust <-> TLA+ NDJSON trace emitter exercising frozen OpenXVS no_std safety crates for TLC trace refinement (Sn4_TLA)"
+publish = false
+
+[dependencies]
+xvs-rta-core = { path = "../../xvs-core/crates/xvs-rta-core" }
+xvs-math-core = { path = "../../xvs-core/crates/xvs-math-core" }
+xvs-active-range = { path = "../../xvs-active-range", features = ["std"] }
+xvs-odd-vlm = { path = "../../xvs-odd-vlm" }
+xvs-os-hal = { path = "../../xvs-os-hal" }
+xvs-multiship-coord = { path = "../../xvs-multiship-coord" }

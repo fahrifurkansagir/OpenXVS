@@ -1,0 +1,46 @@
+# OpenXVS v2.0 Milestone M1 — Visual-ODD & Past-Time MLTL Safety Contract
+# Normative Specs: docs/xvs/CONVENTIONS.md v1.0, docs/xvs/SP1_LIVEDECK_DESIGN.md §4.1
+# Units: PURE SI integers ONLY (urad = microradians, mm = millimetres, ticks = 10 Hz integer ticks).
+# ZERO non-SI angular units permitted anywhere in the Rust safety core.
+#
+# Explicit ODD Assumption on Intermittent Sensor Dropout Duty Cycle (R_DROPOUT_DUTY_20):
+#   - Sustained transient dropout is capped at consec_dropout_max_ticks = 10 (1.0 s) in P2 (DegradedCoast);
+#     tick 11 forces P0 (InvalidInhibit) continuously while dropout persists.
+#   - Sliding 20-tick (2.0 s) windowed dropout duty cycle <= 50% (<= 10/20 ticks, e.g. 10-on / 10-off)
+#     is bounded conservatively inside P1 (FallbackD0Safe) on recovery without climbing back into P2.
+#   - Any 20-tick window with >= 55% dropout duty (>= 11/20 ticks, e.g. 10-on / 1-off) forces
+#     P0 (InvalidInhibit) at 0 ticks and blocks P0 recovery until window_dropout_20 <= 10.
+
+schema: xvs.v2_m1_odd/1
+tick_rate_hz: 10
+ring_buffer_capacity: 64
+
+thresholds:
+  # 0.35 deg = 6108.65 urad -> 6109 urad
+  epipolar_cam_max_urad: 6109
+  # 0.50 deg = 8726.65 urad -> 8727 urad
+  horizon_al_urad: 8727
+  # Cat I vertical alert limit: 10.0 m = 10000 mm
+  v_val_mm: 10000
+  # Cat I horizontal alert limit: 40.0 m = 40000 mm
+  v_hal_mm: 40000
+  # Maximum consecutive dropout ticks allowed in P2 (DegradedCoast): 10 ticks (1.0 s)
+  consec_dropout_max_ticks: 10
+  # Sliding 20-tick (2.0 s) intermittent dropout window & max tolerated count (<= 50% vs >= 55%)
+  window_dropout_len_ticks: 20
+  window_dropout_20_max_ticks: 10
+  # Staged upward recovery hysteresis: 30 ticks P0->P1 (3.0 s) + 20 ticks P1->P3/P4 (2.0 s)
+  p0_recovery_ticks: 30
+  dwell_ticks: 20
+  # Minimum healthy cameras required for operation (6->5->4 graceful degradation; <4 -> P0)
+  min_healthy_cams: 4
+  # Past-time MLTL rule windows (in integer ticks)
+  cam_count_history_window: 2
+  epi_once_window: 1
+  spoof_once_window: 0
+
+rules:
+  R_CAM_COUNT: "H[0,2](active_healthy_cams >= 4)"
+  R_EPI_SINGLE_CAM: "O[0,1](epipolar_max_urad[i] > 6109)"
+  R_SPOOF_LOCK: "O[0,0](spoof_alarm)"
+  R_DROPOUT_DUTY_20: "count(transient_dropout, 20) <= 10"

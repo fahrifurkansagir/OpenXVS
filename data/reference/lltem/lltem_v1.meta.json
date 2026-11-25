@@ -1,0 +1,76 @@
+{
+  "schema": "xvs.reference_sidecar/1",
+  "id": "lltem_v1",
+  "dataset": "MIT LL Terminal Encounter Model (LLTEM) V1.0 - Terminal Airspace Encounter Set V1.0 (June 30, 2020)",
+  "source_page": "https://www.ll.mit.edu/r-d/datasets/unmanned-aircraft-terminal-area-encounters",
+  "host": "archive.ll.mit.edu",
+  "path_prefix": "/datasets/lltem/",
+  "license": "CC BY 4.0",
+  "license_quote_readme": "This work is licensed under a Creative Commons Attribution 4.0 International License (CC BY 4.0).",
+  "attribution": "MIT Lincoln Laboratory, Terminal Airspace Encounter Set V1.0 (LLTEM V1.0), June 30, 2020. (c) 2020 Massachusetts Institute of Technology. Licensed under CC BY 4.0.",
+  "decision": "D17 (docs/xvs/batches/BATCH_B2.md); owner option 1 of 2026-09-24: README and CSV in full, the first 104,857,600 bytes of terminal_encounters_20200630.dat (Range request)",
+  "files": [
+    {
+      "url": "http://archive.ll.mit.edu/datasets/lltem/README.txt",
+      "redirects": [
+        {
+          "url": "http://archive.ll.mit.edu/datasets/lltem/README.txt",
+          "status": 302
+        }
+      ],
+      "final_url": "https://archive.ll.mit.edu/datasets/lltem/README.txt",
+      "http_status": 200,
+      "content_range": null,
+      "byte_range": null,
+      "bytes": 10105,
+      "sha256": "68261a73e7e5d0a52accc5b665c58a222915abcbe863b12703edd32c08deb06f",
+      "path": "data/cache/lltem/README.txt",
+      "downloaded_utc": "2026-09-24T20:26:58.619015+00:00",
+      "file": "README.txt",
+      "complete_file": true
+    },
+    {
+      "url": "http://archive.ll.mit.edu/datasets/lltem/terminal_encounter_info_20200630.csv",
+      "redirects": [
+        {
+          "url": "http://archive.ll.mit.edu/datasets/lltem/terminal_encounter_info_20200630.csv",
+          "status": 302
+        }
+      ],
+      "final_url": "https://archive.ll.mit.edu/datasets/lltem/terminal_encounter_info_20200630.csv",
+      "http_status": 200,
+      "content_range": null,
+      "byte_range": null,
+      "bytes": 139245695,
+      "sha256": "d218d8181bb70ff40d25d0c298989523b40e8b8276ca090a8f51b0075a7e8db4",
+      "path": "data/cache/lltem/terminal_encounter_info_20200630.csv",
+      "downloaded_utc": "2026-09-24T20:28:23.113785+00:00",
+      "file": "terminal_encounter_info_20200630.csv",
+      "complete_file": true
+    },
+    {
+      "url": "http://archive.ll.mit.edu/datasets/lltem/terminal_encounters_20200630.dat",
+      "redirects": [
+        {
+          "url": "http://archive.ll.mit.edu/datasets/lltem/terminal_encounters_20200630.dat",
+          "status": 302
+        }
+      ],
+      "final_url": "https://archive.ll.mit.edu/datasets/lltem/terminal_encounters_20200630.dat",
+      "http_status": 206,
+      "content_range": "bytes 0-104857599/10572612040",
+      "byte_range": [
+        0,
+        104857599
+      ],
+      "bytes": 104857600,
+      "sha256": "c39eb8a9a845c7951e18a0369166edec7ea92089b3938c9b6dd355c7872647c8",
+      "path": "data/cache/lltem/terminal_encounters_20200630.dat",
+      "downloaded_utc": "2026-09-24T20:29:30.524753+00:00",
+      "file": "terminal_encounters_20200630.dat",
+      "complete_file": false
+    }
+  ],
+  "total_bytes": 244113400,
+  "verified_utc": "2026-09-24T20:29:30.525035+00:00"
+}

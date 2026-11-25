@@ -1,0 +1,73 @@
+{
+  "schema": "xvs.wp07.h3_real_transfer_config/1",
+  "dataset_id": "IceHorizon",
+  "dataset_root": "icehorizon_data",
+  "allowlist_path": "docs/xvs/spec/data_allowlist.json",
+  "synthetic_g1_results_path": "output/xvs/wp07/g1/results.json",
+  "output_dir": "output/xvs/wp07/h3_real_transfer",
+  "rng_seed": 20261110,
+  "sampling": {
+    "frames_per_sequence": 20,
+    "min_polyline_points": 2
+  },
+  "camera_projection": {
+    "fov_h_deg": 70.0,
+    "drone_altitude_nom_m": 120.0,
+    "ship_altitude_nom_m": 15.0,
+    "lat_nom_deg": 64.1466,
+    "lon_nom_deg": -21.9426,
+    "yaw_nom_rad": 0.0
+  },
+  "sequence_split": {
+    "calibration_sequences": [
+      "drone1",
+      "drone3",
+      "drone5",
+      "ship1",
+      "ship3",
+      "ship5",
+      "ship7",
+      "ship9",
+      "ship11",
+      "ship13",
+      "ship15",
+      "ship17",
+      "ship19",
+      "ship21"
+    ],
+    "test_sequences": [
+      "drone2",
+      "drone4",
+      "ship2",
+      "ship4",
+      "ship6",
+      "ship8",
+      "ship10",
+      "ship12",
+      "ship14",
+      "ship16",
+      "ship18",
+      "ship20",
+      "ship22",
+      "ship23",
+      "ship24"
+    ]
+  },
+  "detector_params": {
+    "step_px": 16,
+    "g0_min_gradient": 0.015,
+    "g1_min_gradient": 0.008,
+    "g1_scales": [1.0, 2.0, 3.5],
+    "g1_scale_weights": [0.5, 0.35, 0.15],
+    "g1_strip_half_band_px": 32,
+    "g1_border_margin_px": 48
+  },
+  "conformal_params": {
+    "alpha_levels": [0.1, 0.05, 0.01],
+    "alert_limits_deg": [2.0, 5.0, 10.0],
+    "real_sigma_floor_deg": 0.35,
+    "real_rms_weight_deg_per_mrad": 0.12,
+    "real_ood_weight_deg": 0.25,
+    "coverage_tolerance": 0.035
+  }
+}

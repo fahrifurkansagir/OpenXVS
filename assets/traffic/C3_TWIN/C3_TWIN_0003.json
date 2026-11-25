@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "C3_TWIN_0003",
+  "class": "C3_TWIN",
+  "seed": 3,
+  "dimensions": {
+    "length_m": 10.94724178314209,
+    "span_m": 12.513895034790039,
+    "height_m": 3.8655800819396973
+  },
+  "bbox_min": [
+    -5.473620891571045,
+    -6.2569475173950195,
+    -1.9327900409698486
+  ],
+  "bbox_max": [
+    5.473620891571045,
+    6.2569475173950195,
+    1.9327900409698486
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 850,
+  "alpha_trim_deg": 2.0,
+  "glb_sha256": "52d08860c4c9c0bd3d651773d2493e75e4d2f963de59c94485187b7f9c5638bf",
+  "path": "assets/traffic/C3_TWIN/C3_TWIN_0003.glb"
+}

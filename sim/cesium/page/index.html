@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>OpenXVS Cesium Viewport</title>
+  <link rel="stylesheet" href="/cesium/Widgets/widgets.css">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 1024px;
+      height: 1024px;
+      overflow: hidden;
+      background-color: #000000;
+    }
+    #cesiumContainer {
+      width: 1024px;
+      height: 1024px;
+      margin: 0;
+      padding: 0;
+      position: absolute;
+      left: 0;
+      top: 0;
+      overflow: hidden;
+    }
+  </style>
+  <script>
+    window.CESIUM_BASE_URL = '/cesium/';
+  </script>
+  <script src="/cesium/Cesium.js"></script>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <script src="/page/xvs_page.js"></script>
+</body>
+</html>

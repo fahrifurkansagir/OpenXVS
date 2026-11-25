@@ -1,0 +1,136 @@
+{
+  "schema": "xvs.ed324_evidence_trace/1",
+  "standard": "SCSC-141C / EUROCAE ED-324 (SAE ARP6983) GSN v3",
+  "root_id": "G0",
+  "node_count": 18,
+  "solution_count": 8,
+  "undeveloped_goals": {
+    "G2_TLA_DEFERRED": "Full TLA+ temporal model checking of distributed multi-ship Simplex RTA liveness properties is explicitly deferred (undeveloped); local safety invariants are currently bounded by 5/5 Kani/CBMC proofs (Sn5_KANI) and 100k proptest cases.",
+    "G5_GAP": "EXPLICIT UNDEVELOPED CERTIFICATION GAP (NOT CLAIMED BY OPENXVS): RTCA DO-254 complex electronic hardware assurance, DAL-A/B qualified compiler & RTCA DO-330 tool qualification, ARINC 653 certified RTOS partitioning, airframe-level SAE ARP4754B FHA/PSSA/SSA, and independent human DER/CVE verification sign-off (EASA QA-01 / RTCA DO-178C Table A-7)."
+  },
+  "solutions": {
+    "Sn1_MHVIT": {
+      "text": "WSL2 C++20 + libxvs_core.a K=5 log-spaced NED MH-VIT (0% inward overshoot) & 500-encounter XVS-MeshDAA multi-intruder evidence.",
+      "undeveloped": false,
+      "evidence_files": [
+        {
+          "path": "output/xvs/v2_m3/v1_xvs_rt_evidence.json",
+          "sha256": "7ec4638bb82dfb82f6f0dd478f4197864a863d1d560459cdec3d16bd1eb2e472",
+          "size_bytes": 3121
+        },
+        {
+          "path": "output/xvs/v2_m3/v2_meshdaa_500enc_evidence.json",
+          "sha256": "70f632ae626dd7721c90b1a2e36fb10720637de826b902e0802f8f63a790a384",
+          "size_bytes": 1054
+        }
+      ]
+    },
+    "Sn2_HYBRID_CBF": {
+      "text": "Strict NED 3D fixed-wing ECBF-QP safety/viability & 3-ship 0-NMAC / ghost-suppression closed-loop evidence.",
+      "undeveloped": false,
+      "evidence_files": [
+        {
+          "path": "output/xvs/v2_m3/v1_xvs_rt_evidence.json",
+          "sha256": "7ec4638bb82dfb82f6f0dd478f4197864a863d1d560459cdec3d16bd1eb2e472",
+          "size_bytes": 3121
+        },
+        {
+          "path": "output/xvs/v2_m3/v2_meshdaa_500enc_evidence.json",
+          "sha256": "70f632ae626dd7721c90b1a2e36fb10720637de826b902e0802f8f63a790a384",
+          "size_bytes": 1054
+        }
+      ]
+    },
+    "Sn3_DAQP_WCET": {
+      "text": "WSL2 g++ -Wl,--wrap=malloc zero-allocation hot-loop audit (0 B under both -O0 and -O2) & DAQP-ABI active-set solver timing evidence.",
+      "undeveloped": false,
+      "evidence_files": [
+        {
+          "path": "output/xvs/v2_m3/v1_xvs_rt_evidence.json",
+          "sha256": "7ec4638bb82dfb82f6f0dd478f4197864a863d1d560459cdec3d16bd1eb2e472",
+          "size_bytes": 3121
+        }
+      ]
+    },
+    "Sn5_KANI": {
+      "text": "WSL2 Kani/CBMC 5/5 formal verification harness log on frozen no_std xvs-rta-core.",
+      "undeveloped": false,
+      "evidence_files": [
+        {
+          "path": "output/xvs/v2_m1/kani_proofs.log",
+          "sha256": "99ed76777e33c80535b3f420d2b4ed1370d0f3a5a98fb81b790640c00987c967",
+          "size_bytes": 1347680
+        }
+      ]
+    },
+    "Sn6_PARITY": {
+      "text": "10,000-tick bit-exact Simplex RTA & codec differential parity plus WebGPU/WebGL2 browser E2E verification.",
+      "undeveloped": false,
+      "evidence_files": [
+        {
+          "path": "output/xvs/v2_m1/parity_results.json",
+          "sha256": "76e032b0ebc7b46fd6e88de36fee3a2a0ed2a01e5ae4acb71ace1d7320f8b710",
+          "size_bytes": 1245
+        },
+        {
+          "path": "output/xvs/v2_m1/e2e_results.json",
+          "sha256": "fe5b071fee472d8d30f6d1921b377c1f603c661bc95c2ffe64c856b83908f49c",
+          "size_bytes": 21694
+        }
+      ]
+    },
+    "Sn7_DTACI_OOD": {
+      "text": "LWIR physics & XVS-ThermalNet 47-case fail-closed gating plus XVS-VRAIM Mahalanobis OOD, Top-K SAE, and seeded AST EASA R-LM-07 to R-LM-11 audit.",
+      "undeveloped": false,
+      "evidence_files": [
+        {
+          "path": "output/xvs/v2_m2/v3_lwir_thermal_world_evidence.json",
+          "sha256": "8a54a1c397a6b95693084dae0940d5326c2c5ab71badae0551566061dffb1bf2",
+          "size_bytes": 2076
+        },
+        {
+          "path": "output/xvs/v2_m2/v5_nav_vraim_evidence.json",
+          "sha256": "1c3c1cb87e8368cd2c3fabc614aeecab3354814932ee234343e32de37c3e2d0b",
+          "size_bytes": 1373
+        }
+      ]
+    },
+    "Sn8_SPLIT_H3": {
+      "text": "WP-01b curved ray-DEM / TSO-C151d TAWS FLTA, XVS-Land hybrid Conformal-RAIM (KSFO 28L vs Taxiway C/28R), and XVS-Nav 6-stage aliasing gate evidence.",
+      "undeveloped": false,
+      "evidence_files": [
+        {
+          "path": "output/xvs/v2_m2/v4_wp01b_land_evidence.json",
+          "sha256": "20eb12a8b9a00eb07d576d817ba0e782644d4f0d830e9d0e4d2091d8949f8e8a",
+          "size_bytes": 1685
+        },
+        {
+          "path": "output/xvs/v2_m2/v5_nav_vraim_evidence.json",
+          "sha256": "1c3c1cb87e8368cd2c3fabc614aeecab3354814932ee234343e32de37c3e2d0b",
+          "size_bytes": 1373
+        }
+      ]
+    },
+    "Sn9_PROVENANCE": {
+      "text": "Provenance-verified M1 & M2 reports plus Stage-2 XVS-Bench Ed25519-signed SHA-256 hash chain (strictly acyclic lower-stage inputs).",
+      "undeveloped": false,
+      "evidence_files": [
+        {
+          "path": "docs/xvs/reports/V2_M1_livedeck_report.md",
+          "sha256": "584fb9eb992904c20268a1615ba1ece36371f1e065f4f3ecbe902a76bd278f0b",
+          "size_bytes": 7377
+        },
+        {
+          "path": "docs/xvs/reports/V2_M2_local_prep_report.md",
+          "sha256": "a865806505568f1a5afb0dd2d903df7d8095561ad25582ecc038b39ad4f1b27c",
+          "size_bytes": 8069
+        },
+        {
+          "path": "output/xvs/v2_m3/xvs_bench_chain.json",
+          "sha256": "8954130b24317bd6c819c9ed36a50246c8794c9353ff9378af3f45e17b94ce60",
+          "size_bytes": 7101
+        }
+      ]
+    }
+  }
+}

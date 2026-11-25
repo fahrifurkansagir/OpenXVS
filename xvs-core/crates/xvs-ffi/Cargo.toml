@@ -1,0 +1,14 @@
+[package]
+name = "xvs-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenXVS v2.0 C-ABI cdylib/staticlib exposing xvs-rta-core and xvs-math-core for Python ctypes and C/C++ flight software"
+
+[lib]
+name = "xvs_core"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+xvs-rta-core = { path = "../xvs-rta-core", version = "0.1.0" }
+xvs-math-core = { path = "../xvs-math-core", version = "0.1.0" }

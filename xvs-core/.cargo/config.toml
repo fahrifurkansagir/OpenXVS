@@ -1,0 +1,4 @@
+# Deterministic floating-point compilation flags (SP1_LIVEDECK_DESIGN.md §4.2).
+# Disable fused multiply-add (FMA) contraction on x86_64 so DetF64 matches IEEE-754 across hosts.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=-fma"]

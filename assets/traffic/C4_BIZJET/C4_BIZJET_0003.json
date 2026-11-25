@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "C4_BIZJET_0003",
+  "class": "C4_BIZJET",
+  "seed": 3,
+  "dimensions": {
+    "length_m": 16.657672882080078,
+    "span_m": 14.685193061828613,
+    "height_m": 5.398765563964844
+  },
+  "bbox_min": [
+    -8.328836441040039,
+    -7.342596530914307,
+    -2.6948485374450684
+  ],
+  "bbox_max": [
+    8.328836441040039,
+    7.342596530914307,
+    2.7039170265197754
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 690,
+  "alpha_trim_deg": 2.0,
+  "glb_sha256": "47ef57acc4d1d0f99a877c1f2b6a21cf7323a14448c05bd84452a1ce82b61be5",
+  "path": "assets/traffic/C4_BIZJET/C4_BIZJET_0003.glb"
+}

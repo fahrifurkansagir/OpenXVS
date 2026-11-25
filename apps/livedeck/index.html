@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenXVS v3.0 Observatory — ActiveRange &amp; Civil Aviation Suite</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #060a0f;
+        color: #d8f2e8;
+        font-family: "B612 Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      #livedeck-root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+      #livedeck-canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: grab;
+      }
+      #livedeck-canvas:active {
+        cursor: grabbing;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="livedeck-root">
+      <canvas id="livedeck-canvas"></canvas>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

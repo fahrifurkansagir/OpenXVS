@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "C5_TRANSPORT_0003",
+  "class": "C5_TRANSPORT",
+  "seed": 3,
+  "dimensions": {
+    "length_m": 32.368106842041016,
+    "span_m": 28.68519401550293,
+    "height_m": 12.097375869750977
+  },
+  "bbox_min": [
+    -16.184053421020508,
+    -14.342597007751465,
+    -6.048687934875488
+  ],
+  "bbox_max": [
+    16.184053421020508,
+    14.342597007751465,
+    6.048687934875488
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 690,
+  "alpha_trim_deg": 2.0,
+  "glb_sha256": "f0aef0ebce4171a1f3e2eedd6b6c473bcab3f5567645d4672abdf4dbbf0880e7",
+  "path": "assets/traffic/C5_TRANSPORT/C5_TRANSPORT_0003.glb"
+}

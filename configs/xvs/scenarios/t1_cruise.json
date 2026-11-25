@@ -1,0 +1,14 @@
+{
+  "schema": "xvs.scenario/1",
+  "scenario_id": "T1_cruise_v1",
+  "trajectory_type": "t1_cruise",
+  "description": "Level cruise at 3000 m over California Central Valley, ground track 315 deg, speed 120 m/s, oscillating attitude",
+  "start_utc": "2026-06-21T19:00:00Z",
+  "duration_s": 60.0,
+  "default_rate_hz": 2,
+  "start_lat_deg": 37.050000,
+  "start_lon_deg": -120.850000,
+  "start_h_m": 3000.0,
+  "ground_track_deg": 315.0,
+  "ground_speed_mps": 120.0
+}

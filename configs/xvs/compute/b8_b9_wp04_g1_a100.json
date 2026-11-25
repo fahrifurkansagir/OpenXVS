@@ -1,0 +1,97 @@
+{
+  "schema": "xvs.compute_job_spec/1",
+  "job_id": "b8_b9_wp04_g1_a100",
+  "batch_ids": [
+    "B8",
+    "B9"
+  ],
+  "work_package": "WP-04",
+  "gate": "G1",
+  "gpu": "A100",
+  "cu_cap": 60,
+  "max_hours": 8.0,
+  "pilot_max_hours": 0.5,
+  "checkpoint_interval_minutes": 30,
+  "local_scratch_root": "/content",
+  "drive_sync_root": "/content/drive/MyDrive/xvs_runs/b8_b9_wp04_g1",
+  "full_train_val_pack": "output/xvs/wp04/g1/packs_full/g1_train_val_pack_full.tar.zst",
+  "full_test_eval_pack": "output/xvs/wp04/g1/packs_full/g1_test_eval_pack_full.tar.zst",
+  "aot_s3_bucket": "s3://airborne-obj-detection-challenge-training",
+  "aot_https_base": "https://airborne-obj-detection-challenge-training.s3.amazonaws.com",
+  "aot_ephemeral_scratch_dir": "/content/aot",
+  "aot_valid_encounters_key": "part1/ImageSets/valid_encounters_maxRange700_maxGap3_minEncLen30.csv",
+  "aot_groundtruth_key": "part1/ImageSets/groundtruth.csv",
+  "aot_images_prefix": "part1/Images",
+  "aot_selection_seed": 20261109,
+  "aot_stratified_above_count": 6,
+  "aot_stratified_below_count": 6,
+  "aot_frame_step_10hz": 10,
+  "aot_max_frames_per_encounter": 12,
+  "aot_target_free_stacks_per_flight": 1,
+  "aot_priority_flight_ids": [
+    "0001ba865c8e410e88609541b8f55ffc",
+    "0011f3f114a741b5b02326c9e96e597a",
+    "0036dcc16c474b1abaf14d1735a7e1cf",
+    "006345553ed64e77a52d94035e1e747a",
+    "0071600242424070b5e0c8cb237192db",
+    "0075dbdd030f49ae9572cbe397d53971"
+  ],
+  "ablations": [
+    {
+      "key": "d1_sf_no_synth",
+      "model": "d1_sf",
+      "k_frames": 1,
+      "ablation_mode": "standard",
+      "use_synthesis": false,
+      "checkpoint_name": "d1_sf_no_synth.pt"
+    },
+    {
+      "key": "d1_sf_synth",
+      "model": "d1_sf",
+      "k_frames": 1,
+      "ablation_mode": "standard",
+      "use_synthesis": true,
+      "checkpoint_name": "d1_sf_synth.pt"
+    },
+    {
+      "key": "d1_kf_k3_synth",
+      "model": "d1_kf",
+      "k_frames": 3,
+      "ablation_mode": "standard",
+      "use_synthesis": true,
+      "checkpoint_name": "d1_kf_k3_synth.pt"
+    },
+    {
+      "key": "d1_kf_k5_synth",
+      "model": "d1_kf",
+      "k_frames": 5,
+      "ablation_mode": "standard",
+      "use_synthesis": true,
+      "checkpoint_name": "d1_kf_k5_synth.pt"
+    },
+    {
+      "key": "d1_kf_k3_oracle",
+      "model": "d1_kf",
+      "k_frames": 3,
+      "ablation_mode": "oracle",
+      "use_synthesis": true,
+      "checkpoint_name": "d1_kf_k3_oracle.pt"
+    }
+  ],
+  "output_manifest": [
+    "output/xvs/wp04/g1/packs_full/pack_manifest.json",
+    "output/xvs/wp04/g1/packs_full/test_pack_manifest.json",
+    "output/xvs/wp04/g1/checkpoints/d1_sf_no_synth.pt",
+    "output/xvs/wp04/g1/checkpoints/d1_sf_synth.pt",
+    "output/xvs/wp04/g1/checkpoints/d1_kf_k3_synth.pt",
+    "output/xvs/wp04/g1/checkpoints/d1_kf_k5_synth.pt",
+    "output/xvs/wp04/g1/checkpoints/d1_kf_k3_oracle.pt",
+    "output/xvs/wp04/g1/checkpoints/run_manifest.json",
+    "output/xvs/wp04/g1/eval_results.json",
+    "output/xvs/wp04/g1/aot_b9_results.json",
+    "output/xvs/wp04/g1/colab_run_manifest.json",
+    "configs/xvs/tracking/g1_measured_d1.json",
+    "docs/xvs/reports/WP04_G1_report.md",
+    "docs/xvs/reports/WP04_G1_report.md.provenance.json"
+  ]
+}

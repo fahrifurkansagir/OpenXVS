@@ -1,0 +1,168 @@
+{
+  "schema": "xvs.avionics.tier0_spec/2",
+  "batch_id": "B10",
+  "standards": {
+    "gdl90_icd_revision": "FAA GDL-90 Public ICD Rev A (2007)",
+    "mavlink_version": "MAVLink v2.0 common.xml ADSB_VEHICLE (#246)",
+    "daa_mops_ref": "RTCA DO-365B / DO-260B / ASTM F3442-23"
+  },
+  "gdl90_protocol": {
+    "flag_byte": 126,
+    "control_escape_byte": 125,
+    "stuff_xor_mask": 32,
+    "crc_poly": 4129,
+    "crc_init": 0,
+    "msg_id_heartbeat": 0,
+    "msg_id_ownship_report": 10,
+    "msg_id_ownship_geo_alt": 11,
+    "msg_id_traffic_report": 20,
+    "heartbeat_payload_bytes": 7,
+    "target_report_payload_bytes": 28,
+    "ownship_geo_alt_payload_bytes": 5,
+    "semicircle_scale_num": 8388608,
+    "semicircle_scale_den_deg": 180.0,
+    "altitude_offset_ft": 1000.0,
+    "altitude_step_ft": 25.0,
+    "altitude_min_ft": -1000.0,
+    "altitude_max_ft": 101350.0,
+    "altitude_invalid_code": 4095,
+    "geo_alt_step_ft": 5.0,
+    "vert_rate_step_fpm": 64.0,
+    "max_horiz_vel_kt": 4094,
+    "horiz_vel_invalid_code": 4095,
+    "track_heading_bins": 256,
+    "callsign_length_chars": 8,
+    "default_udp_port": 4000,
+    "heartbeat_rate_hz": 1.0,
+    "ownship_rate_hz": 10.0,
+    "traffic_rate_hz": 10.0,
+    "icd_heartbeat_test_vector_hex": "008141dbd00802",
+    "icd_heartbeat_expected_crc_u16": 35763,
+    "icd_heartbeat_expected_crc_wire_hex": "b38b",
+    "icd_heartbeat_framed_hex": "7e008141dbd00802b38b7e"
+  },
+  "mavlink_adsb_protocol": {
+    "stx_v2": 253,
+    "header_bytes": 10,
+    "payload_bytes": 38,
+    "crc_bytes": 2,
+    "frame_total_bytes": 50,
+    "msg_id_adsb_vehicle": 246,
+    "crc_extra": 184,
+    "crc_init": 65535,
+    "default_sysid": 1,
+    "default_compid": 156,
+    "default_udp_port": 14550,
+    "stream_rate_hz": 10.0,
+    "callsign_field_bytes": 9,
+    "squawk_nominal": 1200,
+    "squawk_alert": 7700,
+    "altitude_type_pressure_qnh": 0,
+    "altitude_type_geometric_gnss": 1,
+    "flags_mask_default": 127
+  },
+  "integrity_gating": {
+    "degraded_coast_max_nic": 4,
+    "degraded_coast_max_nacp": 4,
+    "invalid_alert_nic": 0,
+    "invalid_alert_nacp": 0
+  },
+  "nic_nacp_range_uncertainty_tiers": [
+    {
+      "max_range_span_m": 75.0,
+      "nic": 9,
+      "nacp": 9
+    },
+    {
+      "max_range_span_m": 185.2,
+      "nic": 8,
+      "nacp": 8
+    },
+    {
+      "max_range_span_m": 370.4,
+      "nic": 7,
+      "nacp": 7
+    },
+    {
+      "max_range_span_m": 1111.2,
+      "nic": 6,
+      "nacp": 6
+    },
+    {
+      "max_range_span_m": 1852.0,
+      "nic": 5,
+      "nacp": 5
+    },
+    {
+      "max_range_span_m": 3704.0,
+      "nic": 4,
+      "nacp": 4
+    },
+    {
+      "max_range_span_m": 7408.0,
+      "nic": 3,
+      "nacp": 3
+    },
+    {
+      "max_range_span_m": 14816.0,
+      "nic": 2,
+      "nacp": 2
+    },
+    {
+      "max_range_span_m": 37040.0,
+      "nic": 1,
+      "nacp": 1
+    }
+  ],
+  "emitter_category_map": {
+    "C1_UAS": 14,
+    "C2_SEP": 1,
+    "C3_TWIN": 2,
+    "C4_BIZJET": 3,
+    "C5_TRANSPORT": 5,
+    "C6_HELI": 7,
+    "UNKNOWN": 0
+  },
+  "ownship_reference": {
+    "lat_deg": 37.6188056,
+    "lon_deg": -122.3754167,
+    "alt_msl_m": 1524.0,
+    "alt_geo_m": 1530.0,
+    "vn_mps": 95.0,
+    "ve_mps": 0.0,
+    "vd_mps": 0.0,
+    "heading_deg": 0.0,
+    "icao_address": 11259375,
+    "callsign": "XVSOWN01",
+    "vfom_m": 3.0
+  },
+  "replay_scenarios": {
+    "duration_s": 10.0,
+    "dt_s": 0.1,
+    "steps_per_scenario": 100,
+    "num_synthetic_scenarios": 4,
+    "wp05_sample_records_limit": 24,
+    "closed_loop_g1_steps": 30,
+    "baseline_lambda": 0.0005
+  },
+  "acceptance_limits": {
+    "required_roundtrip_decode_pct": 100.0,
+    "required_alert_parity_pct": 100.0,
+    "max_dropped_packets": 0,
+    "max_corrupted_packets": 0,
+    "max_mean_loopback_latency_ms": 5.0,
+    "max_p99_loopback_latency_ms": 25.0,
+    "lat_lon_semicircle_tol_deg": 0.000043,
+    "alt_encoding_tol_ft": 12.5,
+    "geo_alt_encoding_tol_ft": 2.5,
+    "mavlink_lat_lon_tol_deg": 0.0000001,
+    "mavlink_alt_tol_mm": 1.0,
+    "max_truth_isolation_violations": 0
+  },
+  "commands_run": [
+    "$env:PYTHONPATH='src'\n$env:XVS_DATA_ROOT='<repo>\\output'",
+    "# 1. Run single-process Tier-0 bridge verification, WP-05 G1 WC1 closed-loop replay & UDP loopback\n& .venv\\Scripts\\python.exe scripts/xvs/avionics/run_tier0_bridge.py --data-root=\"<repo>\\output\"",
+    "# 2. Run Tier-0 avionics (V1_B10..V8_B10) and provenance unit test suites\n& .venv\\Scripts\\python.exe -m pytest tests/xvs/test_avionics_tier0.py tests/xvs/test_report_provenance.py -v -p no:cacheprovider",
+    "# 3. Generate Batch B10 Tier-0 report and provenance JSON\n& .venv\\Scripts\\python.exe scripts/xvs/avionics/report_tables_tier0_b10.py --data-root=\"<repo>\\output\""
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema": "xvs.scenario/1",
+  "scenario_id": "T3_turn_climb_v1",
+  "trajectory_type": "t3_turn_climb",
+  "description": "Coordinated 25 deg right turn with 5 m/s climb at 100 m/s airspeed from 1500 m",
+  "start_utc": "2026-06-21T19:00:00Z",
+  "duration_s": 60.0,
+  "default_rate_hz": 2,
+  "start_lat_deg": 37.250000,
+  "start_lon_deg": -120.900000,
+  "start_h_m": 1500.0,
+  "airspeed_mps": 100.0,
+  "climb_rate_mps": 5.0,
+  "bank_deg": 25.0
+}

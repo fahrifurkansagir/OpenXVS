@@ -1,0 +1,9 @@
+{
+  "schema": "xvs.encounter_sampler/1",
+  "sampler_version": "1.0",
+  "master_seed": 20260923,
+  "total_encounters": 900,
+  "count_per_stratum": 10,
+  "ownship_scenario": "t1_cruise",
+  "encounters_sha256": "d1ae4add34cf0fdc9a45e0663fc347b1e80fd26ae1b3f433b0a3c8e5d8c91a9b"
+}

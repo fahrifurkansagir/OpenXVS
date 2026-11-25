@@ -1,0 +1,54 @@
+{
+  "job_id": "b8_b9_wp04_g1_r3",
+  "batch": "B8",
+  "agent": "argon",
+  "account": "A",
+  "route": "R3",
+  "repo": "<OPENXVS_WORKSPACE>",
+  "commit": "5720ae065d525a308ca12b046f2744e57271a489",
+  "entry": {
+    "script": "scripts/xvs/detection/run_colab_b8_b9_pipeline.py",
+    "args": [
+      "--config",
+      "configs/xvs/compute/b8_b9_wp04_g1_a100.json",
+      "--packs-dir",
+      "output/xvs/wp04/g1/packs_full",
+      "--aot-dir",
+      "/content/aot",
+      "--device",
+      "cuda",
+      "--tile-batch-size",
+      "64",
+      "--epochs",
+      "40"
+    ]
+  },
+  "runtime": {
+    "type": "A100",
+    "high_mem": true
+  },
+  "max_hours": 8.0,
+  "cu_cap": 60,
+  "batch_cu_cap": 60,
+  "director_listing": "docs/xvs/batches/BATCH_B8_ARGON.md",
+  "data": [
+    {
+      "dataset": "g1_train_val_pack_full",
+      "version": "full_180",
+      "manifest_sha256": "4b580d7f5c64e53b7575e8805547cd91cfd9f39ed12f47ad1e8a95e58f6f656e"
+    },
+    {
+      "dataset": "g1_test_eval_pack_full",
+      "version": "full_180",
+      "manifest_sha256": "842a99381d5fdcc7a6992ace15922ae16ecb59e3b57895004fc5c1887eabcb40"
+    }
+  ],
+  "seeds": {
+    "splits": 20260926,
+    "train": 20261107,
+    "aot_stratified": 20261109
+  },
+  "checkpoint_minutes": 30,
+  "storage": "transfer",
+  "output": "output/xvs/wp04/g1"
+}

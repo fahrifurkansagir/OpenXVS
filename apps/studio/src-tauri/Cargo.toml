@@ -1,0 +1,42 @@
+[workspace]
+
+[package]
+name = "openxvs-studio"
+version = "5.0.0"
+description = "OpenXVS Studio v5.0 — Real-World Autonomy Simulator & AI Proof Bench (Tauri v2, Pure-Rust ORT, MultiShipCoord, NON_FLIGHT_SIM_ONLY)"
+authors = ["OpenXVS Contributors"]
+license = "Apache-2.0 OR MIT"
+edition = "2021"
+rust-version = "1.92"
+
+[lib]
+name = "openxvs_studio_lib"
+path = "src/lib.rs"
+
+[features]
+default = ["non_flight_sim_only"]
+non_flight_sim_only = []
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+strip = true
+debug = 0
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-24"] }
+xvs-active-range = { path = "../../../xvs-active-range", features = ["std"] }
+xvs-math-core = { path = "../../../xvs-core/crates/xvs-math-core" }
+xvs-rta-core = { path = "../../../xvs-core/crates/xvs-rta-core" }
+xvs-multiship-coord = { path = "../../../xvs-multiship-coord" }
+sha2 = "0.10"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

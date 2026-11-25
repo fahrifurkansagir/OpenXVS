@@ -1,0 +1,66 @@
+{
+  "far_0.01": {
+    "far_target": 0.01,
+    "max_rms_residual_urad": 3549.968860630658,
+    "max_condition_number": 3.904285535945939,
+    "min_inlier_fraction": 0.5076315789473684,
+    "min_inlier_count": 96,
+    "max_leave_one_out_deg": 0.4593229383558529,
+    "by_cam_set": {
+      "F": {
+        "max_rms_residual_urad": 689.2814660850175,
+        "max_condition_number": 20.821668248929466,
+        "min_inlier_fraction": 0.6885526315789473,
+        "min_inlier_count": 78,
+        "max_leave_one_out_deg": null,
+        "max_leave_one_out_deg_reason": "Single-camera set F (c=1): leave-one-camera-out consistency requires c>=2 (D27)"
+      },
+      "FRBL": {
+        "max_rms_residual_urad": 3864.303827267624,
+        "max_condition_number": 1.3487323846041501,
+        "min_inlier_fraction": 0.7719298245614035,
+        "min_inlier_count": 352,
+        "max_leave_one_out_deg": 0.4556775900021588
+      },
+      "all": {
+        "max_rms_residual_urad": 3658.0365472548615,
+        "max_condition_number": 1.5368354217237583,
+        "min_inlier_fraction": 0.4376081871345029,
+        "min_inlier_count": 299,
+        "max_leave_one_out_deg": 0.462596883350637
+      }
+    }
+  },
+  "far_0.001": {
+    "far_target": 0.001,
+    "max_rms_residual_urad": 4230.838291873115,
+    "max_condition_number": 23.18761003715796,
+    "min_inlier_fraction": 0.35182222222222226,
+    "min_inlier_count": 69,
+    "max_leave_one_out_deg": 0.5140548084031082,
+    "by_cam_set": {
+      "F": {
+        "max_rms_residual_urad": 790.8035741764404,
+        "max_condition_number": 25.56263870847,
+        "min_inlier_fraction": 0.5710438596491229,
+        "min_inlier_count": 65,
+        "max_leave_one_out_deg": null,
+        "max_leave_one_out_deg_reason": "Single-camera set F (c=1): leave-one-camera-out consistency requires c>=2 (D27)"
+      },
+      "FRBL": {
+        "max_rms_residual_urad": 4267.65009337627,
+        "max_condition_number": 1.4845346203291436,
+        "min_inlier_fraction": 0.5021929824561403,
+        "min_inlier_count": 229,
+        "max_leave_one_out_deg": 0.5296600052539894
+      },
+      "all": {
+        "max_rms_residual_urad": 4185.590011148803,
+        "max_condition_number": 1.7028084253080051,
+        "min_inlier_fraction": 0.3342342105263158,
+        "min_inlier_count": 228,
+        "max_leave_one_out_deg": 0.5072513060659759
+      }
+    }
+  }
+}

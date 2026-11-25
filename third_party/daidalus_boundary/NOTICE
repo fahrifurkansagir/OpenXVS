@@ -1,0 +1,25 @@
+================================================================================
+OpenXVS v2.0 — Isolated NASA DAIDALUS v2.0.4 (NOSA 1.3) C-ABI Boundary Notice
+================================================================================
+
+1. License Isolation Rule (SP3_M3_XVS_RT_BENCH_DESIGN.md §3.1 / BC-M3-m4):
+   - Upstream NASA DAIDALUS v2.0.4 (Detect and Avoid Alerting Logic for
+     Unmanned Systems, https://github.com/nasa/daidalus) is licensed under the
+     NASA Open Source Agreement v1.3 (NOSA 1.3), which is NOT Apache-2.0.
+   - To preserve strict OSI license cleanliness in the core OpenXVS Apache-2.0
+     codebase (`xvs-core/`, `xvs-rt/`, `src/xvs/`), any upstream NASA DAIDALUS
+     source archive MUST remain unmodified inside this isolated third-party
+     subdirectory and MUST be linked strictly across the pure C11 POD ABI
+     defined in `xvs_daidalus_bridge.h` (`extern "C"`, zero STL across ABI).
+
+2. Current Commit Provenance (`BC-M3-m4` Transparency):
+   - ZERO upstream NASA NOSA source files are bundled in this commit.
+   - `xvs_daidalus_bridge.h` and `xvs_daidalus_bridge.cpp` are 100% OpenXVS-
+     authored (Apache-2.0) boundary adapter code implementing the RTCA DO-365A
+     Well-Clear / TAUMOD / HMD / ZTHR conflict-band boundary emulator
+     (`adapter_mode: "STANDALONE_DO365_BOUNDARY_EMULATOR_READY_FOR_UPSTREAM_NOSA"`)
+     and the sole authorized `NED <-> ENU` coordinate translation unit.
+   - When an unmodified upstream NASA DAIDALUS v2.0.4 archive is dropped into
+     `third_party/daidalus_boundary/upstream/` and compiled with
+     `-DXVS_USE_UPSTREAM_NASA_DAIDALUS`, `xvs_daidalus_bridge.cpp` delegates
+     directly to `larcfm::Daidalus` without changing a single byte of `xvs-rt/`.

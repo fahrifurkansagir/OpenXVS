@@ -1,0 +1,2 @@
+# Prevent CRLF conversion on reference data files to preserve LF SHA-256 integrity (F-B5-7)
+data/reference/** -text

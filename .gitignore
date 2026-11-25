@@ -1,0 +1,53 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Build & C++ artifacts
+build/
+bin/
+!xvs-active-range/src/bin/
+out/
+*.exe
+*.obj
+*.o
+*.lib
+*.a
+*.pdb
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Output & Generated Data
+data/raw/
+data/simulated/
+output/
+data/cache/
+sim/cesium/node_modules/
+xvs-core/target/
+apps/livedeck/node_modules/
+apps/livedeck/dist/
+outputs/
+data/aot_real_proof/
+data/studio_media/
+xvs-active-range/target/
+xvs-odd-vlm/target/
+xvs-os-hal/target/
+data/field_videos/*.mp4
+data/field_videos/*.webm
+data/field_videos/*.mov
+data/field_videos/*.mkv
+data/field_videos/*.avi
+onnxruntime_profile_*.json
+.agents/

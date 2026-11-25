@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "CAL",
+  "class": "CALIBRATION",
+  "seed": 0,
+  "dimensions": {
+    "length_m": 11.535640716552734,
+    "span_m": 13.5,
+    "height_m": 5.0
+  },
+  "bbox_min": [
+    -5.785640716552734,
+    -6.75,
+    -3.25
+  ],
+  "bbox_max": [
+    5.75,
+    6.75,
+    1.75
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 31282,
+  "alpha_trim_deg": 0.0,
+  "glb_sha256": "8d13b520a04e664a4f709f9ce69fa3ff824f67c3756db780cbe7e2b8490d403f",
+  "path": "assets/traffic/CALIBRATION/CAL.glb"
+}

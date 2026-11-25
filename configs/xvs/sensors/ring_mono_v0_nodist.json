@@ -1,0 +1,115 @@
+{
+  "schema": "xvs.sensor/1",
+  "name": "ring_mono_v0_nodist",
+  "description": "Sensor and optical parameters for traffic ring cameras (monochrome v0, geometry-neutral nodist).",
+  "parameters": {
+    "image_width": {
+      "value": 2448,
+      "provenance": "spec:traffic_ring_v1.json"
+    },
+    "image_height": {
+      "value": 2048,
+      "provenance": "spec:traffic_ring_v1.json"
+    },
+    "fx": {
+      "value": 2319.0,
+      "provenance": "spec:traffic_ring_v1.json"
+    },
+    "fy": {
+      "value": 2319.0,
+      "provenance": "spec:traffic_ring_v1.json"
+    },
+    "cx": {
+      "value": 1223.5,
+      "provenance": "spec:traffic_ring_v1.json"
+    },
+    "cy": {
+      "value": 1023.5,
+      "provenance": "spec:traffic_ring_v1.json"
+    },
+    "pixel_pitch_m": {
+      "value": 3.45e-6,
+      "provenance": "spec:traffic_ring_v1.json"
+    },
+    "f_number": {
+      "value": 2.8,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "wavelength_m": {
+      "value": 550e-9,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "sigma_px": {
+      "value": 0.30,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "k1": {
+      "value": 0.0,
+      "provenance": "WP-04 G0: geometry-neutral"
+    },
+    "k2": {
+      "value": 0.0,
+      "provenance": "WP-04 G0: geometry-neutral"
+    },
+    "k3": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "p1": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "p2": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "v1": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "v2": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "full_well_e": {
+      "value": 10500.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "sigma_r_e": {
+      "value": 2.4,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "dark_current_e_per_s": {
+      "value": 5.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "exposure_time_s": {
+      "value": 0.001,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "prnu_rms": {
+      "value": 0.005,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "dsnu_rms_e": {
+      "value": 1.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "k_dn_per_e": {
+      "value": 0.35,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "bits": {
+      "value": 12,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "black_level_dn": {
+      "value": 64.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "ae_target": {
+      "value": 0.6,
+      "provenance": "UNMEASURED ESTIMATE"
+    }
+  }
+}

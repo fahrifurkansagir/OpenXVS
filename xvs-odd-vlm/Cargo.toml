@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "xvs-odd-vlm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "OpenXVS no_std zero-unsafe DR-13 5-Mode Optical-ODD MLTL Monitor & DR-09 6-Stage VLM Verification Gate with Kani formal proofs"
+publish = false
+
+[lib]
+name = "xvs_odd_vlm"
+path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[dependencies]

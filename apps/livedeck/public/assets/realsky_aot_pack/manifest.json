@@ -1,0 +1,1141 @@
+{
+  "schema_version": "realsky_aot_pack_v1",
+  "focal_px": 2690.0,
+  "q_hat_conformal": 0.955006,
+  "encounters": [
+    {
+      "encounter_id": "808.0",
+      "fps": 10.0,
+      "aircraft_class": "Helicopter",
+      "frames": [
+        {
+          "file": "enc0_f000.jpg",
+          "frame_idx": 0,
+          "crop_x": 1687,
+          "crop_y": 993,
+          "gt_box_crop": [
+            104.4,
+            109.4,
+            152.43,
+            147.04
+          ],
+          "range_distance_m": 185.21,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f001.jpg",
+          "frame_idx": 1,
+          "crop_x": 1687,
+          "crop_y": 993,
+          "gt_box_crop": [
+            129.53,
+            119.9,
+            177.3,
+            157.59
+          ],
+          "range_distance_m": 187.88,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f002.jpg",
+          "frame_idx": 2,
+          "crop_x": 1687,
+          "crop_y": 993,
+          "gt_box_crop": [
+            147.63,
+            128.67,
+            192.78,
+            166.18
+          ],
+          "range_distance_m": 190.59,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f003.jpg",
+          "frame_idx": 3,
+          "crop_x": 1708,
+          "crop_y": 993,
+          "gt_box_crop": [
+            146.65,
+            137.53,
+            189.36,
+            172.4
+          ],
+          "range_distance_m": 193.35,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f004.jpg",
+          "frame_idx": 4,
+          "crop_x": 1729,
+          "crop_y": 993,
+          "gt_box_crop": [
+            145.82,
+            155.53,
+            188.1,
+            190.9
+          ],
+          "range_distance_m": 196.12,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f005.jpg",
+          "frame_idx": 5,
+          "crop_x": 1729,
+          "crop_y": 993,
+          "gt_box_crop": [
+            161.44,
+            163.43,
+            203.37,
+            198.94
+          ],
+          "range_distance_m": 198.91,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f006.jpg",
+          "frame_idx": 6,
+          "crop_x": 1754,
+          "crop_y": 1014,
+          "gt_box_crop": [
+            152.53,
+            148.79,
+            194.24,
+            184.48
+          ],
+          "range_distance_m": 201.71,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f007.jpg",
+          "frame_idx": 7,
+          "crop_x": 1774,
+          "crop_y": 1014,
+          "gt_box_crop": [
+            145.28,
+            161.93,
+            186.66,
+            197.53
+          ],
+          "range_distance_m": 204.55,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f008.jpg",
+          "frame_idx": 8,
+          "crop_x": 1774,
+          "crop_y": 1014,
+          "gt_box_crop": [
+            154.88,
+            164.13,
+            195.99,
+            199.74
+          ],
+          "range_distance_m": 207.35,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f009.jpg",
+          "frame_idx": 9,
+          "crop_x": 1794,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            143.54,
+            147.92,
+            184.5,
+            183.71
+          ],
+          "range_distance_m": 210.21,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f010.jpg",
+          "frame_idx": 10,
+          "crop_x": 1794,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            150.33,
+            153.26,
+            190.96,
+            189.01
+          ],
+          "range_distance_m": 213.08,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f011.jpg",
+          "frame_idx": 11,
+          "crop_x": 1794,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            158.62,
+            150.61,
+            199.1,
+            186.5
+          ],
+          "range_distance_m": 215.97,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f012.jpg",
+          "frame_idx": 12,
+          "crop_x": 1816,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            150.71,
+            155.33,
+            184.38,
+            189.5
+          ],
+          "range_distance_m": 218.88,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f013.jpg",
+          "frame_idx": 13,
+          "crop_x": 1816,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            159.17,
+            153.52,
+            192.64,
+            187.82
+          ],
+          "range_distance_m": 221.78,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f014.jpg",
+          "frame_idx": 14,
+          "crop_x": 1837,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            149.54,
+            147.33,
+            182.8,
+            181.75
+          ],
+          "range_distance_m": 224.7,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f015.jpg",
+          "frame_idx": 15,
+          "crop_x": 1837,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            159.11,
+            145.82,
+            192.13,
+            180.28
+          ],
+          "range_distance_m": 227.65,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f016.jpg",
+          "frame_idx": 16,
+          "crop_x": 1858,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            150.57,
+            137.42,
+            183.63,
+            171.74
+          ],
+          "range_distance_m": 230.59,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f017.jpg",
+          "frame_idx": 17,
+          "crop_x": 1878,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            149.92,
+            131.53,
+            182.92,
+            165.83
+          ],
+          "range_distance_m": 233.55,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f018.jpg",
+          "frame_idx": 18,
+          "crop_x": 1898,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            149.22,
+            128.13,
+            181.91,
+            162.35
+          ],
+          "range_distance_m": 236.55,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f019.jpg",
+          "frame_idx": 19,
+          "crop_x": 1919,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            151.73,
+            120.15,
+            181.85,
+            151.36
+          ],
+          "range_distance_m": 239.53,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f020.jpg",
+          "frame_idx": 20,
+          "crop_x": 1940,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            153.3,
+            118.85,
+            183.37,
+            150.26
+          ],
+          "range_distance_m": 242.54,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f021.jpg",
+          "frame_idx": 21,
+          "crop_x": 1960,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            151.18,
+            119.79,
+            181.11,
+            151.2
+          ],
+          "range_distance_m": 245.55,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f022.jpg",
+          "frame_idx": 22,
+          "crop_x": 1981,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            151.01,
+            115.34,
+            180.85,
+            146.82
+          ],
+          "range_distance_m": 248.59,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f023.jpg",
+          "frame_idx": 23,
+          "crop_x": 2003,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            153.66,
+            123.67,
+            181.46,
+            151.98
+          ],
+          "range_distance_m": 251.61,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f024.jpg",
+          "frame_idx": 24,
+          "crop_x": 2024,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            151.73,
+            125.63,
+            179.53,
+            154.11
+          ],
+          "range_distance_m": 254.66,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f025.jpg",
+          "frame_idx": 25,
+          "crop_x": 2024,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            167.41,
+            125.26,
+            195.14,
+            153.77
+          ],
+          "range_distance_m": 257.7,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f026.jpg",
+          "frame_idx": 26,
+          "crop_x": 2047,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            157.21,
+            134.46,
+            184.83,
+            163.23
+          ],
+          "range_distance_m": 260.75,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f027.jpg",
+          "frame_idx": 27,
+          "crop_x": 2047,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            166.71,
+            135.96,
+            194.23,
+            164.71
+          ],
+          "range_distance_m": 263.82,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f028.jpg",
+          "frame_idx": 28,
+          "crop_x": 2069,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            155.56,
+            135.19,
+            183.06,
+            164.15
+          ],
+          "range_distance_m": 266.89,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f029.jpg",
+          "frame_idx": 29,
+          "crop_x": 2069,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            166.99,
+            141.27,
+            194.53,
+            170.64
+          ],
+          "range_distance_m": 269.98,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f030.jpg",
+          "frame_idx": 30,
+          "crop_x": 2091,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            157.62,
+            139.75,
+            181.74,
+            164.37
+          ],
+          "range_distance_m": 273.08,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f031.jpg",
+          "frame_idx": 31,
+          "crop_x": 2091,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            167.83,
+            137.27,
+            192.09,
+            162.11
+          ],
+          "range_distance_m": 276.17,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f032.jpg",
+          "frame_idx": 32,
+          "crop_x": 2113,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            155.87,
+            137.69,
+            180.22,
+            162.78
+          ],
+          "range_distance_m": 279.27,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f033.jpg",
+          "frame_idx": 33,
+          "crop_x": 2113,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            169.41,
+            130.19,
+            193.73,
+            155.39
+          ],
+          "range_distance_m": 282.38,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f034.jpg",
+          "frame_idx": 34,
+          "crop_x": 2138,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            160.95,
+            126.22,
+            185.32,
+            151.47
+          ],
+          "range_distance_m": 285.5,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f035.jpg",
+          "frame_idx": 35,
+          "crop_x": 2162,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            159.64,
+            121.07,
+            184.0,
+            146.37
+          ],
+          "range_distance_m": 288.65,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f036.jpg",
+          "frame_idx": 36,
+          "crop_x": 2186,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            161.58,
+            114.85,
+            185.93,
+            140.2
+          ],
+          "range_distance_m": 291.77,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f037.jpg",
+          "frame_idx": 37,
+          "crop_x": 2192,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            180.23,
+            110.52,
+            204.62,
+            135.92
+          ],
+          "range_distance_m": 294.91,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f038.jpg",
+          "frame_idx": 38,
+          "crop_x": 2192,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            207.02,
+            101.76,
+            231.46,
+            127.29
+          ],
+          "range_distance_m": 298.05,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc0_f039.jpg",
+          "frame_idx": 39,
+          "crop_x": 2192,
+          "crop_y": 1034,
+          "gt_box_crop": [
+            234.4,
+            98.8,
+            253.2,
+            120.8
+          ],
+          "range_distance_m": 301.23,
+          "is_above_horizon": true
+        }
+      ]
+    },
+    {
+      "encounter_id": "539.0",
+      "fps": 10.0,
+      "aircraft_class": "Helicopter",
+      "frames": [
+        {
+          "file": "enc1_f000.jpg",
+          "frame_idx": 0,
+          "crop_x": 1406,
+          "crop_y": 806,
+          "gt_box_crop": [
+            112.4,
+            118.8,
+            143.88,
+            138.0
+          ],
+          "range_distance_m": 308.02,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f001.jpg",
+          "frame_idx": 1,
+          "crop_x": 1406,
+          "crop_y": 806,
+          "gt_box_crop": [
+            128.2,
+            116.4,
+            160.44,
+            136.2
+          ],
+          "range_distance_m": 302.82,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f002.jpg",
+          "frame_idx": 2,
+          "crop_x": 1406,
+          "crop_y": 806,
+          "gt_box_crop": [
+            141.4,
+            113.8,
+            174.4,
+            134.0
+          ],
+          "range_distance_m": 297.5,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f003.jpg",
+          "frame_idx": 3,
+          "crop_x": 1406,
+          "crop_y": 806,
+          "gt_box_crop": [
+            157.2,
+            105.2,
+            190.6,
+            126.6
+          ],
+          "range_distance_m": 292.33,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f004.jpg",
+          "frame_idx": 4,
+          "crop_x": 1427,
+          "crop_y": 806,
+          "gt_box_crop": [
+            148.4,
+            104.0,
+            182.8,
+            125.6
+          ],
+          "range_distance_m": 287.15,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f005.jpg",
+          "frame_idx": 5,
+          "crop_x": 1427,
+          "crop_y": 806,
+          "gt_box_crop": [
+            160.2,
+            98.6,
+            195.8,
+            119.4
+          ],
+          "range_distance_m": 281.88,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f006.jpg",
+          "frame_idx": 6,
+          "crop_x": 1450,
+          "crop_y": 806,
+          "gt_box_crop": [
+            152.2,
+            89.0,
+            188.64,
+            111.8
+          ],
+          "range_distance_m": 276.8,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f007.jpg",
+          "frame_idx": 7,
+          "crop_x": 1450,
+          "crop_y": 806,
+          "gt_box_crop": [
+            163.6,
+            86.2,
+            200.4,
+            109.8
+          ],
+          "range_distance_m": 271.7,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f008.jpg",
+          "frame_idx": 8,
+          "crop_x": 1474,
+          "crop_y": 806,
+          "gt_box_crop": [
+            154.4,
+            77.2,
+            193.91,
+            102.07
+          ],
+          "range_distance_m": 266.54,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f009.jpg",
+          "frame_idx": 9,
+          "crop_x": 1494,
+          "crop_y": 806,
+          "gt_box_crop": [
+            145.6,
+            68.2,
+            185.36,
+            93.08
+          ],
+          "range_distance_m": 261.33,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f010.jpg",
+          "frame_idx": 10,
+          "crop_x": 1494,
+          "crop_y": 806,
+          "gt_box_crop": [
+            157.8,
+            63.6,
+            199.6,
+            88.6
+          ],
+          "range_distance_m": 256.27,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f011.jpg",
+          "frame_idx": 11,
+          "crop_x": 1516,
+          "crop_y": 784,
+          "gt_box_crop": [
+            148.8,
+            75.6,
+            191.2,
+            100.8
+          ],
+          "range_distance_m": 251.36,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f012.jpg",
+          "frame_idx": 12,
+          "crop_x": 1516,
+          "crop_y": 784,
+          "gt_box_crop": [
+            160.8,
+            68.8,
+            204.2,
+            93.8
+          ],
+          "range_distance_m": 246.15,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f013.jpg",
+          "frame_idx": 13,
+          "crop_x": 1543,
+          "crop_y": 784,
+          "gt_box_crop": [
+            154.2,
+            63.0,
+            199.6,
+            89.8
+          ],
+          "range_distance_m": 241.21,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f014.jpg",
+          "frame_idx": 14,
+          "crop_x": 1566,
+          "crop_y": 762,
+          "gt_box_crop": [
+            145.8,
+            73.4,
+            193.6,
+            100.2
+          ],
+          "range_distance_m": 236.06,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f015.jpg",
+          "frame_idx": 15,
+          "crop_x": 1590,
+          "crop_y": 762,
+          "gt_box_crop": [
+            147.4,
+            64.2,
+            196.4,
+            92.6
+          ],
+          "range_distance_m": 231.13,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f016.jpg",
+          "frame_idx": 16,
+          "crop_x": 1614,
+          "crop_y": 742,
+          "gt_box_crop": [
+            148.6,
+            76.0,
+            200.0,
+            105.0
+          ],
+          "range_distance_m": 226.21,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f017.jpg",
+          "frame_idx": 17,
+          "crop_x": 1639,
+          "crop_y": 742,
+          "gt_box_crop": [
+            149.4,
+            60.8,
+            201.6,
+            90.6
+          ],
+          "range_distance_m": 221.22,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f018.jpg",
+          "frame_idx": 18,
+          "crop_x": 1667,
+          "crop_y": 721,
+          "gt_box_crop": [
+            152.2,
+            73.2,
+            207.8,
+            104.0
+          ],
+          "range_distance_m": 216.34,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f019.jpg",
+          "frame_idx": 19,
+          "crop_x": 1695,
+          "crop_y": 721,
+          "gt_box_crop": [
+            150.2,
+            61.2,
+            207.2,
+            94.0
+          ],
+          "range_distance_m": 211.51,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f020.jpg",
+          "frame_idx": 20,
+          "crop_x": 1724,
+          "crop_y": 699,
+          "gt_box_crop": [
+            151.6,
+            70.4,
+            211.8,
+            102.0
+          ],
+          "range_distance_m": 206.71,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f021.jpg",
+          "frame_idx": 21,
+          "crop_x": 1752,
+          "crop_y": 699,
+          "gt_box_crop": [
+            148.8,
+            62.0,
+            209.8,
+            96.4
+          ],
+          "range_distance_m": 201.84,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f022.jpg",
+          "frame_idx": 22,
+          "crop_x": 1780,
+          "crop_y": 678,
+          "gt_box_crop": [
+            149.2,
+            72.4,
+            212.6,
+            106.2
+          ],
+          "range_distance_m": 197.12,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f023.jpg",
+          "frame_idx": 23,
+          "crop_x": 1807,
+          "crop_y": 678,
+          "gt_box_crop": [
+            145.0,
+            59.8,
+            209.2,
+            93.4
+          ],
+          "range_distance_m": 192.45,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f024.jpg",
+          "frame_idx": 24,
+          "crop_x": 1833,
+          "crop_y": 678,
+          "gt_box_crop": [
+            141.6,
+            55.0,
+            209.6,
+            89.2
+          ],
+          "range_distance_m": 187.76,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f025.jpg",
+          "frame_idx": 25,
+          "crop_x": 1858,
+          "crop_y": 654,
+          "gt_box_crop": [
+            138.2,
+            65.0,
+            209.6,
+            101.2
+          ],
+          "range_distance_m": 183.12,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f026.jpg",
+          "frame_idx": 26,
+          "crop_x": 1881,
+          "crop_y": 634,
+          "gt_box_crop": [
+            132.8,
+            71.0,
+            207.2,
+            111.0
+          ],
+          "range_distance_m": 178.47,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f027.jpg",
+          "frame_idx": 27,
+          "crop_x": 1903,
+          "crop_y": 634,
+          "gt_box_crop": [
+            130.2,
+            65.0,
+            207.8,
+            104.6
+          ],
+          "range_distance_m": 173.96,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f028.jpg",
+          "frame_idx": 28,
+          "crop_x": 1903,
+          "crop_y": 614,
+          "gt_box_crop": [
+            142.6,
+            69.0,
+            223.4,
+            110.4
+          ],
+          "range_distance_m": 169.54,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f029.jpg",
+          "frame_idx": 29,
+          "crop_x": 1929,
+          "crop_y": 614,
+          "gt_box_crop": [
+            133.8,
+            60.2,
+            216.0,
+            103.0
+          ],
+          "range_distance_m": 165.21,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f030.jpg",
+          "frame_idx": 30,
+          "crop_x": 1952,
+          "crop_y": 614,
+          "gt_box_crop": [
+            127.4,
+            52.2,
+            215.0,
+            96.4
+          ],
+          "range_distance_m": 160.8,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f031.jpg",
+          "frame_idx": 31,
+          "crop_x": 1975,
+          "crop_y": 590,
+          "gt_box_crop": [
+            125.8,
+            60.0,
+            218.0,
+            105.8
+          ],
+          "range_distance_m": 156.57,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f032.jpg",
+          "frame_idx": 32,
+          "crop_x": 2000,
+          "crop_y": 590,
+          "gt_box_crop": [
+            126.4,
+            55.2,
+            224.2,
+            100.2
+          ],
+          "range_distance_m": 152.49,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f033.jpg",
+          "frame_idx": 33,
+          "crop_x": 2027,
+          "crop_y": 569,
+          "gt_box_crop": [
+            127.0,
+            63.4,
+            227.8,
+            112.4
+          ],
+          "range_distance_m": 148.25,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f034.jpg",
+          "frame_idx": 34,
+          "crop_x": 2058,
+          "crop_y": 549,
+          "gt_box_crop": [
+            133.6,
+            64.0,
+            239.8,
+            116.4
+          ],
+          "range_distance_m": 144.25,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f035.jpg",
+          "frame_idx": 35,
+          "crop_x": 2091,
+          "crop_y": 549,
+          "gt_box_crop": [
+            133.0,
+            56.2,
+            245.8,
+            108.2
+          ],
+          "range_distance_m": 140.27,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f036.jpg",
+          "frame_idx": 36,
+          "crop_x": 2128,
+          "crop_y": 527,
+          "gt_box_crop": [
+            136.6,
+            59.4,
+            257.8,
+            115.4
+          ],
+          "range_distance_m": 136.56,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f037.jpg",
+          "frame_idx": 37,
+          "crop_x": 2169,
+          "crop_y": 505,
+          "gt_box_crop": [
+            141.2,
+            59.0,
+            268.2,
+            117.2
+          ],
+          "range_distance_m": 132.83,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f038.jpg",
+          "frame_idx": 38,
+          "crop_x": 2192,
+          "crop_y": 505,
+          "gt_box_crop": [
+            160.6,
+            43.0,
+            253.6,
+            104.0
+          ],
+          "range_distance_m": 129.22,
+          "is_above_horizon": true
+        },
+        {
+          "file": "enc1_f039.jpg",
+          "frame_idx": 39,
+          "crop_x": 2192,
+          "crop_y": 482,
+          "gt_box_crop": [
+            209.4,
+            69.0,
+            253.2,
+            102.8
+          ],
+          "range_distance_m": 125.78,
+          "is_above_horizon": true
+        }
+      ]
+    }
+  ]
+}

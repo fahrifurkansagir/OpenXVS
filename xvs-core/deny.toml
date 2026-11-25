@@ -1,0 +1,24 @@
+# OpenXVS v2.0 Cargo License & Supply-Chain Policy (SP1_LIVEDECK_DESIGN.md §3 & V2_MASTER_DESIGN.md §4)
+[graph]
+all-features = false
+
+[advisories]
+ignore = []
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

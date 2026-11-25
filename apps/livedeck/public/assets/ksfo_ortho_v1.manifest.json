@@ -1,0 +1,101 @@
+{
+  "schema": "xvs.terrain.ksfo_ortho_manifest/1",
+  "source_service": "USGS The National Map: Orthoimagery (USGSImageryOnly)",
+  "tile_url_template": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
+  "license": "U.S. Public Domain",
+  "attribution": "USDA, USGS The National Map: Orthoimagery",
+  "aligned_terrain_manifest": "ksfo_3dep_geoid18_v1.manifest.json",
+  "aligned_terrain_pack_sha256": "6aae7ff44a3f37750725f0ad42711b6910994155eede43b145f3cece3d015e86",
+  "projection": "WGS84_EQUIRECTANGULAR_FROM_EPSG3857",
+  "uv_orientation": {
+    "u": "0..1 maps lon_min..lon_max (West -> East, col=0..W-1)",
+    "v": "0..1 maps lat_max..lat_min (North -> South, row=0..H-1, top row y=0 is North)",
+    "matches_shader": "apps/livedeck/src/passes/pass2_terrain_cdlod.ts"
+  },
+  "rings": [
+    {
+      "name": "inner_ksfo",
+      "filename": "ksfo_ortho_inner_v1.jpg",
+      "sha256": "3dc34a91a707fc79c7fb4d5052d74f717a76bc0919cf3643ee1c70de7a42ed4f",
+      "bytes": 187930,
+      "byte_budget": 350000,
+      "width": 1024,
+      "height": 1024,
+      "zoom": 13,
+      "nodata_fallback_zoom": null,
+      "nodata_filled_fraction": 0.0,
+      "jpeg_quality": 86,
+      "extent_km": 10.0,
+      "lat_min": 37.573814430866676,
+      "lat_max": 37.66379676913333,
+      "lon_min": -122.43207461537688,
+      "lon_max": -122.31875878462313,
+      "tile_grid": {
+        "x_min": 1309,
+        "x_max": 1312,
+        "y_min": 3169,
+        "y_max": 3172,
+        "tile_count": 16,
+        "cache_hits": 16
+      },
+      "rgb_mean": [
+        119.406,
+        128.34,
+        113.881
+      ],
+      "rgb_std": [
+        32.71,
+        27.272,
+        29.364
+      ],
+      "ksfo_28l_thr_uv": {
+        "u": 0.66129,
+        "v": 0.558296,
+        "px_x": 676.5,
+        "px_y": 571.14
+      }
+    },
+    {
+      "name": "outer_sf_bay",
+      "filename": "ksfo_ortho_outer_v1.jpg",
+      "sha256": "40ea934b2cc4357bdf7980d8326eba6c1d6a4e23d67991c84bd6483bede5951d",
+      "bytes": 124504,
+      "byte_budget": 250000,
+      "width": 1024,
+      "height": 1024,
+      "zoom": 11,
+      "nodata_fallback_zoom": 8,
+      "nodata_filled_fraction": 0.169362,
+      "jpeg_quality": 84,
+      "extent_km": 40.0,
+      "lat_min": 37.438840923466714,
+      "lat_max": 37.79877027653329,
+      "lon_min": -122.6020483615075,
+      "lon_max": -122.1487850384925,
+      "tile_grid": {
+        "x_min": 326,
+        "x_max": 329,
+        "y_min": 791,
+        "y_max": 794,
+        "tile_count": 16,
+        "cache_hits": 16
+      },
+      "rgb_mean": [
+        109.237,
+        120.621,
+        107.647
+      ],
+      "rgb_std": [
+        28.531,
+        22.512,
+        26.275
+      ],
+      "ksfo_28l_thr_uv": {
+        "u": 0.540322,
+        "v": 0.514574,
+        "px_x": 552.75,
+        "px_y": 526.41
+      }
+    }
+  ]
+}

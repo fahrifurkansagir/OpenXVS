@@ -1,0 +1,195 @@
+<?xml version="1.0"?>
+<!--
+  OpenXVS v2/v3 Civil Aviation Pod MAVLink 2.0 Dialect (`DR-11` §4, `PROJECT_CHARTER.md` §2).
+  Strictly conflict-free message ID range: 50000-50099
+  (zero overlap with 0-255, 300-10000, 10001-10049, 11000-11999, 42000-42999).
+  Strictly civil/dual-use non-cooperative Detect-and-Avoid (DAA), sync health, and
+  EASA Issue 03 IDAL-D/E advisory telemetry. Zero actuator / weapon / targeting authority.
+-->
+<mavlink>
+  <include>ardupilotmega.xml</include>
+  <version>2</version>
+  <dialect>50</dialect>
+
+  <enums>
+    <enum name="POD_DAA_FLAGS" bitmask="true">
+      <description>Status flags for POD_DAA_TRACK_ARRAY civil DAA summary.</description>
+      <entry value="1" name="POD_DAA_FLAG_EO_VALID">
+        <description>Electro-optical camera ring track observation is valid.</description>
+      </entry>
+      <entry value="2" name="POD_DAA_FLAG_LWIR_VALID">
+        <description>8-14 um LWIR radiometric thermal observation is valid.</description>
+      </entry>
+      <entry value="4" name="POD_DAA_FLAG_CBDR_ALERT">
+        <description>Constant Bearing Decreasing Range caution active.</description>
+      </entry>
+      <entry value="8" name="POD_DAA_FLAG_SHADOW_ONLY">
+        <description>Shadow-mode advisory only; zero closed-loop actuator authority.</description>
+      </entry>
+    </enum>
+
+    <enum name="POD_BOSON_FFC_STATE">
+      <description>FLIR Boson+ manual Flat-Field Correction (FFC) state.</description>
+      <entry value="0" name="POD_BOSON_FFC_IDLE">
+        <description>No FFC active; streaming calibrated radiometric frames.</description>
+      </entry>
+      <entry value="1" name="POD_BOSON_FFC_PENDING">
+        <description>Manual FFC scheduled between non-critical intervals.</description>
+      </entry>
+      <entry value="2" name="POD_BOSON_FFC_IN_PROGRESS">
+        <description>Internal shutter closed for manual FFC calibration.</description>
+      </entry>
+      <entry value="3" name="POD_BOSON_FFC_COMPLETE">
+        <description>Manual FFC completed nominally.</description>
+      </entry>
+    </enum>
+
+    <enum name="POD_RTA_SIMPLEX_MODE">
+      <description>Canonical 5-state xvs-rta-core Run-Time Assurance (RTA) SimplexMode #[repr(u8)].</description>
+      <entry value="0" name="POD_RTA_INVALID_INHIBIT">
+        <description>Invalid/inhibited state; conformal overlays and neural advisories blanked.</description>
+      </entry>
+      <entry value="1" name="POD_RTA_FALLBACK_D0_SAFE">
+        <description>Verified baseline D0 safe fallback active.</description>
+      </entry>
+      <entry value="2" name="POD_RTA_DEGRADED_COAST">
+        <description>Degraded inertial/coastal navigation within bounded uncertainty.</description>
+      </entry>
+      <entry value="3" name="POD_RTA_ISOLATED_5CAM">
+        <description>Single-camera fault isolated; 5-camera ring operating nominally.</description>
+      </entry>
+      <entry value="4" name="POD_RTA_NOMINAL_ML">
+        <description>Full 6-camera nominal ML operation within verified envelope.</description>
+      </entry>
+    </enum>
+
+    <enum name="POD_VLM_HAZARD_TYPE">
+      <description>DR-09 civil semantic hazard taxonomy (1:1 parity with xvs.v2.xvs_vlm_gate.VlmHazard).</description>
+      <entry value="0" name="POD_VLM_HAZARD_NONE">
+        <description>No semantic hazard detected.</description>
+      </entry>
+      <entry value="1" name="POD_VLM_HAZARD_RUNWAY_INCURSION">
+        <description>Vehicle, aircraft, or pedestrian obstructing active runway.</description>
+      </entry>
+      <entry value="2" name="POD_VLM_HAZARD_BIRD_FLOCK">
+        <description>Flock of birds or wildlife hazard along flight path.</description>
+      </entry>
+      <entry value="3" name="POD_VLM_HAZARD_CONVECTIVE_VIRGA">
+        <description>Localized convective virga, microburst shaft, or severe weather cell.</description>
+      </entry>
+      <entry value="4" name="POD_VLM_HAZARD_CRANE_PROXY">
+        <description>Uncharted temporary crane, mast, tower, or thin vertical civil obstruction.</description>
+      </entry>
+      <entry value="5" name="POD_VLM_HAZARD_FLZ_HAZARD">
+        <description>Semantic surface obstacle or crowd hazard within candidate Forced Landing Zone.</description>
+      </entry>
+    </enum>
+
+    <enum name="POD_VLM_GATE_VERDICT">
+      <description>Deterministic 6-stage DO-178C DAL B/C VLM gate status (1:1 parity with xvs.v2.xvs_vlm_gate.GateStatus).</description>
+      <entry value="0" name="POD_VLM_GATE_NOMINAL_ADVISORY">
+        <description>VLM advisory passed all 6 verification stages (nominal or confirmed M-of-N veto).</description>
+      </entry>
+      <entry value="1" name="POD_VLM_GATE_VLM_OFFLINE">
+        <description>VLM watchdog timeout or non-monotonic sequence; fallback to geometric monitors.</description>
+      </entry>
+      <entry value="2" name="POD_VLM_GATE_SCHEMA_OR_CRC_FAIL">
+        <description>Wire packet failed fixed schema, range check, or IEEE CRC32 validation.</description>
+      </entry>
+      <entry value="3" name="POD_VLM_GATE_OPTICAL_ODD_MASKED">
+        <description>Optical ODD degraded (fog/glare/droplets/blur/attitude); VLM masked cleanly.</description>
+      </entry>
+      <entry value="4" name="POD_VLM_GATE_CONFORMAL_ABSTAIN">
+        <description>Conformal prediction abstention (conformal_valid_bit == 0); never treated as clear.</description>
+      </entry>
+      <entry value="5" name="POD_VLM_GATE_DEBOUNCE_PENDING">
+        <description>Hazard seen but M-of-N temporal confirmation threshold not yet reached.</description>
+      </entry>
+    </enum>
+
+    <enum name="POD_PLUGIN_LIFECYCLE_STATE">
+      <description>DR-16 OpenXVS-OS Ring-1 plugin supervisor lifecycle state (deterministic PLUGIN_OFFLINE latch).</description>
+      <entry value="0" name="POD_PLUGIN_LIFECYCLE_INIT">
+        <description>Plugin spawned and awaiting Ed25519 manifest check and initial heartbeat.</description>
+      </entry>
+      <entry value="1" name="POD_PLUGIN_LIFECYCLE_HEALTHY">
+        <description>Plugin nominal within cgroups v2, CRC32, and heartbeat bounds.</description>
+      </entry>
+      <entry value="2" name="POD_PLUGIN_LIFECYCLE_DEGRADED">
+        <description>Plugin experienced non-fatal resource pressure or transient frame drops.</description>
+      </entry>
+      <entry value="3" name="POD_PLUGIN_LIFECYCLE_OFFLINE">
+        <description>Permanent mid-flight PLUGIN_OFFLINE latch on crash, OOM, CRC32 fault, or heartbeat miss (&gt; 200 ms).</description>
+      </entry>
+    </enum>
+
+    <enum name="POD_CIVIL_MISSION_CLASS">
+      <description>DR-16 strictly civil/dual-use Ring-1 mission plugin taxonomy (1..5; 0 rejected as uninitialized/invalid; ACTUATOR_AUTHORITY=false).</description>
+      <entry value="1" name="POD_CIVIL_MISSION_WILDFIRE_THERMAL">
+        <description>Wildfire thermal hotspot and perimeter mapping.</description>
+      </entry>
+      <entry value="2" name="POD_CIVIL_MISSION_SEARCH_AND_RESCUE">
+        <description>Maritime or wilderness search and rescue detection.</description>
+      </entry>
+      <entry value="3" name="POD_CIVIL_MISSION_MARITIME_ENVIRONMENTAL">
+        <description>Maritime and environmental monitoring.</description>
+      </entry>
+      <entry value="4" name="POD_CIVIL_MISSION_INFRASTRUCTURE_INSPECTION">
+        <description>Civil powerline and wind-turbine infrastructure inspection.</description>
+      </entry>
+      <entry value="5" name="POD_CIVIL_MISSION_MEDICAL_CARGO_LOGISTICS">
+        <description>Civil medical and humanitarian cargo logistics.</description>
+      </entry>
+    </enum>
+  </enums>
+
+  <messages>
+    <message id="50001" name="POD_DAA_TRACK_ARRAY">
+      <description>EO+LWIR non-cooperative civil DAA primary track summary and shadow-mode avoidance advisory (zero actuator authority).</description>
+      <field type="uint64_t" name="timestamp_us" units="us">1PPS/PTP hardware-synchronized capture timestamp.</field>
+      <field type="int16_t" name="azimuth_mrad" units="mrad">Primary intruder azimuth in ownship FRD frame (+right).</field>
+      <field type="int16_t" name="elevation_mrad" units="mrad">Primary intruder elevation in ownship FRD frame (+up).</field>
+      <field type="int16_t" name="ang_rate_mrad_s" units="mrad/s">Angular bearing rate magnitude for CBDR monitoring.</field>
+      <field type="uint16_t" name="t_rad_dk" units="dK">Radiometric LWIR target temperature in deci-Kelvin (0 if EO-only).</field>
+      <field type="uint16_t" name="shadow_avoid_hdg_cdeg" units="cdeg">Shadow-mode civil avoidance heading advisory (0..35999 cdeg).</field>
+      <field type="int16_t" name="shadow_avoid_alt_cm" units="cm">Shadow-mode civil avoidance altitude delta advisory (cm).</field>
+      <field type="uint8_t" name="track_count">Count of active fused non-cooperative civil traffic tracks.</field>
+      <field type="uint8_t" name="flags" enum="POD_DAA_FLAGS">Bitmask of EO/LWIR validity, CBDR caution, and shadow-only lock.</field>
+    </message>
+
+    <message id="50002" name="POD_SYNC_HEALTH">
+      <description>Pod 1PPS/PTP hardware synchronization, Boson+ FFC status, Jetson TTP thermal telemetry, and RTA Simplex health.</description>
+      <field type="int32_t" name="offset_us" units="us">1PPS/PTP clock offset relative to GNSS reference.</field>
+      <field type="int16_t" name="jetson_ttp_dc" units="ddegC">Jetson thermal transfer plate temperature in deci-Celsius.</field>
+      <field type="uint16_t" name="mig_dropped_frames">Cumulative MIG partition dropped frame counter.</field>
+      <field type="uint8_t" name="bos_ffc_state" enum="POD_BOSON_FFC_STATE">FLIR Boson+ manual FFC status.</field>
+      <field type="uint8_t" name="cam_health_mask">6-camera health bitmask (0x3F = all 6 healthy: F, R, B, L, U, D).</field>
+      <field type="uint8_t" name="rta_simplex_mode" enum="POD_RTA_SIMPLEX_MODE">RTA Simplex authority mode.</field>
+    </message>
+
+    <message id="50003" name="POD_VLM_SEMANTIC_VETO">
+      <description>DR-09 EASA Issue 03 IDAL-D/E semantic safety monitor advisory telemetry and relative-only FLZ candidate ranking.</description>
+      <field type="uint32_t" name="seq">Monotonic VLM inference sequence counter.</field>
+      <field type="uint32_t" name="capture_ts_ms" units="ms">Frame capture timestamp in milliseconds since boot.</field>
+      <field type="uint8_t" name="hazard_enum" enum="POD_VLM_HAZARD_TYPE">Semantic civil hazard classification.</field>
+      <field type="uint8_t" name="azimuth_sector">Discretized 12-sector clock azimuth (0..11, 255=unknown).</field>
+      <field type="uint8_t" name="conformal_valid">Conformal calibration validity bit (1=valid, 0=abstain).</field>
+      <field type="uint8_t" name="gate_verdict" enum="POD_VLM_GATE_VERDICT">Deterministic 6-stage DO-178C gate verdict.</field>
+      <field type="uint8_t[4]" name="ranked_flz_ids">Relative-only ordered reachable FLZ candidate IDs (255=unused).</field>
+    </message>
+
+    <message id="50004" name="POD_PLUGIN_HEALTH">
+      <description>DR-16 OpenXVS-OS Ring-1 civil mission plugin health and deterministic PLUGIN_OFFLINE telemetry (48 B payload, 5 Hz, ACTUATOR_AUTHORITY=false).</description>
+      <field type="uint64_t" name="plugin_id_hash">FNV/SHA-truncated 64-bit Ring-1 civil plugin identifier hash.</field>
+      <field type="uint64_t" name="timestamp_mono_us" units="us">Ring-0 monotonic timestamp in microseconds.</field>
+      <field type="uint64_t" name="last_seq_no">Last verified monotonic Ring-1 advisory sequence number.</field>
+      <field type="uint32_t" name="ieee_crc32">IEEE-802.3 CRC32 over canonical wire payload bytes excluding ieee_crc32.</field>
+      <field type="uint16_t" name="missed_heartbeats">Cumulative missed Ring-1 heartbeat count.</field>
+      <field type="uint16_t" name="rss_mb" units="MiB">Ring-1 cgroup resident set size in MiB.</field>
+      <field type="uint16_t" name="cpu_permille">Ring-1 cgroup CPU utilization in permille (1000 = 1 full core).</field>
+      <field type="uint8_t" name="lifecycle_state" enum="POD_PLUGIN_LIFECYCLE_STATE">Plugin supervisor lifecycle state (0=INIT, 1=HEALTHY, 2=DEGRADED, 3=PLUGIN_OFFLINE).</field>
+      <field type="uint8_t" name="civil_mission_class" enum="POD_CIVIL_MISSION_CLASS">Strictly civil mission class enum (1..5; 0 rejected as invalid).</field>
+      <field type="uint8_t[12]" name="reserved_zero">Structurally zero-locked padding (zero actuator authority).</field>
+    </message>
+  </messages>
+</mavlink>

@@ -1,0 +1,62 @@
+graph TD
+    classDef goal fill:#eef6ff,stroke:#1565c0,stroke-width:1.5px,color:#0d1b2a;
+    classDef strategy fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1.5px,color:#1a0d2a;
+    classDef context fill:#f5f5f5,stroke:#616161,stroke-width:1.2px,color:#212121;
+    classDef solution fill:#e8f5e9,stroke:#2e7d32,stroke-width:1.5px,color:#0d260f;
+    classDef undeveloped fill:#fff0f0,stroke:#c62828,stroke-width:2.5px,stroke-dasharray: 6 4,color:#7f0000;
+
+    G0["G0: OpenXVS v2.0 civil Detect-and-Avoid and GNSS-resilient perception software..."]
+    C1(["C1: Strictly civil aviation ODD (14 CFR Part 91/135 GA & Part 107/108 UAS; Char..."])
+    C2(["C2: EUROCAE ED-324 / SAE ARP6983 Objective 4, EASA NPA 2025-07 (Proposed Issue..."])
+    S1[/"S1: Argue bounded civil runtime safety via five decomposed pillars: (G1) determ..."/]
+    G1["G1: Deterministic fixed-wing conflict avoidance (K=5 NED MH-VIT, 3D NED ECBF-QP..."]
+    Sn1_MHVIT(("Sn1_MHVIT: WSL2 C++20 + libxvs_core.a K=5 log-spaced NED MH-VIT (0% inward overshoot)..."))
+    Sn2_HYBRID_CBF(("Sn2_HYBRID_CBF: Strict NED 3D fixed-wing ECBF-QP safety/viability & 3-ship 0-NMAC / ghost-s..."))
+    Sn3_DAQP_WCET(("Sn3_DAQP_WCET: WSL2 g++ -Wl,--wrap=malloc zero-allocation hot-loop audit (0 B under both -..."))
+    G2["G2: Deterministic no_std Simplex RTA monitor (xvs-rta-core) enforces fail-close..."]
+    G2_TLA_DEFERRED["G2_TLA_DEFERRED: Full TLA+ temporal model checking of distributed multi-ship Simplex RTA liv... [UNDEVELOPED]"]
+    Sn5_KANI(("Sn5_KANI: WSL2 Kani/CBMC 5/5 formal verification harness log on frozen no_std xvs-rta..."))
+    Sn6_PARITY(("Sn6_PARITY: 10,000-tick bit-exact Simplex RTA & codec differential parity plus WebGPU/W..."))
+    G3["G3: ML perception modules are bounded by fail-closed sensor health gating, spli..."]
+    Sn7_DTACI_OOD(("Sn7_DTACI_OOD: LWIR physics & XVS-ThermalNet 47-case fail-closed gating plus XVS-VRAIM Mah..."))
+    Sn8_SPLIT_H3(("Sn8_SPLIT_H3: WP-01b curved ray-DEM / TSO-C151d TAWS FLTA, XVS-Land hybrid Conformal-RAIM..."))
+    G4["G4: All verification metrics and benchmark artifacts are reproducibly bound to..."]
+    Sn9_PROVENANCE(("Sn9_PROVENANCE: Provenance-verified M1 & M2 reports plus Stage-2 XVS-Bench Ed25519-signed S..."))
+    G5_GAP["G5_GAP: EXPLICIT UNDEVELOPED CERTIFICATION GAP (NOT CLAIMED BY OPENXVS): RTCA DO-25... [UNDEVELOPED]"]
+
+    G0 -.-> C1
+    G0 -.-> C2
+    G0 --> S1
+    S1 --> G1
+    S1 --> G2
+    S1 --> G3
+    S1 --> G4
+    S1 --> G5_GAP
+    G1 --> Sn1_MHVIT
+    G1 --> Sn2_HYBRID_CBF
+    G1 --> Sn3_DAQP_WCET
+    G2 --> G2_TLA_DEFERRED
+    G2 --> Sn5_KANI
+    G2 --> Sn6_PARITY
+    G3 --> Sn7_DTACI_OOD
+    G3 --> Sn8_SPLIT_H3
+    G4 --> Sn9_PROVENANCE
+
+    class G0 goal;
+    class C1 context;
+    class C2 context;
+    class S1 strategy;
+    class G1 goal;
+    class Sn1_MHVIT solution;
+    class Sn2_HYBRID_CBF solution;
+    class Sn3_DAQP_WCET solution;
+    class G2 goal;
+    class G2_TLA_DEFERRED undeveloped;
+    class Sn5_KANI solution;
+    class Sn6_PARITY solution;
+    class G3 goal;
+    class Sn7_DTACI_OOD solution;
+    class Sn8_SPLIT_H3 solution;
+    class G4 goal;
+    class Sn9_PROVENANCE solution;
+    class G5_GAP undeveloped;

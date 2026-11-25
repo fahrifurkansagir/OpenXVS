@@ -1,0 +1,25 @@
+OpenXVS v1.1.0 — Autonomous Aviation Perception, GNSS-Denied Integrity & Formal Runtime Assurance
+Copyright (c) 2025-2026 Fahri Furkan Sağır (@fahrifurkansagir)
+
+Architected and authored by Fahri Furkan Sağır. Under Section 4(d) of the Apache License 2.0,
+derivative distributions must retain this attribution notice.
+
+Clean-Room License & Boundary Disclosures:
+  - Software Source Code     : Apache License, Version 2.0 (Apache-2.0)
+  - Datasets & Model Weights : Community Data License Agreement - Permissive, Version 2.0 (CDLA-Permissive-2.0)
+  - Open Hardware Specs      : CERN Open Hardware Licence Version 2 - Permissive (CERN-OHL-P-2.0)
+  - Documentation & GSN Case : Creative Commons Attribution 4.0 International (CC-BY-4.0)
+
+Strictly zero GPL / AGPL / LGPL-static runtime dependencies (zero pymavlink, zero PyInstaller).
+
+Third-Party & Clean-Room Engineering Disclosures:
+  - `third_party/daidalus_boundary/` contains 100% OpenXVS-authored Apache-2.0 standalone
+    DO-365 emulator wrappers; zero upstream NASA NOSA 1.3 source files are bundled.
+  - All internal coordinate frames strictly use WGS-84 ECEF, Local NED, Body FRD, and
+    Camera RDF conventions (zero internal ENU).
+  - Hybrid database-referenced navigation Python source is excluded from this clean-room
+    snapshot under applicable export-control guardrails (`EXPORTS.md`).
+  - OpenXVS is NOT a certified flight-control or civil airworthiness product
+    (`NON_FLIGHT_SIM_ONLY=1`, `ACTUATOR_AUTHORITY=false`). See `docs/LIMITATIONS.md`,
+    `SAFETY_DISCLAIMER.md`, `SECURITY.md`, `EXPORTS.md`, `TRADEMARK.md`, and
+    `COMPLIANCE_AND_DUAL_USE.md`.

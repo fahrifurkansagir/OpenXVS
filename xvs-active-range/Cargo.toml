@@ -1,0 +1,27 @@
+[workspace]
+
+[package]
+name = "xvs-active-range"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "OpenXVS v3.0 no_std zero-unsafe XVS-ActiveRange (M=6 MSC-RPEKF + CP-MSC + Universal SC3BF-FIM + 64B Wire) with Kani formal proofs"
+publish = false
+
+[lib]
+name = "xvs_active_range"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dump_golden_vectors"
+path = "src/bin/dump_golden_vectors.rs"
+
+[features]
+default = []
+std = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[dependencies]
+libm = { version = "0.2", default-features = false }

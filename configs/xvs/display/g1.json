@@ -1,0 +1,66 @@
+{
+  "$schema": "xvs_display_g1_config",
+  "schema": "xvs.display.g1_config/1",
+  "eye_point_body_frd_m": [11.0, -0.55, -1.0],
+  "eye_point_provenance": "UNMEASURED ESTIMATE",
+  "rig_seed": 20260922,
+  "panorama": {
+    "width": 2048,
+    "height": 1024,
+    "ned_center": "north"
+  },
+  "viewport": {
+    "width": 1280,
+    "height": 720,
+    "fov_h_deg": 90.0,
+    "fov_v_deg": 60.0,
+    "head_track": {
+      "yaw_formula": "110.0 * sin(2 * pi * t / 20.0)",
+      "pitch_formula": "15.0 * sin(2 * pi * t / 13.0)",
+      "yaw_amplitude_deg": 110.0,
+      "yaw_period_s": 20.0,
+      "pitch_amplitude_deg": 15.0,
+      "pitch_period_s": 13.0
+    }
+  },
+  "feather_width_px": 64.0,
+  "depth_models": ["ellipsoid", "infinity", "sphere_R"],
+  "sphere_r_m": 1000.0,
+  "latencies_ms": [0, 20, 50, 100],
+  "traffic_symbology": {
+    "leader_horizon_s": 5.0,
+    "warning_tau_mod_s": 12.5,
+    "warning_p_wcv_min": 0.50,
+    "corrective_tau_mod_s": 55.0,
+    "preventive_tau_mod_s": 75.0,
+    "preventive_p_wcv_min": 0.15,
+    "lowc_hmd_limit_m": 609.6,
+    "nmac_hmd_limit_m": 152.4,
+    "covariance_halo_sigma_mult": 3.0,
+    "min_reticle_radius_px": 8.0,
+    "max_reticle_radius_px": 36.0
+  },
+  "integrity_hud": {
+    "nominal_pl_001_deg": 0.25,
+    "isolated_pl_001_deg": 0.28,
+    "coasting_drift_deg_per_s": 0.15,
+    "alert_limit_deg": 0.50,
+    "max_ttd_display_frames": 1
+  },
+  "sitl_avoidance": {
+    "benchmark_threat_count": 50,
+    "open_loop_cpa_max_m": 152.0,
+    "nmac_threshold_m": 152.4,
+    "lowc_threshold_m": 609.6,
+    "max_turn_rate_degps": 3.0,
+    "max_bank_angle_deg": 25.0,
+    "reaction_delay_s": 1.0,
+    "target_avoid_heading_deg": 45.0,
+    "clear_of_conflict_hold_s": 3.0,
+    "recovery_turn_rate_degps": 2.0,
+    "dt_s": 0.1,
+    "t_start_s": 0.0,
+    "t_end_s": 60.0,
+    "beta_wc_modes": [0.50, 0.25]
+  }
+}

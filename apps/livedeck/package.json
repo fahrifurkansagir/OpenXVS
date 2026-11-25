@@ -1,0 +1,25 @@
+{
+  "name": "openxvs-livedeck",
+  "version": "2.0.0-m1",
+  "private": true,
+  "type": "module",
+  "description": "OpenXVS v2.0 Live Deck — Raw WebGPU + Compile-Time Naga WebGL2 5-Pass Conformal Cockpit Renderer",
+  "scripts": {
+    "shaders:build": "node scripts/transpile_shaders.mjs",
+    "dev": "vite",
+    "build": "npm run shaders:build && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.31.1",
+    "wgpu-matrix": "^3.4.0"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.60",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^3.1.1"
+  }
+}

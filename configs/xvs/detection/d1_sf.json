@@ -1,0 +1,42 @@
+{
+  "schema": "xvs.detection_d1_sf/1",
+  "model_name": "D1-SF",
+  "architecture": "unet_centernet_anchor_free",
+  "primary_references": [
+    "Ronneberger et al., U-Net: Convolutional Networks for Biomedical Image Segmentation, MICCAI 2015",
+    "Zhou et al., Objects as Points, arXiv:1904.07850, 2019",
+    "Lin et al., Focal Loss for Dense Object Detection, ICCV 2017",
+    "Law and Deng, CornerNet: Detecting Objects as Paired Keypoints, ECCV 2018"
+  ],
+  "input_channels": 1,
+  "num_frames_k": 1,
+  "kept_frame_step_dt_s": 1.0,
+  "output_stride": 1,
+  "base_channels": 16,
+  "train_precision": "bf16",
+  "cpu_eval_precision": "fp32",
+  "nms_kernel_size": 3,
+  "focal_alpha": 2.0,
+  "focal_beta": 4.0,
+  "offset_loss_weight": 1.0,
+  "scale_loss_weight": 0.1,
+  "default_score_threshold": 0.35,
+  "score_sweep_thresholds": [
+    0.15,
+    0.25,
+    0.35,
+    0.5,
+    0.65,
+    0.8,
+    0.9,
+    0.95
+  ],
+  "synthesis": {
+    "enabled_by_default": true,
+    "s_px_min": 0.5,
+    "s_px_max": 16.0,
+    "contrast_min": -0.4,
+    "contrast_max": 0.2
+  },
+  "provenance": "WP-04 G1 D1-SF specification (docs/xvs/WP04_DETECTION.md section 9.4)"
+}

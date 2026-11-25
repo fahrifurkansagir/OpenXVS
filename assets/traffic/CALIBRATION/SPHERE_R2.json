@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "SPHERE_R2",
+  "class": "CALIBRATION",
+  "seed": 0,
+  "dimensions": {
+    "length_m": 4.0,
+    "span_m": 4.0,
+    "height_m": 4.0
+  },
+  "bbox_min": [
+    -2.0,
+    -2.0,
+    -2.0
+  ],
+  "bbox_max": [
+    2.0,
+    2.0,
+    2.0
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 5120,
+  "alpha_trim_deg": 0.0,
+  "glb_sha256": "60e3bfde4487f5daa726266b0c6569868a241ff22f5b9925a648cb6e0d9b22c0",
+  "path": "assets/traffic/CALIBRATION/SPHERE_R2.glb"
+}

@@ -1,0 +1,19 @@
+{
+  "schema": "xvs.display.g0_spec/1",
+  "head_deg_per_px": 0.070,
+  "rays_v1": 10000,
+  "rt_tol_m_v1": 1e-6,
+  "par_tol_rad_v1": 1e-9,
+  "seam_tol_v2": 1.0,
+  "stroke_tol": 0.05,
+  "rwy_tol_px_v3": 1e-6,
+  "lat_tol_deg_v4": 1e-9,
+  "lever_tol_deg_v4": 0.0025,
+  "draw_shift": 8,
+  "still_time_s": 30.0,
+  "commands_run": [
+    "# Run display fusion offline runner across sequences T2, T1, T3 (T2 first)\n$env:PYTHONPATH='src'\n$env:XVS_DATA_ROOT='<repo>\\output'\n& .venv\\Scripts\\python.exe scripts/xvs/display/run_display_g0.py --sequences T2 T1 T3",
+    "# Run WP-08 test suite\n& .venv\\Scripts\\python.exe -m pytest tests/xvs/test_display_*.py -v",
+    "# Generate report tables\n& .venv\\Scripts\\python.exe scripts/xvs/display/report_tables_wp08.py"
+  ]
+}

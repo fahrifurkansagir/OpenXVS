@@ -1,0 +1,427 @@
+{
+  "schema": "xvs.data_allowlist/1",
+  "version": "2.1 (2026-11-23, Director, OpenXVS v5.0 DR-21 XVS-Nav): added copernicus_sentinel2_l2a (Copernicus Free/Open + ESA/EU credit via Planetary Computer STAC & Azure sentinel2l2a01.blob.core.windows.net, NOT U.S. Public Domain), noted ORNL CC-BY-4.0 attribution on fema_usa_structures while keeping *.arcgis.com hard-banned, and preserved all v2.0 and v1.4 entries intact. | 2.0 (2026-11-21, Director, OpenXVS v2.0 M2 SP2_M2_MODELS_DESIGN.md): added URLClassifier-clean upstream_allowed entries (usda_naip, faa_nasr, usgs_nhd with /StagedProducts/Elevation/, fema_usa_structures on non-ArcGIS U.S. Gov/AWS Open Data hosts, copernicus_glo30 under ESA/Copernicus Free & Open Attribution), dedicated allowed_training_datasets (alto, eccv2026_ltc, tartanair, irstd1k, hit_uav), and eval-only research_only_datasets (CART, MassMIND, UAV-CB, FLIR ADAS v2); preserved all v1.4 entries and *.arcgis.com forbidden rules intact. | 1.4 (2026-11-20, Director, OpenXVS v2.0 M1 SP1_LIVEDECK_DESIGN.md): noaa_geoid18 added (NOAA NGS GEOID18 CONUS geoid grid us_noaa_g2018u0.tif via cdn.proj.org and geodesy.noaa.gov, U.S. Public Domain) for NAVD88 orthometric -> WGS-84 ellipsoidal height conversion in WP-01b / Live Deck KSFO 3DEP pack. | 1.3 (2026-09-24, Director, D17 of docs/xvs/batches/BATCH_B2.md): lltem_v1 added (MIT LL LLTEM V1.0, CC BY 4.0, verified in output/xvs/wp02/g3b/d17_verification.json); owner decision 2026-09-24: README and CSV in full plus a prefix of the 10 GB trajectory file, total <= 5 GB. | 1.2 (2026-09-23, Director): AOT licence confirmed (research/R1_traffic_detection.md); USGS imagery restricted to CONUS (research/R5_synthetic_data_licensing.md); excluded data sources listed (research/R5_synthetic_data_licensing.md, research/R6_lwir_efvs.md)",
+  "purpose": "Runtime data policy for every XVS renderer / data tool. Code MUST load this file and enforce it: the browser may only talk to the local server; the local tile/data proxy may only fetch upstream URLs that match an 'upstream_allowed' entry. Any other request is aborted, logged to data_violations.jsonl, and makes the run FAIL. Tooling installs (pip, npm, Playwright browser download) are outside this policy.",
+  "browser_allowed_hosts": [
+    "127.0.0.1",
+    "localhost"
+  ],
+  "upstream_allowed": [
+    {
+      "id": "usgs_imagery_only",
+      "host": "basemap.nationalmap.gov",
+      "path_prefix": "/arcgis/rest/services/USGSImageryOnly/MapServer/",
+      "url_template": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
+      "tiling": "EPSG:3857 (WKID 102100), 256x256, LODs 0-23 advertised; service description says 'visible to the 1:9,028 zoom scale' (= level 16). Deepest level with real detail must be measured in WP-01 G0.",
+      "license": "U.S. Public Domain. USGS policy: 'USGS-authored or produced data and information are considered to be in the U.S. Public Domain.'",
+      "coverage_rule": "Use only for scenes inside the conterminous US (CONUS). Alaska and Hawaii need Director approval: the USGS lists commercially licensed orthoimagery there (USGS FAQ 'Are USGS topographic maps copyrighted?'). WP-01 scenes (KSFO) are inside CONUS.",
+      "attribution": "USDA, USGS The National Map: Orthoimagery",
+      "service_copyright_text": "USDA, USGS The National Map: Orthoimagery. Data refreshed June, 2024.v1.2",
+      "allowed_uses": [
+        "render",
+        "cache_on_disk",
+        "train",
+        "evaluate",
+        "publish_derived_images_with_attribution"
+      ],
+      "etiquette": "max 4 concurrent upstream requests, User-Agent 'OpenXVS-research/0.1', exponential back-off on HTTP 429/5xx, never re-download a cached tile",
+      "verified": "2026-09-22 by Director (service JSON + USGS copyright policy page)",
+      "wp": "WP-01"
+    },
+    {
+      "id": "usgs_3dep",
+      "host": "elevation.nationalmap.gov",
+      "path_prefix": "/arcgis/rest/services/3DEPElevation/ImageServer/",
+      "license": "U.S. Public Domain (USGS)",
+      "attribution": "U.S. Geological Survey, 3D Elevation Program",
+      "allowed_uses": [
+        "render",
+        "cache_on_disk",
+        "train",
+        "evaluate",
+        "publish_derived_images_with_attribution"
+      ],
+      "notes": "Heights are NAVD88 orthometric metres. Convert to WGS84 ellipsoidal heights (h = H + N) before Cesium. Not used before WP-01b.",
+      "wp": "WP-01b"
+    },
+    {
+      "id": "noaa_geoid18",
+      "host": [
+        "cdn.proj.org",
+        "geodesy.noaa.gov"
+      ],
+      "path_prefix": [
+        "/us_noaa_g2018u0.tif",
+        "/PCPROD/GEOID18/"
+      ],
+      "license": "U.S. Public Domain (NOAA National Geodetic Survey / U.S. Government work, 17 U.S.C. 105; PROJ-data mirror preserves U.S. Public Domain status)",
+      "attribution": "NOAA National Geodetic Survey (GEOID18, CONUS) via PROJ-data / geodesy.noaa.gov",
+      "allowed_uses": [
+        "download_once",
+        "cache_on_disk",
+        "render",
+        "train",
+        "evaluate",
+        "publish_derived_with_attribution"
+      ],
+      "notes": "Converts NAVD88 orthometric heights (USGS 3DEP, OurAirports ft MSL) to WGS-84 / ITRF2020 ellipsoidal heights (h = H + N_geoid, KSFO 28L h ~= -28.3 m) per docs/xvs/CONVENTIONS.md and docs/xvs/SP1_LIVEDECK_DESIGN.md.",
+      "verified": "2026-11-20 by Director (OpenXVS v2.0 M1 Allowlist v1.4 approval)",
+      "wp": "WP-01b / V2-M1"
+    },
+    {
+      "id": "ourairports",
+      "host": [
+        "davidmegginson.github.io",
+        "ourairports.com"
+      ],
+      "path_prefix": [
+        "/ourairports-data/",
+        "/data/"
+      ],
+      "license": "Public Domain ('All data is released to the Public Domain, and comes with no guarantee of accuracy or fitness for use.')",
+      "attribution": "OurAirports (ourairports.com)",
+      "allowed_uses": [
+        "all"
+      ],
+      "notes": "Runway ends: *_latitude_deg, *_longitude_deg, *_elevation_ft (MSL), *_heading_degT, *_displaced_threshold_ft. Download once, store the file and its SHA-256 under data/reference/.",
+      "wp": "WP-01"
+    },
+    {
+      "id": "lltem_v1",
+      "host": "archive.ll.mit.edu",
+      "path_prefix": "/datasets/lltem/",
+      "source_page": "https://www.ll.mit.edu/r-d/datasets/unmanned-aircraft-terminal-area-encounters",
+      "license": "CC BY 4.0. Verbatim from README.txt inside the download: 'This work is licensed under a Creative Commons Attribution 4.0 International License (CC BY 4.0).' (source page: 'This work is licensed under a Creative Commons Attribution 4.0 International License.')",
+      "attribution": "MIT Lincoln Laboratory, Terminal Airspace Encounter Set V1.0 (LLTEM V1.0), June 30, 2020. (c) 2020 Massachusetts Institute of Technology. Licensed under CC BY 4.0. (Neither the page nor the README asks for a specific citation string; this text is built from the README title, date and copyright line.)",
+      "use": "WP-02 G3b encounter geometry",
+      "allowed_uses": [
+        "download_once",
+        "cache_on_disk",
+        "import",
+        "render",
+        "train",
+        "evaluate",
+        "publish_derived_with_attribution"
+      ],
+      "download_rule": "Only README.txt, terminal_encounter_info_20200630.csv (full) and a byte-range prefix of terminal_encounters_20200630.dat; no login, registration or click-through; total <= 5 GB; archive in data/cache/lltem/ (gitignored), sidecar data/reference/lltem/lltem_v1.meta.json (committed). Tool: scripts/xvs/fetch_lltem.py.",
+      "notes": "README: 1,000,000 encounters; ownship = UA under IFR (DO-365A) on a straight-in approach to a single-runway Class D airfield; intruder landing or taking off; runway-relative feet; no importance weights in the data set.",
+      "verified": "2026-09-24 by Director (source page and README read; output/xvs/wp02/g3b/d17_verification.json)",
+      "wp": "WP-02 G3b"
+    },
+    {
+      "id": "copernicus_sentinel2_l2a",
+      "host": [
+        "planetarycomputer.microsoft.com",
+        "sentinel2l2a01.blob.core.windows.net"
+      ],
+      "path_prefix": [
+        "/api/stac/v1/collections/sentinel-2-l2a",
+        "/sentinel2-l2/"
+      ],
+      "license": "ESA / Copernicus Free & Open Data License with Mandatory Attribution (NOT U.S. Public Domain; Contains modified Copernicus Sentinel data provided by the European Union and ESA)",
+      "attribution": "Contains modified Copernicus Sentinel data (2018-2026), processed by ESA / European Union, accessed via Microsoft Planetary Computer STAC",
+      "allowed_uses": [
+        "download_once",
+        "cache_on_disk",
+        "render",
+        "train",
+        "evaluate",
+        "publish_derived_with_attribution"
+      ],
+      "notes": "Multi-season winter/autumn Sentinel-2 L2A (including SCL=11 snow/ice) for XVS-Nav v5.0 cross-season distillation; MGRS tiles 10SEG, 10SEH, 10SFG, 10SFH strictly eval-only via dataset_split_guard.py.",
+      "verified": "2026-11-23 by Director (OpenXVS v5.0 DR-21 Allowlist v2.1 approval)",
+      "wp": "V5.0 / XVS-Nav"
+    },
+    {
+      "id": "usda_naip",
+      "host": [
+        "planetarycomputer.microsoft.com",
+        "naipeuwest.blob.core.windows.net"
+      ],
+      "path_prefix": [
+        "/api/stac/v1/",
+        "/naip/"
+      ],
+      "license": "U.S. Public Domain (USDA Farm Service Agency NAIP, 17 U.S.C. 105; mirrored on Microsoft Planetary Computer)",
+      "attribution": "USDA Farm Service Agency, National Agriculture Imagery Program (NAIP)",
+      "allowed_uses": [
+        "render",
+        "cache_on_disk",
+        "train",
+        "evaluate",
+        "publish_derived_with_attribution"
+      ],
+      "notes": "CONUS 0.6 m RGBN aerial orthophotography for XVS-Nav / XVS-Land reference basemaps. Strictly CONUS.",
+      "verified": "2026-11-21 by Director (SP2_M2_MODELS_DESIGN.md REV 2 Builder-Check APPROVED)",
+      "wp": "V2-M2 / XVS-Nav / XVS-Land"
+    },
+    {
+      "id": "faa_nasr",
+      "host": [
+        "nfdc.faa.gov",
+        "aeronav.faa.gov"
+      ],
+      "path_prefix": [
+        "/webContent/",
+        "/Upload_313-d/"
+      ],
+      "license": "U.S. Public Domain (FAA National Airspace System Resources, 17 U.S.C. 105)",
+      "attribution": "Federal Aviation Administration, NASR 28-Day Subscription / AeroNav",
+      "allowed_uses": [
+        "download_once",
+        "cache_on_disk",
+        "render",
+        "train",
+        "evaluate",
+        "publish_derived_with_attribution"
+      ],
+      "notes": "Official FAA runway threshold coordinates, widths, elevations, and displaced thresholds for XVS-Land and WP-01b.",
+      "verified": "2026-11-21 by Director (SP2_M2_MODELS_DESIGN.md REV 2 Builder-Check APPROVED)",
+      "wp": "V2-M2 / XVS-Land / WP-01b"
+    },
+    {
+      "id": "usgs_nhd",
+      "host": [
+        "hydro.nationalmap.gov",
+        "prd-tnm.s3.amazonaws.com"
+      ],
+      "path_prefix": [
+        "/arcgis/rest/services/nhd/",
+        "/StagedProducts/Hydrography/",
+        "/StagedProducts/Elevation/"
+      ],
+      "license": "U.S. Public Domain (USGS National Hydrography Dataset & 3DEP Staged Elevation Products)",
+      "attribution": "U.S. Geological Survey, National Hydrography Dataset (NHD) & 3D Elevation Program (3DEP)",
+      "allowed_uses": [
+        "download_once",
+        "cache_on_disk",
+        "render",
+        "train",
+        "evaluate",
+        "publish_derived_with_attribution"
+      ],
+      "notes": "Provides water-body masks for XVS-Nav Stage-3 visual-aliasing rejection plus /StagedProducts/Elevation/ VRT tiles for WP-01b 3DEP.",
+      "verified": "2026-11-21 by Director (SP2_M2_MODELS_DESIGN.md REV 2 Builder-Check APPROVED)",
+      "wp": "V2-M2 / XVS-Nav / WP-01b"
+    },
+    {
+      "id": "fema_usa_structures",
+      "host": [
+        "fema-femadata.s3.amazonaws.com",
+        "disasters.geoplatform.gov"
+      ],
+      "path_prefix": [
+        "/Partners/ORNL/USA_Structures/",
+        "/USA_Structures/"
+      ],
+      "license": "U.S. Public Domain (FEMA / DHS, 17 U.S.C. 105) with CC-BY-4.0 ORNL contractor attribution (Oak Ridge National Laboratory USA Structures)",
+      "attribution": "FEMA / DHS / Oak Ridge National Laboratory (ORNL), USA Structures (CC-BY-4.0 ORNL attribution noted per DR-21)",
+      "allowed_uses": [
+        "download_once",
+        "cache_on_disk",
+        "render",
+        "train",
+        "evaluate",
+        "publish_derived_with_attribution"
+      ],
+      "notes": "Non-ArcGIS U.S. Gov / AWS Open Data hosts ONLY (preserves *.arcgis.com ban in forbidden). Used to mask rooftop/building facade parallax in XVS-Nav Stage-3.",
+      "verified": "2026-11-21 by Director (SP2_M2_MODELS_DESIGN.md REV 2 Builder-Check APPROVED)",
+      "wp": "V2-M2 / XVS-Nav"
+    },
+    {
+      "id": "copernicus_glo30",
+      "host": [
+        "copernicus-dem-30m.s3.amazonaws.com",
+        "opentopography.s3.sdsc.edu"
+      ],
+      "path_prefix": [
+        "/Copernicus_DSM_COG_10_",
+        "/raster/COP30/"
+      ],
+      "license": "ESA / Copernicus Free & Open Data License with Mandatory Attribution (NOT U.S. Public Domain; © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA)",
+      "attribution": "Copernicus DEM GLO-30 — © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.",
+      "allowed_uses": [
+        "download_once",
+        "cache_on_disk",
+        "render",
+        "train",
+        "evaluate",
+        "publish_derived_with_attribution"
+      ],
+      "notes": "Global 30 m DEM fallback outside CONUS; heights referenced to EGM2008 orthometric datum (convert to WGS-84 ellipsoidal before ECEF/NED projection).",
+      "verified": "2026-11-21 by Director (SP2_M2_MODELS_DESIGN.md REV 2 Builder-Check APPROVED)",
+      "wp": "V2-M2 / WP-01b"
+    }
+  ],
+  "allowed_training_datasets": [
+    {
+      "id": "alto",
+      "license": "BSD-3-Clause",
+      "attribution": "ALTO: Aerial Visual Localization Dataset (CMU AirLab)",
+      "allowed_uses": [
+        "train",
+        "evaluate",
+        "cache_on_disk"
+      ],
+      "wp": "V2-M2 / XVS-Nav"
+    },
+    {
+      "id": "eccv2026_ltc",
+      "license": "CC-BY-4.0",
+      "attribution": "ECCV 2026 Long-Term Cross-View Aerial Localization Benchmark (CC-BY-4.0)",
+      "allowed_uses": [
+        "train",
+        "evaluate",
+        "cache_on_disk"
+      ],
+      "wp": "V2-M2 / XVS-Nav"
+    },
+    {
+      "id": "tartanair",
+      "license": "CC-BY-4.0",
+      "attribution": "TartanAir: A Dataset to Push the Limits of Visual SLAM (CMU AirLab, CC-BY-4.0)",
+      "allowed_uses": [
+        "train",
+        "evaluate",
+        "cache_on_disk"
+      ],
+      "wp": "V2-M2 / XVS-Nav"
+    },
+    {
+      "id": "irstd1k",
+      "license": "MIT",
+      "attribution": "IRSTD-1k Infrared Small Target Detection Dataset (MIT License)",
+      "allowed_uses": [
+        "train",
+        "evaluate",
+        "cache_on_disk"
+      ],
+      "wp": "V2-M2 / XVS-Thermal"
+    },
+    {
+      "id": "hit_uav",
+      "license": "CC-BY-4.0",
+      "attribution": "HIT-UAV High-Altitude Infrared Thermal Dataset (CC-BY-4.0)",
+      "allowed_uses": [
+        "train",
+        "evaluate",
+        "cache_on_disk"
+      ],
+      "wp": "V2-M2 / XVS-Thermal"
+    }
+  ],
+  "forbidden": [
+    {
+      "hosts": [
+        "api.cesium.com",
+        "assets.ion.cesium.com",
+        "ion.cesium.com",
+        "*.cesium.com"
+      ],
+      "reason": "Cesium ion ToS forbids using the service or its output to train AI and forbids offline storage. CesiumJS (the library, Apache-2.0) is allowed; ion content is not."
+    },
+    {
+      "hosts": [
+        "tile.googleapis.com",
+        "maps.googleapis.com",
+        "*.googleapis.com",
+        "*.google.com",
+        "*.gstatic.com"
+      ],
+      "reason": "Google Map Tiles API policies forbid caching, image analysis, machine interpretation and object detection on the content."
+    },
+    {
+      "hosts": [
+        "*.virtualearth.net",
+        "*.bing.com"
+      ],
+      "reason": "Bing Maps terms; also Cesium's default base layer path. Always create the widget with baseLayer: false."
+    },
+    {
+      "hosts": [
+        "*.arcgisonline.com",
+        "*.arcgis.com"
+      ],
+      "reason": "Esri World Imagery terms not cleared for ML training."
+    },
+    {
+      "hosts": [
+        "tile.openstreetmap.org",
+        "*.tile.openstreetmap.org",
+        "*.mapbox.com"
+      ],
+      "reason": "Tile usage policies / ODbL obligations not cleared. Needs Director approval."
+    }
+  ],
+  "research_only_datasets": [
+    {
+      "id": "LARD",
+      "rule": "evaluation only, never redistribute; LARD v1 synthetic images come from Google Earth Studio, and LARD V2 adds Bing Maps, ArcGIS (via LARD-CesiumSim), X-Plane and Flight Simulator renders (research/R5); real footage used with owners' research permission"
+    },
+    {
+      "id": "AOT (Amazon Airborne Object Tracking)",
+      "license": "CDLA-Permissive-1.0 (https://cdla.dev/permissive-1-0/)",
+      "rule": "allowed for training and evaluation. If AOT data or modified AOT files are ever redistributed: include the CDLA-Permissive-1.0 text or a link to it (s.3.1a), mark changed files with prominent notices (s.3.1b) and keep all attribution to the data provider (s.3.1c). Trained models, metrics and other Results carry no obligations (s.3.4). Do not download before WP-04 opens: the full dataset is 13.4 TB and WP-04 will name the subset.",
+      "access": "s3://airborne-obj-detection-challenge-training/ (public bucket, us-east-1, no AWS account: aws s3 ls --no-sign-request)",
+      "attribution": "Airborne Object Tracking Dataset, Amazon Prime Air; Registry of Open Data on AWS (https://registry.opendata.aws/airborne-object-tracking/)",
+      "verified": "2026-09-23 by Director (AWS Open Data registry entry + CDLA-Permissive-1.0 text)",
+      "wp": "WP-04"
+    },
+    {
+      "id": "IceHorizon",
+      "rule": "CC-BY 4.0 (attribution); evaluation only per Charter §6, ZERO training"
+    },
+    {
+      "id": "MaSTr1325",
+      "rule": "CC BY-NC-SA 4.0 (non-commercial, share-alike)"
+    },
+    {
+      "id": "CART",
+      "rule": "evaluation only, ZERO training (off-road / terrain thermal-RGB research corpus)"
+    },
+    {
+      "id": "MassMIND",
+      "rule": "evaluation only, ZERO training (maritime LWIR research corpus)"
+    },
+    {
+      "id": "UAV-CB",
+      "rule": "evaluation only, ZERO training (academic thermal UAV benchmark)"
+    },
+    {
+      "id": "FLIR ADAS v2",
+      "rule": "evaluation only, ZERO training (Teledyne FLIR non-commercial / restrictive terms)"
+    }
+  ],
+  "never_use_as_code_base": [
+    {
+      "id": "LARD-CesiumSim",
+      "reason": "PolyForm Noncommercial 1.0.0 and requires a Cesium ion token"
+    }
+  ],
+  "excluded_data_sources": [
+    {
+      "id": "game_engine_renders",
+      "sources": [
+        "Microsoft Flight Simulator",
+        "X-Plane"
+      ],
+      "rule": "Do not generate, capture, train on or publish renders from these simulators. The Microsoft Game Content Usage Rules grant only a personal, noncommercial, revocable licence (research/R5). The X-Plane render licence has not been reviewed (research/R6). Third-party datasets that already contain such renders (LARD V2) are evaluation-only, see 'research_only_datasets'. Lifting this needs Director approval after the licence text is read."
+    },
+    {
+      "id": "aerial_uav_thermal_inferred_unified_kaggle",
+      "sources": [
+        "https://www.kaggle.com/datasets/umuttuygurr/aerial-uav-thermal-inferred-unified-dataset"
+      ],
+      "rule": "Do not use. It declares CC0 while merging 6 source datasets it cannot relicense, and it contains weapon classes ('Mine', 'Gun') outside the civil scope (research/R6)."
+    },
+    {
+      "id": "thermal_uav_scc_loc",
+      "sources": [
+        "https://huggingface.co/datasets/Daryleas/Thermal-UAV",
+        "https://huggingface.co/datasets/FloralHercules/Thermal-UAV"
+      ],
+      "rule": "Do not use. It ships Google Maps satellite imagery (Google content is forbidden, see 'forbidden'), and its card states both Apache-2.0 and 'intended for academic research purposes' (research/R6)."
+    }
+  ],
+  "enforcement_scope": "Enforced on (1) every page/worker request seen by Playwright routing (abort + log + FAIL if host not in browser_allowed_hosts) and (2) every upstream request made by the local proxy (must match upstream_allowed). Browser-internal background traffic (component updater etc.) is out of scope; keep it minimal by using Playwright's bundled Chromium with its default flags (do not use channel='chrome' unless the Director approves)."
+}

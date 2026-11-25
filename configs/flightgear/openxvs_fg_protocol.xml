@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OpenXVS v4.5 Zero-GPL FlightGear Generic UDP Protocol
+  Copyright 2026 OpenXVS Contributors — Apache-2.0 OR MIT
+
+  Copy this file into your FlightGear Protocol directory (e.g., $FG_ROOT/Protocol/openxvs_fg_protocol.xml)
+  and launch FlightGear with one of the following 1-line commands:
+
+  San Francisco International (KSFO Runway 28L):
+    fgfs - -airport=KSFO - -runway=28L - -aircraft=c172p - -generic=socket,out,20,127.0.0.1,5500,udp,openxvs_fg_protocol - -generic=socket,in,20,127.0.0.1,5501,udp,openxvs_fg_protocol
+
+  Istanbul Airport (LTFM Runway 34L):
+    fgfs - -airport=LTFM - -runway=34L - -aircraft=c172p - -generic=socket,out,20,127.0.0.1,5500,udp,openxvs_fg_protocol - -generic=socket,in,20,127.0.0.1,5501,udp,openxvs_fg_protocol
+
+  (Note: remove spaces between double-hyphens when pasting into your shell.)
+
+  CSV Field Order (strictly NED velocity components; zero internal ENU):
+    OUT (FlightGear -> OpenXVS 127.0.0.1:5500):
+      lat_deg,lon_deg,alt_msl_m,heading_deg,pitch_deg,roll_deg,airspeed_kt,vn_mps,ve_mps,vd_mps
+    IN  (OpenXVS -> FlightGear 127.0.0.1:5501):
+      bank_cmd_deg,pitch_cmd_deg,airspeed_cmd_mps,shield_active
+-->
+<PropertyList>
+  <generic>
+    <output>
+      <line_separator>newline</line_separator>
+      <var_separator>,</var_separator>
+
+      <chunk>
+        <name>lat_deg</name>
+        <type>float</type>
+        <format>%.7f</format>
+        <node>/position/latitude-deg</node>
+      </chunk>
+      <chunk>
+        <name>lon_deg</name>
+        <type>float</type>
+        <format>%.7f</format>
+        <node>/position/longitude-deg</node>
+      </chunk>
+      <chunk>
+        <name>alt_msl_m</name>
+        <type>float</type>
+        <format>%.3f</format>
+        <node>/position/altitude-ft</node>
+        <factor>0.3048</factor>
+      </chunk>
+      <chunk>
+        <name>heading_deg</name>
+        <type>float</type>
+        <format>%.3f</format>
+        <node>/orientation/heading-deg</node>
+      </chunk>
+      <chunk>
+        <name>pitch_deg</name>
+        <type>float</type>
+        <format>%.3f</format>
+        <node>/orientation/pitch-deg</node>
+      </chunk>
+      <chunk>
+        <name>roll_deg</name>
+        <type>float</type>
+        <format>%.3f</format>
+        <node>/orientation/roll-deg</node>
+      </chunk>
+      <chunk>
+        <name>airspeed_kt</name>
+        <type>float</type>
+        <format>%.3f</format>
+        <node>/velocities/airspeed-kt</node>
+      </chunk>
+      <chunk>
+        <name>vn_mps</name>
+        <type>float</type>
+        <format>%.3f</format>
+        <node>/velocities/speed-north-fps</node>
+        <factor>0.3048</factor>
+      </chunk>
+      <chunk>
+        <name>ve_mps</name>
+        <type>float</type>
+        <format>%.3f</format>
+        <node>/velocities/speed-east-fps</node>
+        <factor>0.3048</factor>
+      </chunk>
+      <chunk>
+        <name>vd_mps</name>
+        <type>float</type>
+        <format>%.3f</format>
+        <node>/velocities/speed-down-fps</node>
+        <factor>0.3048</factor>
+      </chunk>
+    </output>
+
+    <input>
+      <line_separator>newline</line_separator>
+      <var_separator>,</var_separator>
+
+      <chunk>
+        <name>bank_cmd_deg</name>
+        <type>float</type>
+        <node>/autopilot/settings/target-roll-deg</node>
+      </chunk>
+      <chunk>
+        <name>pitch_cmd_deg</name>
+        <type>float</type>
+        <node>/autopilot/settings/target-pitch-deg</node>
+      </chunk>
+      <chunk>
+        <name>airspeed_cmd_mps</name>
+        <type>float</type>
+        <node>/autopilot/settings/target-speed-kt</node>
+        <factor>1.943844</factor>
+      </chunk>
+      <chunk>
+        <name>shield_active</name>
+        <type>int</type>
+        <node>/openxvs/shield-override-active</node>
+      </chunk>
+    </input>
+  </generic>
+</PropertyList>

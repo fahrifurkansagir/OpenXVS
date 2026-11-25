@@ -1,0 +1,18 @@
+{
+  "schema": "xvs.display.g1_spec/1",
+  "tol_reticle_px": 0.05,
+  "tol_pl_band_px": 0.05,
+  "max_ttd_display_frames": 1,
+  "max_hud_hmi_frames": 0,
+  "min_alerted_nmac_resolution_pct": 85.0,
+  "max_invalid_alert_turns": 0,
+  "draw_shift": 8,
+  "n_reticle_test_samples": 200,
+  "n_pl_test_poses": 30,
+  "n_sitl_encounters": 50,
+  "commands_run": [
+    "# 1. Run WP-08 G1 closed-loop SITL avoidance & live symbology evaluation (workers=1)\n$env:PYTHONPATH='src'\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" scripts/xvs/display/run_display_g1.py",
+    "# 2. Generate WP-08 G1 report and provenance JSON\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" scripts/xvs/display/report_tables_wp08_g1.py",
+    "# 3. Run WP-08 G1, Tier-0 Avionics, and Report Provenance test suites\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" -m pytest tests/xvs/test_display_g1.py tests/xvs/test_avionics_tier0.py tests/xvs/test_report_provenance.py -q"
+  ]
+}

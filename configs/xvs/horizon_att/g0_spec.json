@@ -1,0 +1,42 @@
+{
+  "schema": "xvs.horizon_att.g0_spec/1",
+  "pred_k_f": -1.13,
+  "pred_k_horiz": 0.00,
+  "sig_h_values": {
+    "0": 0,
+    "10": 10,
+    "50": 50
+  },
+  "trajectory_grid": {
+    "h_cone_1": 125,
+    "h_cone_2": 1648,
+    "h_cone_3": 3000,
+    "yaw_cone": 30,
+    "h_t1": 3000,
+    "h_t2_1": 15,
+    "h_t2_2": 235,
+    "h_t3_1": 1500,
+    "h_t3_2": 1800,
+    "phi_t3": 25
+  },
+  "acceptance": {
+    "seeded_poses": 1000,
+    "tol_limb_err": 1.0e-6,
+    "h_min_g3": 600,
+    "n_scenes_g3": 96,
+    "p_med_tol": 0.02,
+    "p_max_tol": 0.10,
+    "r_med_tol": 0.05,
+    "r_max_tol": 0.25,
+    "sig_h_target": 10,
+    "target_att_err": 0.10,
+    "rejection_pct_target": 95,
+    "refraction_factor": 0.07
+  },
+  "commands_run": [
+    "$env:PYTHONPATH='src'\n$env:XVS_DATA_ROOT='<repo>\\output'",
+    "# 1. Run master sequence evaluations across T1, T2, T3 (clean and degraded)\n& .venv\\Scripts\\python.exe scripts/xvs/horizon_att/run_evaluation.py --data-root=\"<repo>\\output\" --workers 8",
+    "# 2. Run unit and verification test suite\n& .venv\\Scripts\\python.exe -m pytest tests/xvs/test_horizon_att_*.py -v -k \"not data\"",
+    "# 3. Generate Charter §8 report and formatted tables\n& .venv\\Scripts\\python.exe scripts/xvs/horizon_att/report_tables_wp06.py --data-root=\"<repo>\\output\""
+  ]
+}

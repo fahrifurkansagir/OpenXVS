@@ -1,0 +1,29 @@
+{
+  "$schema": "xvs_display_g0_config",
+  "eye_point_body_frd_m": [11.0, -0.55, -1.0],
+  "eye_point_provenance": "UNMEASURED ESTIMATE",
+  "rig_seed": 20260922,
+  "panorama": {
+    "width": 2048,
+    "height": 1024,
+    "ned_center": "north"
+  },
+  "viewport": {
+    "width": 1280,
+    "height": 720,
+    "fov_h_deg": 90.0,
+    "fov_v_deg": 60.0,
+    "head_track": {
+      "yaw_formula": "110.0 * sin(2 * pi * t / 20.0)",
+      "pitch_formula": "15.0 * sin(2 * pi * t / 13.0)",
+      "yaw_amplitude_deg": 110.0,
+      "yaw_period_s": 20.0,
+      "pitch_amplitude_deg": 15.0,
+      "pitch_period_s": 13.0
+    }
+  },
+  "feather_width_px": 64.0,
+  "depth_models": ["ellipsoid", "infinity", "sphere_R"],
+  "sphere_r_m": 1000.0,
+  "latencies_ms": [0, 20, 50, 100]
+}

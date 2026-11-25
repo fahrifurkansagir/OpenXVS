@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "xvs-os-hal"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "OpenXVS-OS V3.0 no_std zero-unsafe Ring-0/Ring-1 Advisory Contract, Manifest Policy & Universal Civil AutopilotHal with Kani formal proofs"
+publish = false
+
+[lib]
+name = "xvs_os_hal"
+path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[dependencies]

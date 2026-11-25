@@ -1,0 +1,86 @@
+{
+  "schema": "xvs.rig/1",
+  "rig_id": "XVS6-CUBE-v1",
+  "description": "Six-camera distributed-aperture rig: cube-face boresights, 100 deg square FOV pinhole cameras, notional ~30 m civil jet lever arms. Design (nominal) geometry.",
+  "conventions": "docs/xvs/CONVENTIONS.md v1.0",
+  "body_frame": "FRD (x forward, y right, z down), origin = Aircraft Reference Point (IMU)",
+  "camera_frame": "OpenCV (x right, y down, z forward), origin = optical centre",
+  "R_body_cam_definition": "v_body = R_body_cam @ v_cam; columns are the camera x, y, z axes expressed in BODY; stored row-major",
+  "image": {
+    "width": 1024,
+    "height": 1024,
+    "pixel_convention": "integer (u,v) = pixel centres; image spans [-0.5, W-0.5]"
+  },
+  "intrinsics": {
+    "model": "pinhole_ideal",
+    "fov_h_deg": 100.0,
+    "fov_v_deg": 100.0,
+    "fx": 429.6190111627674,
+    "fy": 429.6190111627674,
+    "cx": 511.5,
+    "cy": 511.5,
+    "formula": "fx = fy = (W/2)/tan(fov_h/2); cx = (W-1)/2; cy = (H-1)/2",
+    "distortion": null
+  },
+  "time_model": {
+    "shutter": "global",
+    "sync": "all cameras exposed at the frame timestamp (WP-01)"
+  },
+  "installation_error_model_for_rig_true": {
+    "rotation": "R_body_cam_true = R_body_cam_nominal @ Exp(omega), omega in CAM frame, each component ~ N(0, 0.20 deg), clipped to +/-0.60 deg",
+    "lever_arm": "lever_arm_true = lever_arm_nominal + delta, each component ~ N(0, 0.005 m), clipped to +/-0.015 m",
+    "rng": "numpy.random.default_rng(seed); draw order: for cam in F,R,B,L,U,D: omega(3) then delta(3)",
+    "default_seed": 20260922
+  },
+  "cameras": [
+    {
+      "id": "F",
+      "name": "forward",
+      "mount": "under nose, looking forward",
+      "lever_arm_m": [13.2, 0.0, 0.6],
+      "R_body_cam": [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
+      "boresight_body": [1, 0, 0]
+    },
+    {
+      "id": "R",
+      "name": "right",
+      "mount": "right fuselage side, looking right",
+      "lever_arm_m": [2.5, 1.55, -0.3],
+      "R_body_cam": [[-1, 0, 0], [0, 0, 1], [0, 1, 0]],
+      "boresight_body": [0, 1, 0]
+    },
+    {
+      "id": "B",
+      "name": "back",
+      "mount": "tail cone, looking aft",
+      "lever_arm_m": [-14.8, 0.0, -0.9],
+      "R_body_cam": [[0, 0, -1], [-1, 0, 0], [0, 1, 0]],
+      "boresight_body": [-1, 0, 0]
+    },
+    {
+      "id": "L",
+      "name": "left",
+      "mount": "left fuselage side, looking left",
+      "lever_arm_m": [2.5, -1.55, -0.3],
+      "R_body_cam": [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+      "boresight_body": [0, -1, 0]
+    },
+    {
+      "id": "U",
+      "name": "up",
+      "mount": "fuselage top, looking up; image top = forward",
+      "lever_arm_m": [-2.0, 0.0, -1.75],
+      "R_body_cam": [[0, -1, 0], [-1, 0, 0], [0, 0, -1]],
+      "boresight_body": [0, 0, -1]
+    },
+    {
+      "id": "D",
+      "name": "down",
+      "mount": "fuselage belly, looking down; image top = forward",
+      "lever_arm_m": [1.0, 0.0, 1.75],
+      "R_body_cam": [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+      "boresight_body": [0, 0, 1]
+    }
+  ],
+  "coverage_check": "Director check 2026-09-22 (400k random directions): every direction is inside >=1 camera FOV; 18.67% inside >=2; max 3 (cube corners)."
+}

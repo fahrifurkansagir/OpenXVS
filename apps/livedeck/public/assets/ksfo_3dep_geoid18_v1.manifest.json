@@ -1,0 +1,49 @@
+{
+  "schema": "xvs.terrain.ksfo_3dep_manifest/1",
+  "pack_filename": "ksfo_3dep_geoid18_v1.bin",
+  "pack_sha256": "6aae7ff44a3f37750725f0ad42711b6910994155eede43b145f3cece3d015e86",
+  "raw_bytes": 266484,
+  "brotli_bytes": 90039,
+  "brotli_budget_bytes": 307200,
+  "terrain_mode": "usgs_3dep_geoid18_ellipsoidal",
+  "geoid_model": "GEOID18",
+  "datum": "WGS84_ELLIPSOIDAL",
+  "ksfo_28l_thr_navd88_m": 3.9624,
+  "ksfo_28l_geoid_undulation_m": -32.63380295376555,
+  "ksfo_28l_thr_wgs84_h_m": -28.671402953765554,
+  "rings": [
+    {
+      "name": "outer_sf_bay",
+      "extent_km": 40.0,
+      "width": 256,
+      "height": 256,
+      "lat_min": 37.438840923466714,
+      "lat_max": 37.79877027653329,
+      "lon_min": -122.6020483615075,
+      "lon_max": -122.1487850384925,
+      "min_wgs84_h_m": -36.096479808403394,
+      "max_wgs84_h_m": 597.4720660350645,
+      "byte_offset": 4340,
+      "byte_length": 131072
+    },
+    {
+      "name": "inner_ksfo",
+      "extent_km": 10.0,
+      "width": 256,
+      "height": 256,
+      "lat_min": 37.573814430866676,
+      "lat_max": 37.66379676913333,
+      "lon_min": -122.43207461537688,
+      "lon_max": -122.31875878462313,
+      "min_wgs84_h_m": -33.32947462734783,
+      "max_wgs84_h_m": 320.04880012774066,
+      "byte_offset": 135412,
+      "byte_length": 131072
+    }
+  ],
+  "runway_ids": [
+    "28L",
+    "28R",
+    "Taxiway C"
+  ]
+}

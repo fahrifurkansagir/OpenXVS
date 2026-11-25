@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "PANEL",
+  "class": "CALIBRATION",
+  "seed": 0,
+  "dimensions": {
+    "length_m": 100.0,
+    "span_m": 100000.0,
+    "height_m": 20000.0
+  },
+  "bbox_min": [
+    -50.0,
+    -50000.0,
+    -10000.0
+  ],
+  "bbox_max": [
+    50.0,
+    50000.0,
+    10000.0
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 12,
+  "alpha_trim_deg": 0.0,
+  "glb_sha256": "3c078c17f41ba998762d12afa19db81f1ec30f1ad7d67ed0994f950ca3abf123",
+  "path": "assets/traffic/CALIBRATION/PANEL.glb"
+}

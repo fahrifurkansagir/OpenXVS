@@ -1,0 +1,662 @@
+[
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "CAL_SPHERES",
+    "class": "CALIBRATION",
+    "seed": 0,
+    "dimensions": {
+      "length_m": 11.5,
+      "span_m": 13.5,
+      "height_m": 5.0
+    },
+    "bbox_min": [
+      -5.75,
+      -6.75,
+      -3.25
+    ],
+    "bbox_max": [
+      5.75,
+      6.75,
+      1.75
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 30720,
+    "alpha_trim_deg": 0.0,
+    "glb_sha256": "2c3c2d480a506e9952eadfbdce1793f76acad945ff20e87844668663ac83075a",
+    "path": "assets/traffic/CALIBRATION/CAL_SPHERES.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "CAL",
+    "class": "CALIBRATION",
+    "seed": 0,
+    "dimensions": {
+      "length_m": 11.535640716552734,
+      "span_m": 13.5,
+      "height_m": 5.0
+    },
+    "bbox_min": [
+      -5.785640716552734,
+      -6.75,
+      -3.25
+    ],
+    "bbox_max": [
+      5.75,
+      6.75,
+      1.75
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 31282,
+    "alpha_trim_deg": 0.0,
+    "glb_sha256": "8d13b520a04e664a4f709f9ce69fa3ff824f67c3756db780cbe7e2b8490d403f",
+    "path": "assets/traffic/CALIBRATION/CAL.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "SPHERE_R2",
+    "class": "CALIBRATION",
+    "seed": 0,
+    "dimensions": {
+      "length_m": 4.0,
+      "span_m": 4.0,
+      "height_m": 4.0
+    },
+    "bbox_min": [
+      -2.0,
+      -2.0,
+      -2.0
+    ],
+    "bbox_max": [
+      2.0,
+      2.0,
+      2.0
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 5120,
+    "alpha_trim_deg": 0.0,
+    "glb_sha256": "60e3bfde4487f5daa726266b0c6569868a241ff22f5b9925a648cb6e0d9b22c0",
+    "path": "assets/traffic/CALIBRATION/SPHERE_R2.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "PANEL",
+    "class": "CALIBRATION",
+    "seed": 0,
+    "dimensions": {
+      "length_m": 100.0,
+      "span_m": 100000.0,
+      "height_m": 20000.0
+    },
+    "bbox_min": [
+      -50.0,
+      -50000.0,
+      -10000.0
+    ],
+    "bbox_max": [
+      50.0,
+      50000.0,
+      10000.0
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 12,
+    "alpha_trim_deg": 0.0,
+    "glb_sha256": "3c078c17f41ba998762d12afa19db81f1ec30f1ad7d67ed0994f950ca3abf123",
+    "path": "assets/traffic/CALIBRATION/PANEL.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C1_UAS_0001",
+    "class": "C1_UAS",
+    "seed": 1,
+    "dimensions": {
+      "length_m": 0.9653245806694031,
+      "span_m": 0.7850483655929565,
+      "height_m": 0.24783708155155182
+    },
+    "bbox_min": [
+      -0.48266229033470154,
+      -0.39252418279647827,
+      -0.12391854077577591
+    ],
+    "bbox_max": [
+      0.48266229033470154,
+      0.39252418279647827,
+      0.12391854077577591
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 572,
+    "alpha_trim_deg": 0.0,
+    "glb_sha256": "b5d22a42ee53296225ea844f6fce8e1ae95b3e1b166c2a19ec5281901931cd5e",
+    "path": "assets/traffic/C1_UAS/C1_UAS_0001.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C2_SEP_0001",
+    "class": "C2_SEP",
+    "seed": 1,
+    "dimensions": {
+      "length_m": 8.900927543640137,
+      "span_m": 10.5354642868042,
+      "height_m": 3.3968324661254883
+    },
+    "bbox_min": [
+      -4.450463771820068,
+      -5.2677321434021,
+      -1.6984162330627441
+    ],
+    "bbox_max": [
+      4.450463771820068,
+      5.2677321434021,
+      1.6984162330627441
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 658,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "e41e0a7f7db844ace5c6a958573ddc615518de4fe5a94a906059a06100a35fc4",
+    "path": "assets/traffic/C2_SEP/C2_SEP_0001.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C3_TWIN_0001",
+    "class": "C3_TWIN",
+    "seed": 1,
+    "dimensions": {
+      "length_m": 13.801855087280273,
+      "span_m": 15.070929527282715,
+      "height_m": 4.873571872711182
+    },
+    "bbox_min": [
+      -6.900927543640137,
+      -7.535464763641357,
+      -2.436785936355591
+    ],
+    "bbox_max": [
+      6.900927543640137,
+      7.535464763641357,
+      2.436785936355591
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 850,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "de6814dbc6e31d045606fffdf76e76dc7c043ad8484d11a926b428377fe40f7c",
+    "path": "assets/traffic/C3_TWIN/C3_TWIN_0001.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C4_BIZJET_0001",
+    "class": "C4_BIZJET",
+    "seed": 1,
+    "dimensions": {
+      "length_m": 21.65324592590332,
+      "span_m": 18.094572067260742,
+      "height_m": 7.017834901809692
+    },
+    "bbox_min": [
+      -10.82662296295166,
+      -9.047286033630371,
+      -3.503023386001587
+    ],
+    "bbox_max": [
+      10.82662296295166,
+      9.047286033630371,
+      3.5148115158081055
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 690,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "5db202d03cbc6689f6022f8eb4ce9cbe2c42545a6a84292d307d58105042dbb7",
+    "path": "assets/traffic/C4_BIZJET/C4_BIZJET_0001.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C5_TRANSPORT_0001",
+    "class": "C5_TRANSPORT",
+    "seed": 1,
+    "dimensions": {
+      "length_m": 39.504634857177734,
+      "span_m": 32.09457015991211,
+      "height_m": 14.764610290527344
+    },
+    "bbox_min": [
+      -19.752317428588867,
+      -16.047285079956055,
+      -7.382305145263672
+    ],
+    "bbox_max": [
+      19.752317428588867,
+      16.047285079956055,
+      7.382305145263672
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 690,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "31666d3f0b9ebafd518a597e880412509cf3916c336769895a4323eba2cbe4b8",
+    "path": "assets/traffic/C5_TRANSPORT/C5_TRANSPORT_0001.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C6_HELI_0001",
+    "class": "C6_HELI",
+    "seed": 1,
+    "dimensions": {
+      "length_m": 13.801855087280273,
+      "span_m": 12.047286033630371,
+      "height_m": 4.203085422515869
+    },
+    "bbox_min": [
+      -6.900927543640137,
+      -6.0236430168151855,
+      -2.1015427112579346
+    ],
+    "bbox_max": [
+      6.900927543640137,
+      6.0236430168151855,
+      2.1015427112579346
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 1146,
+    "alpha_trim_deg": -3.0,
+    "glb_sha256": "fdafe4aefa0af384305c90b494225238d89e0fc7b3bf9e1448b01dad11747eb1",
+    "path": "assets/traffic/C6_HELI/C6_HELI_0001.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C1_UAS_0002",
+    "class": "C1_UAS",
+    "seed": 2,
+    "dimensions": {
+      "length_m": 0.5089437961578369,
+      "span_m": 0.5723702907562256,
+      "height_m": 0.12591363489627838
+    },
+    "bbox_min": [
+      -0.25447189807891846,
+      -0.2861851453781128,
+      -0.06295681744813919
+    ],
+    "bbox_max": [
+      0.25447189807891846,
+      0.2861851453781128,
+      0.06295681744813919
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 572,
+    "alpha_trim_deg": 0.0,
+    "glb_sha256": "e08a1f9bff54705d462d9ea52b773d0e9829ca761549d3a9c9e870ff1c379091",
+    "path": "assets/traffic/C1_UAS/C1_UAS_0002.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C2_SEP_0002",
+    "class": "C2_SEP",
+    "seed": 2,
+    "dimensions": {
+      "length_m": 7.596982002258301,
+      "span_m": 9.784835815429688,
+      "height_m": 2.8992122411727905
+    },
+    "bbox_min": [
+      -3.7984910011291504,
+      -4.892417907714844,
+      -1.44960618019104
+    ],
+    "bbox_max": [
+      3.7984910011291504,
+      4.892417907714844,
+      1.4496060609817505
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 658,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "6b9b8365effb928086e08fae4676840645d4df9a92b920123b7054332c37a655",
+    "path": "assets/traffic/C2_SEP/C2_SEP_0002.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C3_TWIN_0002",
+    "class": "C3_TWIN",
+    "seed": 2,
+    "dimensions": {
+      "length_m": 11.193964004516602,
+      "span_m": 13.569672584533691,
+      "height_m": 3.952699899673462
+    },
+    "bbox_min": [
+      -5.596982002258301,
+      -6.784836292266846,
+      -1.976349949836731
+    ],
+    "bbox_max": [
+      5.596982002258301,
+      6.784836292266846,
+      1.976349949836731
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 850,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "c4cd928afebca4ee6ea979a47b521fcf8cb960d496089a56d5264956e7f96618",
+    "path": "assets/traffic/C3_TWIN/C3_TWIN_0002.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C4_BIZJET_0002",
+    "class": "C4_BIZJET",
+    "seed": 2,
+    "dimensions": {
+      "length_m": 17.089439392089844,
+      "span_m": 16.092897415161133,
+      "height_m": 5.538130760192871
+    },
+    "bbox_min": [
+      -8.544719696044922,
+      -8.046448707580566,
+      -2.7644078731536865
+    ],
+    "bbox_max": [
+      8.544719696044922,
+      8.046448707580566,
+      2.7737228870391846
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 690,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "a0ee5e38a969fb535b74f5cb8e26712ca826105ed34e9851d8364b6c634a917d",
+    "path": "assets/traffic/C4_BIZJET/C4_BIZJET_0002.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C5_TRANSPORT_0002",
+    "class": "C5_TRANSPORT",
+    "seed": 2,
+    "dimensions": {
+      "length_m": 32.98491287231445,
+      "span_m": 30.092897415161133,
+      "height_m": 12.327902793884277
+    },
+    "bbox_min": [
+      -16.492456436157227,
+      -15.046448707580566,
+      -6.163951396942139
+    ],
+    "bbox_max": [
+      16.492456436157227,
+      15.046448707580566,
+      6.163951396942139
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 690,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "2fe6958e7509a289cc4ac618d9054d33758a024a6412d66d0958e41a979cf94c",
+    "path": "assets/traffic/C5_TRANSPORT/C5_TRANSPORT_0002.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C6_HELI_0002",
+    "class": "C6_HELI",
+    "seed": 2,
+    "dimensions": {
+      "length_m": 11.193964004516602,
+      "span_m": 11.046448707580566,
+      "height_m": 3.3426144123077393
+    },
+    "bbox_min": [
+      -5.596982002258301,
+      -5.523224353790283,
+      -1.6713072061538696
+    ],
+    "bbox_max": [
+      5.596982002258301,
+      5.523224353790283,
+      1.6713072061538696
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 1146,
+    "alpha_trim_deg": -3.0,
+    "glb_sha256": "5f2705109689288a48c7e36e1b8bd991b7c7aefebc6846bbbe58dc212e565376",
+    "path": "assets/traffic/C6_HELI/C6_HELI_0002.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C1_UAS_0003",
+    "class": "C1_UAS",
+    "seed": 3,
+    "dimensions": {
+      "length_m": 0.4657673239707947,
+      "span_m": 0.42280179262161255,
+      "height_m": 0.11818375438451767
+    },
+    "bbox_min": [
+      -0.23288366198539734,
+      -0.21140089631080627,
+      -0.059091877192258835
+    ],
+    "bbox_max": [
+      0.23288366198539734,
+      0.21140089631080627,
+      0.059091877192258835
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 572,
+    "alpha_trim_deg": 0.0,
+    "glb_sha256": "21eea593130867c616b678327c6c7d3b7e75a9faf39c52ec233c34939d14f860",
+    "path": "assets/traffic/C1_UAS/C1_UAS_0003.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C2_SEP_0003",
+    "class": "C2_SEP",
+    "seed": 3,
+    "dimensions": {
+      "length_m": 7.473620891571045,
+      "span_m": 9.25694751739502,
+      "height_m": 2.8521344661712646
+    },
+    "bbox_min": [
+      -3.7368104457855225,
+      -4.62847375869751,
+      -1.4260672330856323
+    ],
+    "bbox_max": [
+      3.7368104457855225,
+      4.62847375869751,
+      1.4260672330856323
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 658,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "53b19ab823b2958aa2473ba85eafed328a64eabbaca9e95ed194ab9a2befaee8",
+    "path": "assets/traffic/C2_SEP/C2_SEP_0003.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C3_TWIN_0003",
+    "class": "C3_TWIN",
+    "seed": 3,
+    "dimensions": {
+      "length_m": 10.94724178314209,
+      "span_m": 12.513895034790039,
+      "height_m": 3.8655800819396973
+    },
+    "bbox_min": [
+      -5.473620891571045,
+      -6.2569475173950195,
+      -1.9327900409698486
+    ],
+    "bbox_max": [
+      5.473620891571045,
+      6.2569475173950195,
+      1.9327900409698486
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 850,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "52d08860c4c9c0bd3d651773d2493e75e4d2f963de59c94485187b7f9c5638bf",
+    "path": "assets/traffic/C3_TWIN/C3_TWIN_0003.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C4_BIZJET_0003",
+    "class": "C4_BIZJET",
+    "seed": 3,
+    "dimensions": {
+      "length_m": 16.657672882080078,
+      "span_m": 14.685193061828613,
+      "height_m": 5.398765563964844
+    },
+    "bbox_min": [
+      -8.328836441040039,
+      -7.342596530914307,
+      -2.6948485374450684
+    ],
+    "bbox_max": [
+      8.328836441040039,
+      7.342596530914307,
+      2.7039170265197754
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 690,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "47ef57acc4d1d0f99a877c1f2b6a21cf7323a14448c05bd84452a1ce82b61be5",
+    "path": "assets/traffic/C4_BIZJET/C4_BIZJET_0003.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C5_TRANSPORT_0003",
+    "class": "C5_TRANSPORT",
+    "seed": 3,
+    "dimensions": {
+      "length_m": 32.368106842041016,
+      "span_m": 28.68519401550293,
+      "height_m": 12.097375869750977
+    },
+    "bbox_min": [
+      -16.184053421020508,
+      -14.342597007751465,
+      -6.048687934875488
+    ],
+    "bbox_max": [
+      16.184053421020508,
+      14.342597007751465,
+      6.048687934875488
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 690,
+    "alpha_trim_deg": 2.0,
+    "glb_sha256": "f0aef0ebce4171a1f3e2eedd6b6c473bcab3f5567645d4672abdf4dbbf0880e7",
+    "path": "assets/traffic/C5_TRANSPORT/C5_TRANSPORT_0003.glb"
+  },
+  {
+    "schema": "xvs.traffic_model/1",
+    "model_id": "C6_HELI_0003",
+    "class": "C6_HELI",
+    "seed": 3,
+    "dimensions": {
+      "length_m": 10.947242736816406,
+      "span_m": 10.342596054077148,
+      "height_m": 3.29219651222229
+    },
+    "bbox_min": [
+      -5.473621368408203,
+      -5.171298027038574,
+      -1.646098256111145
+    ],
+    "bbox_max": [
+      5.473621368408203,
+      5.171298027038574,
+      1.646098256111145
+    ],
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "triangle_count": 1146,
+    "alpha_trim_deg": -3.0,
+    "glb_sha256": "a4ed72184ac507b5044c557df04faad43d95933c32278a31e8b64eff6d902b42",
+    "path": "assets/traffic/C6_HELI/C6_HELI_0003.glb"
+  }
+]

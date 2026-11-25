@@ -1,0 +1,30 @@
+{
+  "d0_persistence_3_reference": 0.1544529690468746,
+  "earth_to_sky_lambda_weight": 16.877696425131333,
+  "fppi_lambda": 2.002953313242044,
+  "fppi_lambda_earth": 2.002953313242044,
+  "fppi_lambda_sky": 0.0,
+  "fppi_lambda_ub95": 1.5871176984431894,
+  "pd_mode": "log_logistic",
+  "persistence_3_fraction": 0.0,
+  "provenances": {
+    "d0_persistence_3_reference": "WP-04 G0 D0 persistence (output/xvs/wp04/g0/d0_clutter_persistence.json:results_by_tau.20.0.6dof_wgs84.contiguous_persistence.all.persist_3.fraction_in_roi)",
+    "fppi_lambda": "WP-04 G1 CPU fp32 evaluation (output/xvs/wp04/g1/eval_results.json:false_alarm_metrics.lambda_per_camera_frame)",
+    "persistence_3_fraction": "WP-04 G1 6-DoF WGS-84 contiguous 3-frame persistence (output/xvs/wp04/g1/eval_results.json:persistence_6dof.d1_persist_3_fraction)",
+    "s50_px": "WP-04 G1 D1-KF log-logistic MLE fit on held-out test split (output/xvs/wp04/g1/eval_results.json:closure_curve_fit.s50_px)",
+    "sigma_px": "WP-04 G1 empirical RMS centroid localization error on matched test hits (output/xvs/wp04/g1/eval_results.json:localization_metrics.sigma_px)",
+    "w_ln": "WP-04 G1 D1-KF log-logistic MLE slope on held-out test split (output/xvs/wp04/g1/eval_results.json:closure_curve_fit.w_ln)"
+  },
+  "rate_hz": 10.0,
+  "release_json_sha256": "f29430883a0116f7aadb0dfb2f0d201cb9a3344df206735aa2689083b893fbee",
+  "s50_ci95_px": [
+    0.7035834750632721,
+    1.8328392129233748
+  ],
+  "s50_px": 1.0196755093235323,
+  "schema": "xvs.tracking_g1/1",
+  "sigma_px": 1.1693652685308118,
+  "sigma_s_px": 5.856767322711586,
+  "w_ln": 0.8265995800824836,
+  "w_px": 0.8265995800824836
+}

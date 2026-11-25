@@ -1,0 +1,12 @@
+{
+  "id": "ourairports",
+  "url": "https://davidmegginson.github.io/ourairports-data/runways.csv",
+  "host": "davidmegginson.github.io",
+  "path_prefix": "/ourairports-data/",
+  "attribution": "OurAirports (ourairports.com)",
+  "license": "Public Domain",
+  "sha256": "97f30f038be33a1c93c190b9a90c46fabbe16e36a86f5decdac62259613411ae",
+  "bytes": 3965119,
+  "verified_utc": "2026-09-22T12:32:19.674445+00:00",
+  "notes": "Verified against data/reference/ourairports/runways.csv.sha256"
+}

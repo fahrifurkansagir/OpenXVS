@@ -1,0 +1,98 @@
+{
+  "pipeline_version": "wp07_g1",
+  "master_seed": 20260701,
+  "far_targets": [
+    0.01,
+    0.001
+  ],
+  "alpha_levels": [
+    0.1,
+    0.01,
+    0.001
+  ],
+  "alert_limits_deg": [
+    0.5,
+    1.0,
+    2.0
+  ],
+  "camera_sets": [
+    "F",
+    "FRBL",
+    "all"
+  ],
+  "altitude_bands": {
+    "boundaries_m": [
+      0.0,
+      250.0,
+      1000.0,
+      null
+    ],
+    "band_names": [
+      "lt_250m",
+      "250_1000m",
+      "ge_1000m"
+    ],
+    "lt_250m_max_m": 250.0,
+    "250_1000m_max_m": 1000.0
+  },
+  "multiscale_edge_detector": {
+    "step_px": 8,
+    "search_band_px": 50,
+    "min_gradient": 0.008,
+    "scales_sigma_px": [
+      0.8,
+      1.8,
+      3.5
+    ],
+    "strip_half_width_cols": 2,
+    "border_margin_px": 12
+  },
+  "solver": {
+    "max_iterations": 16
+  },
+  "gn_solver_g1": {
+    "max_iter": 50,
+    "tol_rad": 1e-10,
+    "damping": 1e-6,
+    "huber_delta_rad": 0.002,
+    "line_search_max_halvings": 6
+  },
+  "boresight_calibration_sweep": {
+    "sigma_cal_deg_grid": [
+      0.0,
+      0.02,
+      0.05
+    ],
+    "thermal_drift_deg_per_s": 0.0005,
+    "frame_rate_hz": 10.0,
+    "eval_seeds": [
+      16,
+      17,
+      18,
+      19,
+      20
+    ],
+    "eval_frame_stride": 20
+  },
+  "single_cam_misalignment": {
+    "magnitude_min_deg": 0.2,
+    "magnitude_max_deg": 1.0,
+    "default_magnitude_deg": 0.5,
+    "candidate_cameras": [
+      "F",
+      "R",
+      "B",
+      "L"
+    ],
+    "isolation_min_active_cameras": 3,
+    "isolation_min_inliers_per_camera": 10
+  },
+  "ood_horizon_strip": {
+    "strip_half_band_px": 45,
+    "step_u_px": 8,
+    "second_peak_min_sep_px": 4,
+    "second_peak_ratio": 0.35,
+    "saturation_hi": 0.96,
+    "saturation_lo": 0.02
+  }
+}

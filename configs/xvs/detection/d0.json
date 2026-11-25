@@ -1,0 +1,48 @@
+{
+  "schema": "xvs.detection_d0/1",
+  "name": "d0_classical_ring_detector",
+  "description": "Baseline classical morphological and local-normalized traffic detector for ring cameras.",
+  "parameters": {
+    "kernel_sizes": {
+      "value": [3, 5, 7],
+      "provenance": "WP-04 spec v0.1 §1: flat square structuring elements"
+    },
+    "default_kernel_size": {
+      "value": 5,
+      "provenance": "WP-04 spec v0.1 §1: nominal k=5"
+    },
+    "tile_size": {
+      "value": 64,
+      "provenance": "WP-04 spec v0.1 §1: 64x64 tiles"
+    },
+    "tile_stride": {
+      "value": 32,
+      "provenance": "WP-04 spec v0.1 §1: 32 px grid spacing for tile centres"
+    },
+    "mad_scale": {
+      "value": 1.4826,
+      "provenance": "Normal distribution consistency factor for median absolute deviation"
+    },
+    "sigma_min_clean": {
+      "value": "local_srgb_quantization",
+      "derivation": "sigma_quant(L) = sigma_s * |dL/ds| where sigma_s = 1/(255*sqrt(12)) for 8-bit uniform quantization. Through sRGB EOTF, dL/ds = 1/12.92 for L <= 0.0031308 and (2.4/1.055)*L^(7/12) for L > 0.0031308, evaluated at each tile's median linear luminance level and bilinearly interpolated.",
+      "provenance": "WP-04 spec v0.1 §1 and GEMINI_G-B8 A4 (F-B7-5): 8-bit quantization sigma at tile median level through sRGB curve"
+    },
+    "sigma_min_degraded": {
+      "value": 1.0,
+      "provenance": "WP-04 spec v0.1 §1: degraded input floor in electrons (below 2.4 e- read noise)"
+    },
+    "tau_list": {
+      "value": [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0],
+      "provenance": "WP-04 spec v0.1 §1 and GEMINI_G-B8 A2: candidate detection thresholds for sweep extended with 12, 15, 20"
+    },
+    "tau_default": {
+      "value": 4.0,
+      "provenance": "WP-04 spec v0.1 §1: nominal 4-sigma threshold"
+    },
+    "dilation_kernel_size": {
+      "value": 3,
+      "provenance": "WP-04 spec v0.1 §1: 3x3 structuring element for component grouping"
+    }
+  }
+}

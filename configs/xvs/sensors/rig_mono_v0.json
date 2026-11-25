@@ -1,0 +1,115 @@
+{
+  "schema": "xvs.sensor/1",
+  "name": "rig_mono_v0",
+  "description": "Sensor and optical parameters for distributed 6-camera rig (monochrome v0).",
+  "parameters": {
+    "image_width": {
+      "value": 1024,
+      "provenance": "spec:rig_nominal.json"
+    },
+    "image_height": {
+      "value": 1024,
+      "provenance": "spec:rig_nominal.json"
+    },
+    "fx": {
+      "value": 429.6190111627674,
+      "provenance": "spec:rig_nominal.json"
+    },
+    "fy": {
+      "value": 429.6190111627674,
+      "provenance": "spec:rig_nominal.json"
+    },
+    "cx": {
+      "value": 511.5,
+      "provenance": "spec:rig_nominal.json"
+    },
+    "cy": {
+      "value": 511.5,
+      "provenance": "spec:rig_nominal.json"
+    },
+    "pixel_pitch_m": {
+      "value": 3.45e-6,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "f_number": {
+      "value": 2.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "wavelength_m": {
+      "value": 550e-9,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "sigma_px": {
+      "value": 0.40,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "k1": {
+      "value": -0.10,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "k2": {
+      "value": 0.02,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "k3": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "p1": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "p2": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "v1": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "v2": {
+      "value": 0.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "full_well_e": {
+      "value": 10500.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "sigma_r_e": {
+      "value": 2.4,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "dark_current_e_per_s": {
+      "value": 5.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "exposure_time_s": {
+      "value": 0.001,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "prnu_rms": {
+      "value": 0.005,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "dsnu_rms_e": {
+      "value": 1.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "k_dn_per_e": {
+      "value": 0.35,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "bits": {
+      "value": 12,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "black_level_dn": {
+      "value": 64.0,
+      "provenance": "UNMEASURED ESTIMATE"
+    },
+    "ae_target": {
+      "value": 0.6,
+      "provenance": "UNMEASURED ESTIMATE"
+    }
+  }
+}

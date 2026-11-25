@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "C2_SEP_0003",
+  "class": "C2_SEP",
+  "seed": 3,
+  "dimensions": {
+    "length_m": 7.473620891571045,
+    "span_m": 9.25694751739502,
+    "height_m": 2.8521344661712646
+  },
+  "bbox_min": [
+    -3.7368104457855225,
+    -4.62847375869751,
+    -1.4260672330856323
+  ],
+  "bbox_max": [
+    3.7368104457855225,
+    4.62847375869751,
+    1.4260672330856323
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 658,
+  "alpha_trim_deg": 2.0,
+  "glb_sha256": "53b19ab823b2958aa2473ba85eafed328a64eabbaca9e95ed194ab9a2befaee8",
+  "path": "assets/traffic/C2_SEP/C2_SEP_0003.glb"
+}

@@ -1,0 +1,71 @@
+{
+  "schema": "xvs.wp04.g1_targets_and_g0_spec/1",
+  "ceil_tol": 1.0e-4,
+  "ceil_exp": -4,
+  "ceil_mant": 1.0,
+  "ceil_base": 10,
+  "ci_width_tol": 2.0,
+  "g1_fp_reduction_factor": 1000.0,
+  "s_vals": [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0],
+  "c_target_vals": [-0.4, -0.2, -0.1, -0.05, -0.02, 0.02, 0.05, 0.1],
+  "trials_v1": 1000,
+  "tol_base_v1": 10,
+  "tol_exp_v1": -9,
+  "pd_one_v2": 1,
+  "fp_zero_v2": 0,
+  "pd_zero_v2": 0,
+  "fp_100_v2": 100,
+  "den_v4": 200,
+  "ci_low_v4": 181,
+  "ci_high_v4": 197,
+  "true_s50_v4": 3.0,
+  "true_w_v4": 0.7,
+  "crop_band_min": 16,
+  "crop_band_max": 200,
+  "rig_scale_mrad_px": 2.33,
+  "tau_4_val": 4.0,
+  "tau_20_val": 20.0,
+  "tau_min": 2.0,
+  "tau_max": 100.0,
+  "k_3": 3,
+  "k_5": 5,
+  "k_7": 7,
+  "roi_dim": 1024,
+  "r50_pct": 50,
+  "r90_pct": 90,
+  "ci_level": 95,
+  "tercile_pct": 33,
+  "bin_min": 8,
+  "r_min_px": 1.5,
+  "r_scale": 0.5,
+  "c_null": 0,
+  "pd_zero_lim": 0,
+  "logistic_num": 1,
+  "subsample_seed": 20260926,
+  "commands_argv": {
+    "inject_argv": [
+      "scripts/xvs/detection/run_inject_g0.py",
+      "--workers",
+      "8"
+    ],
+    "g3a_argv": [
+      "scripts/xvs/detection/run_g3a_g0.py",
+      "--from-cache",
+      "output/xvs/wp04/g0/raw_eval_cache.pkl.gz",
+      "--out",
+      "output/xvs/wp04/g0",
+      "--g3a-root",
+      "output/xvs/wp02/g3a_v01",
+      "--closure-tau",
+      "20.0",
+      "--closure-k",
+      "3"
+    ],
+    "pytest_argv": [
+      "& .venv\\Scripts\\python.exe -m pytest tests/xvs/test_detection_*.py -v"
+    ],
+    "report_argv": [
+      "scripts/xvs/detection/report_tables_wp04.py"
+    ]
+  }
+}

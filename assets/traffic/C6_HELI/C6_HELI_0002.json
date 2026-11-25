@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "C6_HELI_0002",
+  "class": "C6_HELI",
+  "seed": 2,
+  "dimensions": {
+    "length_m": 11.193964004516602,
+    "span_m": 11.046448707580566,
+    "height_m": 3.3426144123077393
+  },
+  "bbox_min": [
+    -5.596982002258301,
+    -5.523224353790283,
+    -1.6713072061538696
+  ],
+  "bbox_max": [
+    5.596982002258301,
+    5.523224353790283,
+    1.6713072061538696
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 1146,
+  "alpha_trim_deg": -3.0,
+  "glb_sha256": "5f2705109689288a48c7e36e1b8bd991b7c7aefebc6846bbbe58dc212e565376",
+  "path": "assets/traffic/C6_HELI/C6_HELI_0002.glb"
+}

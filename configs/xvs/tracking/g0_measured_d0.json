@@ -1,0 +1,99 @@
+{
+  "schema": "xvs.tracking_g0/1",
+  "rate_hz": 10.0,
+  "s50_px": 2.200781900326646,
+  "w_px": 0.8308485696484768,
+  "sigma_px": 0.3,
+  "sigma_s_px": 0.3,
+  "sigma_ang_rad": 0.001,
+  "ins_sigma_deg": 0.02,
+  "ins_tau_s": 30.0,
+  "latency_ms": 0.0,
+  "fppi_lambda": 27.674445884407866,
+  "terrain_clutter_factor": 65.84495279137413,
+  "fa_size_min_px": 1.0,
+  "fa_size_max_px": 4.0,
+  "markov_misses": false,
+  "p_stay": 0.8,
+  "duplicate_gate_sigma": 3.0,
+  "association_gate_prob": 0.997,
+  "initiation_m": 3,
+  "initiation_n": 5,
+  "deletion_timeout_s": 4.0,
+  "q_omega": 0.0001,
+  "q_s": 1e-06,
+  "ttc_k_sigma": 3.0,
+  "hmd_lowc_limit_m": 609.6,
+  "alert_t_warning_s": 25.0,
+  "alert_t_corrective_s": 55.0,
+  "alert_omega_thr_radps": 0.005,
+  "provenances": {
+    "rate_hz": "WP05 \u00a71",
+    "s50_px": "WP-04 G0 D0 MLE log_logistic fit, G0",
+    "w_px": "WP-04 G0 D0 MLE log_logistic fit, G0",
+    "sigma_px": "WP05 \u00a71",
+    "sigma_s_px": "UNMEASURED ESTIMATE",
+    "sigma_ang_rad": "R7 \u00a74",
+    "ins_sigma_deg": "R7 \u00a74",
+    "ins_tau_s": "WP05 \u00a71",
+    "latency_ms": "WP05 \u00a71",
+    "fppi_lambda": "WP-04 G3a D0 natural measured (k*=3, tau*=20.0, 27.674446 FP/cam-frame)",
+    "terrain_clutter_factor": "WP-04 G0 D0, G3a f29430883a0116f7aadb0dfb2f0d201cb9a3344df206735aa2689083b893fbee (output/xvs/wp04/g0/g3a_results.json:false_positive_sweeps.degraded.3.20.0: fp_per_mpx_earth / fp_per_mpx_sky = 11.693179 / 0.177587 = 65.844953)",
+    "fa_size_min_px": "WP05 \u00a71",
+    "fa_size_max_px": "WP05 \u00a71",
+    "markov_misses": "WP05 \u00a71",
+    "p_stay": "WP05 \u00a71",
+    "duplicate_gate_sigma": "WP05 \u00a72",
+    "association_gate_prob": "WP05 \u00a72",
+    "initiation_m": "WP05 \u00a72",
+    "initiation_n": "WP05 \u00a72",
+    "deletion_timeout_s": "R7 \u00a72.4",
+    "q_omega": "UNMEASURED ESTIMATE",
+    "q_s": "UNMEASURED ESTIMATE",
+    "ttc_k_sigma": "WP05 \u00a73",
+    "hmd_lowc_limit_m": "R7 \u00a72.3",
+    "alert_t_warning_s": "R7 \u00a72.4",
+    "alert_t_corrective_s": "R7 \u00a72.4",
+    "alert_omega_thr_radps": "UNMEASURED ESTIMATE",
+    "release_json_sha256": "WP-02 G3a v0.1 release SHA-256 (f29430883a0116f7aadb0dfb2f0d201cb9a3344df206735aa2689083b893fbee)",
+    "w_ln": "WP-04 G0 D0 MLE log_logistic fit, G0",
+    "pd_mode": "WP-04 G0 D0 MLE log_logistic fit, G0"
+  },
+  "release_json_sha256": "f29430883a0116f7aadb0dfb2f0d201cb9a3344df206735aa2689083b893fbee",
+  "w_ln": 0.8308485696484768,
+  "pd_mode": "log_logistic",
+  "pd_empirical_table": [
+    [
+      0.5,
+      0.14981617647058823
+    ],
+    [
+      1.5,
+      0.5407098121085595
+    ],
+    [
+      2.5,
+      0.5769230769230769
+    ],
+    [
+      3.5,
+      0.6473029045643154
+    ],
+    [
+      5.0,
+      0.6548592188919165
+    ],
+    [
+      7.0,
+      0.7495126705653021
+    ],
+    [
+      12.0,
+      0.8692307692307693
+    ],
+    [
+      16.0,
+      0.9706209659470287
+    ]
+  ]
+}

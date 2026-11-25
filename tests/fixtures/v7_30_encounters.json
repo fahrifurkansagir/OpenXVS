@@ -1,0 +1,302 @@
+{
+  "E0001": {
+    "id": "E0001",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 53.93241129631813,
+    "hmd_m": 119.91050484752378,
+    "vmd_m": 172.18436866250028,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0002": {
+    "id": "E0002",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 42.50113037954166,
+    "hmd_m": 1444.2708189767873,
+    "vmd_m": 245.58998875873442,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0003": {
+    "id": "E0003",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 57.02556729091309,
+    "hmd_m": 812.6290737579706,
+    "vmd_m": 113.95890696981346,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0004": {
+    "id": "E0004",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 38.85916221617205,
+    "hmd_m": 127.71037283236697,
+    "vmd_m": 160.46789130694214,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0005": {
+    "id": "E0005",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 36.53886440066828,
+    "hmd_m": 684.8419979358246,
+    "vmd_m": 100.61275289897188,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0006": {
+    "id": "E0006",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 34.10226670771505,
+    "hmd_m": 23.925019455690016,
+    "vmd_m": 208.9857152224809,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0007": {
+    "id": "E0007",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 55.462476539655746,
+    "hmd_m": 333.27707270019744,
+    "vmd_m": 164.65940883416727,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0008": {
+    "id": "E0008",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 49.64001617329031,
+    "hmd_m": 100.80239403184909,
+    "vmd_m": 286.01242370218824,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0009": {
+    "id": "E0009",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 33.11875937572718,
+    "hmd_m": 559.3744018662886,
+    "vmd_m": 295.2605123464385,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0010": {
+    "id": "E0010",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 59.09528673790932,
+    "hmd_m": 16.376238443308637,
+    "vmd_m": 198.05886198948372,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0011": {
+    "id": "E0011",
+    "lowc_t": 26.400000000000002,
+    "nmac_t": 29.580000000000002,
+    "t_cpa_s": 30.63647129597383,
+    "hmd_m": 7.995696689585908,
+    "vmd_m": 27.27350169100964,
+    "is_threat": true,
+    "is_nmac": true
+  },
+  "E0012": {
+    "id": "E0012",
+    "lowc_t": 30.6,
+    "nmac_t": 34.1,
+    "t_cpa_s": 34.7499941510003,
+    "hmd_m": 119.65930931335149,
+    "vmd_m": -23.29651056301354,
+    "is_threat": true,
+    "is_nmac": true
+  },
+  "E0013": {
+    "id": "E0013",
+    "lowc_t": 37.29,
+    "nmac_t": null,
+    "t_cpa_s": 41.15007718329039,
+    "hmd_m": 326.90739475651554,
+    "vmd_m": -25.867672490420233,
+    "is_threat": true,
+    "is_nmac": false
+  },
+  "E0014": {
+    "id": "E0014",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 56.06495393556411,
+    "hmd_m": 1420.7328408738585,
+    "vmd_m": 16.259280365737823,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0015": {
+    "id": "E0015",
+    "lowc_t": 47.78,
+    "nmac_t": null,
+    "t_cpa_s": 49.33363330514142,
+    "hmd_m": 571.8735788657018,
+    "vmd_m": -4.3588639129805244,
+    "is_threat": true,
+    "is_nmac": false
+  },
+  "E0016": {
+    "id": "E0016",
+    "lowc_t": 36.0,
+    "nmac_t": 39.36,
+    "t_cpa_s": 40.39565031192758,
+    "hmd_m": 50.03688804274465,
+    "vmd_m": 8.961605411360692,
+    "is_threat": true,
+    "is_nmac": true
+  },
+  "E0017": {
+    "id": "E0017",
+    "lowc_t": 35.63,
+    "nmac_t": null,
+    "t_cpa_s": 39.818123441267566,
+    "hmd_m": 155.52773735078873,
+    "vmd_m": -27.25417314214902,
+    "is_threat": true,
+    "is_nmac": false
+  },
+  "E0018": {
+    "id": "E0018",
+    "lowc_t": 51.11,
+    "nmac_t": 54.47,
+    "t_cpa_s": 55.537243764270734,
+    "hmd_m": 38.83804567540205,
+    "vmd_m": -26.470669782306715,
+    "is_threat": true,
+    "is_nmac": true
+  },
+  "E0019": {
+    "id": "E0019",
+    "lowc_t": 40.01,
+    "nmac_t": 43.28,
+    "t_cpa_s": 44.26198751385265,
+    "hmd_m": 59.96138471737588,
+    "vmd_m": 19.725980922028835,
+    "is_threat": true,
+    "is_nmac": true
+  },
+  "E0020": {
+    "id": "E0020",
+    "lowc_t": 34.77,
+    "nmac_t": null,
+    "t_cpa_s": 38.61283286018882,
+    "hmd_m": 341.0785945764672,
+    "vmd_m": 4.090575328463885,
+    "is_threat": true,
+    "is_nmac": false
+  },
+  "E0021": {
+    "id": "E0021",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 53.60798149027879,
+    "hmd_m": 680.6782276173511,
+    "vmd_m": -121.18317051959045,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0022": {
+    "id": "E0022",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 59.287301643240205,
+    "hmd_m": 987.8564479284956,
+    "vmd_m": -209.07724073350806,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0023": {
+    "id": "E0023",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 43.98900766880292,
+    "hmd_m": 146.6664812958607,
+    "vmd_m": -188.12389651021675,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0024": {
+    "id": "E0024",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 41.71368205390971,
+    "hmd_m": 855.3321136985217,
+    "vmd_m": -185.39929518709152,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0025": {
+    "id": "E0025",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 35.19859502992485,
+    "hmd_m": 743.7800086828905,
+    "vmd_m": -217.20614163091182,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0026": {
+    "id": "E0026",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 38.576874286512194,
+    "hmd_m": 81.42761832407717,
+    "vmd_m": -184.65339614347255,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0027": {
+    "id": "E0027",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 42.117605845382094,
+    "hmd_m": 83.76747638640146,
+    "vmd_m": -203.54650021475288,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0028": {
+    "id": "E0028",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 52.67544718766405,
+    "hmd_m": 118.03964951776376,
+    "vmd_m": -283.25401089306223,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0029": {
+    "id": "E0029",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 33.50876667353697,
+    "hmd_m": 115.8623056846699,
+    "vmd_m": -111.41259950649562,
+    "is_threat": false,
+    "is_nmac": false
+  },
+  "E0030": {
+    "id": "E0030",
+    "lowc_t": null,
+    "nmac_t": null,
+    "t_cpa_s": 58.48760643654801,
+    "hmd_m": 78.70527488963828,
+    "vmd_m": -157.14412510636367,
+    "is_threat": false,
+    "is_nmac": false
+  }
+}

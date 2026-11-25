@@ -1,0 +1,144 @@
+# OpenXVS v2.0 EUROCAE ED-324 (SAE ARP6983) GSN v3 Assurance Case
+# Format: SCSC-141C / gsn2x-compatible top-level node mapping
+# Schema: xvs.ed324_gsn/1 | Standard: SCSC-141C / EUROCAE ED-324 (SAE ARP6983) GSN v3
+
+G0:
+  text: "OpenXVS v2.0 civil Detect-and-Avoid and GNSS-resilient perception software maintains bounded runtime safety margins within its defined civil ODD, with unverified hardware/toolchain certification gaps explicitly isolated in G5_GAP."
+  inContextOf:
+    - C1
+    - C2
+  supportedBy:
+    - S1
+
+C1:
+  text: "Strictly civil aviation ODD (14 CFR Part 91/135 GA & Part 107/108 UAS; Charter §2 civil-only scope, zero active radar emissions on passive EO/LWIR sensors) under known deferral tags ([PENDING_COLAB_G4_TRAINING], [PENDING_NATIVE_LINUX_GPU_WCET], [LOCAL_LOOPBACK_SITL_EMULATOR; FULL_ARDUPILOT_BINARY_DEFERRED_TO_PHASE_4], [PREWIRED_PHASE4_PENDING_CAPTURE])."
+
+C2:
+  text: "EUROCAE ED-324 / SAE ARP6983 Objective 4, EASA NPA 2025-07 (Proposed Issue 03) R-LM-07 to R-LM-11, RTCA DO-365A/B, TSO-C151d / DO-367, and CONVENTIONS.md v1.0 (ECEF/NED/BODY/CAM, Hamilton quaternions w>=0, zero internal ENU)."
+
+S1:
+  text: "Argue bounded civil runtime safety via five decomposed pillars: (G1) deterministic conflict avoidance & zero-alloc RT execution, (G2) formal Simplex RTA safety monitor & bit-exact cross-language parity, (G3) calibrated ML OOD/conformal/Vision-RAIM bounds, (G4) cryptographic provenance & hash-chained reproducibility, and (G5_GAP) explicit undeveloped boundary for external avionics certification artifacts."
+  supportedBy:
+    - G1
+    - G2
+    - G3
+    - G4
+    - G5_GAP
+
+G1:
+  text: "Deterministic fixed-wing conflict avoidance (K=5 NED MH-VIT, 3D NED ECBF-QP, isolated DAIDALUS C-ABI, and 3-ship XVS-MeshDAA) executes with zero hot-loop heap allocations and achieves zero NMAC across 500 seeded civil encounters."
+  supportedBy:
+    - Sn1_MHVIT
+    - Sn2_HYBRID_CBF
+    - Sn3_DAQP_WCET
+
+Sn1_MHVIT:
+  text: "WSL2 C++20 + libxvs_core.a K=5 log-spaced NED MH-VIT (0% inward overshoot) & 500-encounter XVS-MeshDAA multi-intruder evidence."
+  url: "output/xvs/v2_m3/v1_xvs_rt_evidence.json"
+  evidenceFiles:
+    - path: "output/xvs/v2_m3/v1_xvs_rt_evidence.json"
+      sha256: "7ec4638bb82dfb82f6f0dd478f4197864a863d1d560459cdec3d16bd1eb2e472"
+      size_bytes: 3121
+    - path: "output/xvs/v2_m3/v2_meshdaa_500enc_evidence.json"
+      sha256: "70f632ae626dd7721c90b1a2e36fb10720637de826b902e0802f8f63a790a384"
+      size_bytes: 1054
+
+Sn2_HYBRID_CBF:
+  text: "Strict NED 3D fixed-wing ECBF-QP safety/viability & 3-ship 0-NMAC / ghost-suppression closed-loop evidence."
+  url: "output/xvs/v2_m3/v1_xvs_rt_evidence.json"
+  evidenceFiles:
+    - path: "output/xvs/v2_m3/v1_xvs_rt_evidence.json"
+      sha256: "7ec4638bb82dfb82f6f0dd478f4197864a863d1d560459cdec3d16bd1eb2e472"
+      size_bytes: 3121
+    - path: "output/xvs/v2_m3/v2_meshdaa_500enc_evidence.json"
+      sha256: "70f632ae626dd7721c90b1a2e36fb10720637de826b902e0802f8f63a790a384"
+      size_bytes: 1054
+
+Sn3_DAQP_WCET:
+  text: "WSL2 g++ -Wl,--wrap=malloc zero-allocation hot-loop audit (0 B under both -O0 and -O2) & DAQP-ABI active-set solver timing evidence."
+  url: "output/xvs/v2_m3/v1_xvs_rt_evidence.json"
+  evidenceFiles:
+    - path: "output/xvs/v2_m3/v1_xvs_rt_evidence.json"
+      sha256: "7ec4638bb82dfb82f6f0dd478f4197864a863d1d560459cdec3d16bd1eb2e472"
+      size_bytes: 3121
+
+G2:
+  text: "Deterministic no_std Simplex RTA monitor (xvs-rta-core) enforces fail-closed mode transitions, non-finite rejection, and cross-language bit-exact parity across Rust, Python, WASM, and C++20 FFI."
+  supportedBy:
+    - G2_TLA_DEFERRED
+    - Sn5_KANI
+    - Sn6_PARITY
+
+G2_TLA_DEFERRED:
+  text: "Full TLA+ temporal model checking of distributed multi-ship Simplex RTA liveness properties is explicitly deferred (undeveloped); local safety invariants are currently bounded by 5/5 Kani/CBMC proofs (Sn5_KANI) and 100k proptest cases."
+  undeveloped: true
+
+Sn5_KANI:
+  text: "WSL2 Kani/CBMC 5/5 formal verification harness log on frozen no_std xvs-rta-core."
+  url: "output/xvs/v2_m1/kani_proofs.log"
+  evidenceFiles:
+    - path: "output/xvs/v2_m1/kani_proofs.log"
+      sha256: "99ed76777e33c80535b3f420d2b4ed1370d0f3a5a98fb81b790640c00987c967"
+      size_bytes: 1347680
+
+Sn6_PARITY:
+  text: "10,000-tick bit-exact Simplex RTA & codec differential parity plus WebGPU/WebGL2 browser E2E verification."
+  url: "output/xvs/v2_m1/parity_results.json"
+  evidenceFiles:
+    - path: "output/xvs/v2_m1/parity_results.json"
+      sha256: "76e032b0ebc7b46fd6e88de36fee3a2a0ed2a01e5ae4acb71ace1d7320f8b710"
+      size_bytes: 1245
+    - path: "output/xvs/v2_m1/e2e_results.json"
+      sha256: "fe5b071fee472d8d30f6d1921b377c1f603c661bc95c2ffe64c856b83908f49c"
+      size_bytes: 21694
+
+G3:
+  text: "ML perception modules are bounded by fail-closed sensor health gating, split-conformal Vision-RAIM protection levels, 6-stage visual-aliasing rejection, and EASA R-LM-07 to R-LM-11 offline OOD/SAE/AST assurance audits."
+  supportedBy:
+    - Sn7_DTACI_OOD
+    - Sn8_SPLIT_H3
+
+Sn7_DTACI_OOD:
+  text: "LWIR physics & XVS-ThermalNet 47-case fail-closed gating plus XVS-VRAIM Mahalanobis OOD, Top-K SAE, and seeded AST EASA R-LM-07 to R-LM-11 audit."
+  url: "output/xvs/v2_m2/v3_lwir_thermal_world_evidence.json"
+  evidenceFiles:
+    - path: "output/xvs/v2_m2/v3_lwir_thermal_world_evidence.json"
+      sha256: "8a54a1c397a6b95693084dae0940d5326c2c5ab71badae0551566061dffb1bf2"
+      size_bytes: 2076
+    - path: "output/xvs/v2_m2/v5_nav_vraim_evidence.json"
+      sha256: "1c3c1cb87e8368cd2c3fabc614aeecab3354814932ee234343e32de37c3e2d0b"
+      size_bytes: 1373
+
+Sn8_SPLIT_H3:
+  text: "WP-01b curved ray-DEM / TSO-C151d TAWS FLTA, XVS-Land hybrid Conformal-RAIM (KSFO 28L vs Taxiway C/28R), and XVS-Nav 6-stage aliasing gate evidence."
+  url: "output/xvs/v2_m2/v4_wp01b_land_evidence.json"
+  evidenceFiles:
+    - path: "output/xvs/v2_m2/v4_wp01b_land_evidence.json"
+      sha256: "20eb12a8b9a00eb07d576d817ba0e782644d4f0d830e9d0e4d2091d8949f8e8a"
+      size_bytes: 1685
+    - path: "output/xvs/v2_m2/v5_nav_vraim_evidence.json"
+      sha256: "1c3c1cb87e8368cd2c3fabc614aeecab3354814932ee234343e32de37c3e2d0b"
+      size_bytes: 1373
+
+G4:
+  text: "All verification metrics and benchmark artifacts are reproducibly bound to authoritative on-disk JSON producers via rv() provenance tracking and an Ed25519-signed SHA-256 hash chain."
+  supportedBy:
+    - Sn9_PROVENANCE
+
+Sn9_PROVENANCE:
+  text: "Provenance-verified M1 & M2 reports plus Stage-2 XVS-Bench Ed25519-signed SHA-256 hash chain (strictly acyclic lower-stage inputs)."
+  url: "docs/xvs/reports/V2_M1_livedeck_report.md"
+  evidenceFiles:
+    - path: "docs/xvs/reports/V2_M1_livedeck_report.md"
+      sha256: "584fb9eb992904c20268a1615ba1ece36371f1e065f4f3ecbe902a76bd278f0b"
+      size_bytes: 7377
+    - path: "docs/xvs/reports/V2_M2_local_prep_report.md"
+      sha256: "a865806505568f1a5afb0dd2d903df7d8095561ad25582ecc038b39ad4f1b27c"
+      size_bytes: 8069
+    - path: "output/xvs/v2_m3/xvs_bench_chain.json"
+      sha256: "8954130b24317bd6c819c9ed36a50246c8794c9353ff9378af3f45e17b94ce60"
+      size_bytes: 7101
+
+G5_GAP:
+  text: "EXPLICIT UNDEVELOPED CERTIFICATION GAP (NOT CLAIMED BY OPENXVS): RTCA DO-254 complex electronic hardware assurance, DAL-A/B qualified compiler & RTCA DO-330 tool qualification, ARINC 653 certified RTOS partitioning, airframe-level SAE ARP4754B FHA/PSSA/SSA, and independent human DER/CVE verification sign-off (EASA QA-01 / RTCA DO-178C Table A-7)."
+  undeveloped: true

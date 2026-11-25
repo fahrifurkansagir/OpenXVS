@@ -1,0 +1,65 @@
+{
+  "schema": "xvs.wp07.g0_spec/1",
+  "worker_subtrahend": 4,
+  "projected_12_seeds": 12,
+  "ci_level_pct": 95,
+  "band_tol_pct": 2,
+  "t2_frame_period_s": 0.2,
+  "t1_t3_frame_period_s": 0.5,
+  "tta_thr_0_5s": 0.5,
+  "tta_thr_1_5s": 1.5,
+  "tta_thr_5_0s": 5.0,
+  "tta_thr_1_frame": 1,
+  "tta_thr_3_frames": 3,
+  "tta_thr_10_frames": 10,
+  "al_primary_deg": 0.5,
+  "al_secondary_deg": 0.1,
+  "alpha_01": 0.1,
+  "alpha_001": 0.01,
+  "alpha_0001": 0.001,
+  "single_cam_c": 1,
+  "n_flight_poses": 540,
+  "sigma_cal_g0": 0,
+  "spec_injected_fault_type_count": 4,
+  "d29_ft_ub_limit_hr": 1.0,
+  "pytest_faults_argv": [
+    "$env:PYTHONPATH='src'; & .venv\\Scripts\\python.exe -m pytest tests/xvs/test_integrity_v3.py -v"
+  ],
+  "make_data_pilot_argv": [
+    "scripts/xvs/integrity/make_wp07_data.py",
+    "--pilot-only"
+  ],
+  "pytest_monitor_argv": [
+    "$env:PYTHONPATH='src'; & .venv\\Scripts\\python.exe -m pytest tests/xvs/test_integrity_v2.py -v"
+  ],
+  "pytest_conformal_argv": [
+    "$env:PYTHONPATH='src'; & .venv\\Scripts\\python.exe -m pytest tests/xvs/test_integrity_v1.py tests/xvs/test_integrity_v5.py tests/xvs/test_integrity_gb13.py -v"
+  ],
+  "pytest_json_repro_argv": [
+    "$env:PYTHONPATH='src'; & .venv\\Scripts\\python.exe -m pytest tests/xvs/test_integrity_v4.py -v"
+  ],
+  "report_argv": [
+    "scripts/xvs/integrity/report_tables_wp07.py"
+  ],
+  "chat_drift_figures": {
+    "fault_types_count": 6,
+    "hmi_k": 0,
+    "far01_val_k": 123,
+    "far01_val_rate": 0.005061728395061728,
+    "far01_test_k": 126,
+    "far01_test_rate": 0.005185185185185185,
+    "cov_n": 24300,
+    "w7_late_missed": 859,
+    "w7_tau_unavail": 796,
+    "w7_tau_unavail_rate": 0.9266589057043073,
+    "w7_rule_lim": 384,
+    "w7_rule_lim_rate": 0.4470314318975553,
+    "w7_est_lim": 449,
+    "w7_est_lim_rate": 0.526,
+    "w7_no_track": 3,
+    "w7_no_track_rate": 0.0034924330616996507,
+    "w7_missed_per_seed": 17.8,
+    "w7_threats_per_seed": 27.8,
+    "lambda_req_provisional": 0.5
+  }
+}

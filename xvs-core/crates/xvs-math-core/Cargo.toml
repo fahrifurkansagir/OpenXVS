@@ -1,0 +1,10 @@
+[package]
+name = "xvs-math-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenXVS v2.0 no_std DetF64 flight dynamics, dual-bank ES-EKF, Vision-RAIM, MeshDAA, 3D ECBF-QP, DtACI, and avionics codecs"
+
+[dependencies]
+libm = "0.2"
+xvs-rta-core = { path = "../xvs-rta-core", version = "0.1.0" }

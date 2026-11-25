@@ -1,0 +1,287 @@
+{
+  "schema": "xvs.camera_ring/1",
+  "ring_id": "XVS-TRAFFIC-RING-8-v1",
+  "description": "Traffic-detection camera ring (R1-P1): 8 identical global-shutter pinhole cameras at 45 deg azimuth spacing in the body horizontal plane. Design geometry for WP-02 ROI rendering and ground truth; installation errors are not modelled in WP-02 (nominal only).",
+  "conventions": "docs/xvs/CONVENTIONS.md v1.0; same frames and R_body_cam definition as spec/rig_nominal.json",
+  "body_frame": "FRD (x forward, y right, z down), origin = Aircraft Reference Point (IMU)",
+  "camera_frame": "OpenCV (x right, y down, z forward), origin = optical centre",
+  "R_body_cam_definition": "v_body = R_body_cam @ v_cam; columns are the camera x, y, z axes expressed in BODY; stored row-major",
+  "image": {
+    "width": 2448,
+    "height": 2048,
+    "pixel_convention": "integer (u,v) = pixel centres; image spans [-0.5, W-0.5] x [-0.5, H-0.5]"
+  },
+  "intrinsics": {
+    "model": "pinhole_ideal",
+    "fx": 2319.0,
+    "fy": 2319.0,
+    "cx": 1223.5,
+    "cy": 1023.5,
+    "fov_h_deg": 55.651413,
+    "fov_v_deg": 47.649595,
+    "ifov_on_axis_mrad": 0.43122,
+    "note": "fx from a 3.45 um pixel and an 8 mm lens (R1 section 5); adjacent cameras overlap by fov_h - 45 deg",
+    "distortion": null
+  },
+  "time_model": {
+    "shutter": "global",
+    "sync": "all cameras exposed at the frame timestamp (WP-02)"
+  },
+  "roi_rendering": {
+    "roi_size_px": [
+      1024,
+      1024
+    ],
+    "rule": "ROI top-left (u0, v0) integer, clamped to [0, W-1024] x [0, H-1024]; full-image pixel = ROI pixel + (u0, v0); see WP02_TRAFFIC.md section 2.4"
+  },
+  "cameras": [
+    {
+      "id": "T0",
+      "azimuth_body_deg": 0.0,
+      "lever_arm_m": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "R_body_cam": [
+        [
+          -0.0,
+          0.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "boresight_body": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": "T1",
+      "azimuth_body_deg": 45.0,
+      "lever_arm_m": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "R_body_cam": [
+        [
+          -0.7071067811865475,
+          0.0,
+          0.7071067811865476
+        ],
+        [
+          0.7071067811865476,
+          0.0,
+          0.7071067811865475
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "boresight_body": [
+        0.7071067811865476,
+        0.7071067811865475,
+        0.0
+      ]
+    },
+    {
+      "id": "T2",
+      "azimuth_body_deg": 90.0,
+      "lever_arm_m": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "R_body_cam": [
+        [
+          -1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "boresight_body": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "id": "T3",
+      "azimuth_body_deg": 135.0,
+      "lever_arm_m": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "R_body_cam": [
+        [
+          -0.7071067811865476,
+          0.0,
+          -0.7071067811865475
+        ],
+        [
+          -0.7071067811865475,
+          0.0,
+          0.7071067811865476
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "boresight_body": [
+        -0.7071067811865475,
+        0.7071067811865476,
+        0.0
+      ]
+    },
+    {
+      "id": "T4",
+      "azimuth_body_deg": 180.0,
+      "lever_arm_m": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "R_body_cam": [
+        [
+          -0.0,
+          0.0,
+          -1.0
+        ],
+        [
+          -1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "boresight_body": [
+        -1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": "T5",
+      "azimuth_body_deg": 225.0,
+      "lever_arm_m": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "R_body_cam": [
+        [
+          0.7071067811865475,
+          0.0,
+          -0.7071067811865477
+        ],
+        [
+          -0.7071067811865477,
+          0.0,
+          -0.7071067811865475
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "boresight_body": [
+        -0.7071067811865477,
+        -0.7071067811865475,
+        0.0
+      ]
+    },
+    {
+      "id": "T6",
+      "azimuth_body_deg": 270.0,
+      "lever_arm_m": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "R_body_cam": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "boresight_body": [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "id": "T7",
+      "azimuth_body_deg": 315.0,
+      "lever_arm_m": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "R_body_cam": [
+        [
+          0.7071067811865477,
+          0.0,
+          0.7071067811865474
+        ],
+        [
+          0.7071067811865474,
+          0.0,
+          -0.7071067811865477
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "boresight_body": [
+        0.7071067811865474,
+        -0.7071067811865477,
+        0.0
+      ]
+    }
+  ]
+}

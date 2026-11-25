@@ -1,0 +1,23 @@
+{
+  "schema": "xvs.sensors.g0_spec/1",
+  "tol_mask_px": 1.0,
+  "tol_vig_pct": 0.1,
+  "nom_lin": 0.0,
+  "tol_poly_px": 1.0,
+  "n_f_half": 20,
+  "n_d_half": 20,
+  "target_ms_max": 1000.0,
+  "target_sec": 1.0,
+  "trunc_energy_spec": 1e-4,
+  "commands_run": [
+    "# 1. Branch checkout\ncd \"<OPENXVS_WORKSPACE>\"\ngit checkout -b feat/xvs-gemini-g-b2",
+    "# 2. V1: sRGB implementation and unit tests\n$env:PYTHONPATH=\"src\"\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" -m pytest tests/xvs/test_sensor_srgb.py\ngit add src/xvs/sensor/__init__.py src/xvs/sensor/srgb.py tests/xvs/test_sensor_srgb.py\ngit commit -m \"XVS WP-03 V1: sRGB EOTF/OETF exact inversion and 8-bit round trip\"",
+    "# 3. V2: PSF kernel and DTFT frequency tests\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" -m pytest tests/xvs/test_sensor_psf.py\ngit add src/xvs/sensor/psf.py tests/xvs/test_sensor_psf.py\ngit commit -m \"XVS WP-03 V2: PSF kernel generation, energy normalization and DTFT match\"",
+    "# 4. V3: Distortion, bicubic warping and GT transforms\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" -m pytest tests/xvs/test_sensor_distortion.py\ngit add src/xvs/sensor/distortion.py src/xvs/sensor/gt_transform.py tests/xvs/test_sensor_distortion.py\ngit commit -m \"XVS WP-03 V3: Brown-Conrady distortion, bicubic warping and GT transforms\"",
+    "# 5. V4: Vignetting model\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" -m pytest tests/xvs/test_sensor_vignetting.py\ngit add src/xvs/sensor/vignetting.py tests/xvs/test_sensor_vignetting.py\ngit commit -m \"XVS WP-03 V4: Cos4 and polynomial optical vignetting model\"",
+    "# 6. V5: EMVA 1288 noise model and estimation\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" -m pytest tests/xvs/test_sensor_emva1288.py\ngit add src/xvs/sensor/noise.py src/xvs/sensor/emva1288.py tests/xvs/test_sensor_emva1288.py\ngit commit -m \"XVS WP-03 V5: EMVA 1288 sensor noise model and self-consistency analysis\"",
+    "# 7. V6: End-to-end chain, configs and determinism\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" -m pytest tests/xvs/test_sensor_chain.py\ngit add configs/xvs/sensors/ src/xvs/sensor/chain.py tests/xvs/test_sensor_chain.py\ngit commit -m \"XVS WP-03 V6: End-to-end imaging chain, sensor configs and determinism\"",
+    "# 8. V7: Real G4 validation and contact sheet generation\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" scripts/xvs/sensor/validate_sensor_g0.py\ngit add scripts/xvs/sensor/validate_sensor_g0.py\ngit commit -m \"XVS WP-03 V7: Master sensor model validation script, G4 contact sheets and timing\"",
+    "# 9. Report tables and full suite verification\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" scripts/xvs/sensor/report_tables_wp03.py\n& \"<OPENXVS_WORKSPACE>\\.venv\\Scripts\\python.exe\" -m pytest tests/xvs/test_sensor_*.py"
+  ]
+}

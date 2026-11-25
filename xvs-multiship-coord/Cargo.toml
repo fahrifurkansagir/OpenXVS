@@ -1,0 +1,22 @@
+[workspace]
+
+[package]
+name = "xvs-multiship-coord"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "OpenXVS V5.0 additive no_std zero-unsafe multi-ship coordination crate closing DR-22 Findings F1 (FAR 91.113 / aircraft-ID phase-staggered swerve) and F4 (XVS-MeshDAA 200ms staleness gate + sticky triple-ray ghost hysteresis)"
+publish = false
+
+[lib]
+name = "xvs_multiship_coord"
+path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[dependencies]
+libm = { version = "0.2", default-features = false }
+xvs-active-range = { path = "../xvs-active-range" }
+xvs-math-core = { path = "../xvs-core/crates/xvs-math-core" }
+xvs-rta-core = { path = "../xvs-core/crates/xvs-rta-core" }

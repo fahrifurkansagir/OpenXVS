@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/xvs-rta-core",
+    "crates/xvs-math-core",
+    "crates/xvs-ffi",
+    "crates/xvs-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+[profile.dev]
+overflow-checks = true
+
+[profile.release]
+overflow-checks = true
+lto = true
+codegen-units = 1
+
+[profile.release.package.xvs-wasm]
+opt-level = "z"

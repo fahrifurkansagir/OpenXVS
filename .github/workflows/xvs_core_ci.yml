@@ -1,0 +1,109 @@
+name: OpenXVS 4-Crate Rust, Kani Formal Proofs, Assurance & Clean-Room CI
+
+on:
+  push:
+    branches: [main, feat/xvs-v2-m1-livedeck]
+    paths:
+      - "xvs-core/**"
+      - "xvs-active-range/**"
+      - "xvs-odd-vlm/**"
+      - "xvs-os-hal/**"
+      - "assurance/**"
+      - "configs/xvs/odd/**"
+      - "src/xvs/core_ffi.py"
+      - "src/xvs/v2/studio_bridge/buyer_pack.py"
+      - "scripts/xvs/xvs_certgen.py"
+      - "scripts/xvs/build_cleanroom_export.py"
+      - "tests/xvs/**"
+      - "tests/xvs_v2/**"
+      - "tests/test_cleanroom_export.py"
+      - "tests/test_xvs_certgen.py"
+      - "tests/test_xvs_active_range.py"
+      - ".github/workflows/xvs_core_ci.yml"
+  pull_request:
+    paths:
+      - "xvs-core/**"
+      - "xvs-active-range/**"
+      - "xvs-odd-vlm/**"
+      - "xvs-os-hal/**"
+      - "assurance/**"
+      - "configs/xvs/odd/**"
+      - "src/xvs/core_ffi.py"
+      - "src/xvs/v2/studio_bridge/buyer_pack.py"
+      - "scripts/xvs/xvs_certgen.py"
+      - "scripts/xvs/build_cleanroom_export.py"
+      - "tests/xvs/**"
+      - "tests/xvs_v2/**"
+      - "tests/test_cleanroom_export.py"
+      - "tests/test_xvs_certgen.py"
+      - "tests/test_xvs_active_range.py"
+      - ".github/workflows/xvs_core_ci.yml"
+
+jobs:
+  rust-core-and-kani:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain & cross targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv7em-none-eabi,wasm32-unknown-unknown
+
+      - name: Install pinned Kani 0.68.0, cargo-deny & wasm-bindgen-cli
+        run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+          cargo install --locked cargo-deny --version 0.22.0
+          cargo install --locked wasm-bindgen-cli --version 0.2.130
+
+      - name: Verify cargo-deny license & supply-chain policy
+        run: cargo deny --manifest-path xvs-core/Cargo.toml check
+
+      - name: Bare-metal no_std check across all 4 crates (ARM Cortex-M7F thumbv7em-none-eabi)
+        run: |
+          cargo check --manifest-path xvs-core/Cargo.toml --target thumbv7em-none-eabi -p xvs-rta-core -p xvs-math-core
+          cargo check --manifest-path xvs-active-range/Cargo.toml --target thumbv7em-none-eabi --lib
+          cargo check --manifest-path xvs-odd-vlm/Cargo.toml --target thumbv7em-none-eabi
+          cargo check --manifest-path xvs-os-hal/Cargo.toml --target thumbv7em-none-eabi
+
+      - name: Clippy strict (-D warnings) across all 4 crates
+        run: |
+          cargo clippy --manifest-path xvs-core/Cargo.toml --workspace --all-targets -- -D warnings
+          cargo clippy --manifest-path xvs-active-range/Cargo.toml --all-targets -- -D warnings -A clippy::new_without_default -A clippy::manual_is_multiple_of
+          cargo clippy --manifest-path xvs-odd-vlm/Cargo.toml --all-targets -- -D warnings -A clippy::assertions_on_constants
+          cargo clippy --manifest-path xvs-os-hal/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run unit & proptest suites across all 4 Rust crates
+        run: |
+          cargo test --manifest-path xvs-core/Cargo.toml --workspace --release
+          cargo test --manifest-path xvs-active-range/Cargo.toml --release
+          cargo test --manifest-path xvs-odd-vlm/Cargo.toml --release
+          cargo test --manifest-path xvs-os-hal/Cargo.toml --release
+
+      - name: Run all 18 Kani formal CBMC proof harnesses across all 4 Rust crates
+        run: |
+          cargo kani --manifest-path xvs-core/Cargo.toml -p xvs-rta-core
+          cargo kani --manifest-path xvs-active-range/Cargo.toml
+          cargo kani --manifest-path xvs-odd-vlm/Cargo.toml
+          cargo kani --manifest-path xvs-os-hal/Cargo.toml
+
+      - name: Build xvs-ffi cdylib and xvs-wasm (<= 180 KB Brotli check)
+        run: |
+          cargo build --manifest-path xvs-core/Cargo.toml -p xvs-ffi --release
+          cargo build --manifest-path xvs-core/Cargo.toml -p xvs-wasm --target wasm32-unknown-unknown --release
+          wasm-bindgen --target web --out-dir apps/livedeck/src/wasm xvs-core/target/wasm32-unknown-unknown/release/xvs_wasm.wasm
+
+      - name: Set up Python 3.12+ & run certgen, FFI smoke, default-audit & clean-room tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install pytest numpy brotli
+          python scripts/xvs/xvs_certgen.py --check --out /tmp/xvs_certgen_ci_bundle.json
+          if [ -f tests/test_cleanroom_export.py ]; then
+            PYTHONPATH=src pytest tests/xvs_v2/test_m1_ffi_smoke.py tests/xvs/test_audit_get_defaults.py tests/test_cleanroom_export.py -v
+          else
+            PYTHONPATH=src pytest tests/xvs_v2/test_m1_ffi_smoke.py tests/xvs/test_audit_get_defaults.py -v
+          fi

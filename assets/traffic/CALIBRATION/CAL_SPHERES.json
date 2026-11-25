@@ -1,0 +1,30 @@
+{
+  "schema": "xvs.traffic_model/1",
+  "model_id": "CAL_SPHERES",
+  "class": "CALIBRATION",
+  "seed": 0,
+  "dimensions": {
+    "length_m": 11.5,
+    "span_m": 13.5,
+    "height_m": 5.0
+  },
+  "bbox_min": [
+    -5.75,
+    -6.75,
+    -3.25
+  ],
+  "bbox_max": [
+    5.75,
+    6.75,
+    1.75
+  ],
+  "origin": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "triangle_count": 30720,
+  "alpha_trim_deg": 0.0,
+  "glb_sha256": "2c3c2d480a506e9952eadfbdce1793f76acad945ff20e87844668663ac83075a",
+  "path": "assets/traffic/CALIBRATION/CAL_SPHERES.glb"
+}

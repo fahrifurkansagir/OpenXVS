@@ -1,0 +1,89 @@
+{
+  "schema": "xvs.wp05.d29_and_g0_spec/1",
+  "w7_n_lams": 7,
+  "d29_miss_margin_pp": 5.0,
+  "d29_miss_margin_frac": 0.05,
+  "d29_false_alert_margin_hr": 0.5,
+  "d29_ft_ub_hr": 1.0,
+  "baseline_lambda": 0.0005,
+  "lambda_005": 0.05,
+  "lambda_50": 5.0,
+  "pilot_limit_h": 1.5,
+  "pilot_enc_cnt": 50,
+  "pilot_workers": 8,
+  "pilot_fallback_seeds": 2,
+  "pilot_full_seeds": 5,
+  "w7_t_check_lead_s": 12.5,
+  "w7_tau_thr_s": 25.0,
+  "w7_tau_corr_s": 55.0,
+  "w7_omega_thr_radps": 0.005,
+  "w7_k_sigma": 3.0,
+  "w7_pd_thresh": 0.5,
+  "nasa_limit_radps": 0.0021,
+  "do366_acq_limit_s": 15,
+  "persist_thresh_pct": 10.0,
+  "persist_min_steps": 3,
+  "persist_min_steps_5": 5,
+  "persist_lag_1": 1,
+  "persist_lag_3": 3,
+  "persist_lag_5": 5,
+  "mn_m": 3,
+  "mn_n": 5,
+  "closure_k_val": 3,
+  "closure_tau_val": 20.0,
+  "num_cams": 8,
+  "ci_level": 95,
+  "bin_0": 0,
+  "bin_3": 3,
+  "bin_10": 10,
+  "bin_1000": 1000,
+  "bin_2000": 2000,
+  "bin_3000": 3000,
+  "bin_5000": 5000,
+  "spec_gen_pd": 1,
+  "spec_gen_tol_base": 10,
+  "spec_gen_tol_exp": -9,
+  "spec_filter_bound_pct": 90,
+  "spec_filter_chi2_pct": 95,
+  "spec_max_id_switches": 0,
+  "spec_max_seam_breaks": 0,
+  "spec_runtime_limit_h": 2,
+  "a2_prior_min_m": 0.3,
+  "a2_prior_max_m": 40,
+  "hmd_limit_m": 609.6,
+  "hmd_limit_nm": 0.33,
+  "dev_cpu_hrs": 20,
+  "dev_enc_p13a": 30,
+  "dev_enc_class": 5,
+  "dev_enc_p13b": 90,
+  "dev_enc_class_b": 15,
+  "dev_min_p13": 10,
+  "commands_argv": {
+    "mc_g0_argv": [
+      "scripts/xvs/tracking/run_mc_g0.py",
+      "--workers",
+      "8"
+    ],
+    "p1_3_argv": [
+      "scripts/xvs/tracking/run_p1_3.py",
+      "--workers",
+      "8"
+    ],
+    "lambda_sweep_crn_argv": [
+      "scripts/xvs/tracking/run_lambda_sweep_v2.py",
+      "--workers",
+      "8"
+    ],
+    "persistent_sweep_argv": [
+      "scripts/xvs/tracking/run_lambda_sweep_persistent_clutter.py",
+      "--workers",
+      "8"
+    ],
+    "pytest_argv": [
+      "& .venv\\Scripts\\python.exe -m pytest tests/xvs/test_tracking_*.py -v"
+    ],
+    "report_argv": [
+      "scripts/xvs/tracking/report_tables_wp05.py"
+    ]
+  }
+}

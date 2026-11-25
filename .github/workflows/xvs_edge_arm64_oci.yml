@@ -1,0 +1,158 @@
+name: OpenXVS Edge ARM64 OCI Build, SPDX SBOM & Private-First Cosign
+
+# Hardware-free native ARM64 OCI pipeline using GitHub `ubuntu-24.04-arm`
+# (2,400 native ARM64 min/mo free on private repos; zero QEMU emulation).
+#
+# PRIVATE-FIRST GUARDRAILS (clean-room, zero-GPL, non-flight, zero-5D002):
+# - NON_FLIGHT_SIM_ONLY=1 enforced at compile-time and container runtime.
+# - ZERO Rekor transparency-log uploads before Oct 2027 public flip:
+#   always sign with `cosign sign --key ... --tlog-upload=false`.
+# - ZERO GPL/AGPL crates and ZERO TLS/AES confidentiality crypto crates.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_nvidia_recipes:
+        description: "Also build NVIDIA Orin NX / Orin Nano Super 8GB JP 6.2 & JP 7.2 NGC recipes (requires NGC reachability)"
+        required: false
+        default: "false"
+        type: boolean
+      push_private_oci:
+        description: "Push and Cosign-sign OCI image to private registry (--tlog-upload=false)"
+        required: false
+        default: "false"
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - ".github/workflows/xvs_edge_arm64_oci.yml"
+  pull_request:
+    paths:
+      - "docker/**"
+      - ".github/workflows/xvs_edge_arm64_oci.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  arm64-edge-rust-and-oci:
+    name: Native ARM64 (ubuntu-24.04-arm) Rust ORT + RPi 5 OCI + SPDX SBOM
+    runs-on: ubuntu-24.04-arm
+    env:
+      NON_FLIGHT_SIM_ONLY: "1"
+      OPENXVS_NON_FLIGHT_SIM_ONLY: "1"
+    steps:
+      - name: Checkout clean-room source
+        uses: actions/checkout@v4
+
+      - name: Verify native aarch64 runner and zero Alpine musl policy
+        run: |
+          uname -m | grep -qE 'aarch64|arm64'
+          ! grep -iE 'FROM[[:space:]].*alpine' docker/rpi5.Dockerfile
+          ! grep -iE 'FROM[[:space:]].*alpine' docker/orin_nano_super_jp62.Dockerfile
+          grep -q 'NON_FLIGHT_SIM_ONLY=1' docker/rpi5.Dockerfile
+          grep -q 'NON_FLIGHT_SIM_ONLY=1' docker/orin_nano_super_jp62.Dockerfile
+          grep -q 'xvs-multiship-coord' docker/orin_nano_super_jp62.Dockerfile
+          grep -q 'TensorRT SLA' docker/orin_nx_jp62.Dockerfile
+          grep -q 'TensorRT SLA' docker/orin_nano_super_jp62.Dockerfile
+          grep -q 'TensorRT SLA' docker/orin_nx_jp72.Dockerfile
+
+      - name: Install Rust 1.92+ toolchain on ARM64
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Audit docker/edge-infer Cargo.lock for 5D002 (zero TLS/AES) and run ARM64 unit tests
+        run: |
+          cargo generate-lockfile --manifest-path docker/edge-infer/Cargo.toml
+          ! grep -iE '^name = "(rustls|openssl|native-tls|aes|chacha|quinn|ring|aws-lc|hyper-tls|hyper-rustls|ureq)"' docker/edge-infer/Cargo.lock
+          cargo test --manifest-path docker/edge-infer/Cargo.toml --features non_flight_sim_only --release
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Raspberry Pi 5 ARM64 OCI (Chainguard Wolfi glibc runtime)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/rpi5.Dockerfile
+          target: runtime-wolfi
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: openxvs-edge-rpi5:eval-arm64
+
+      - name: Build Raspberry Pi 5 ARM64 OCI (Distroless Debian 12 glibc runtime)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/rpi5.Dockerfile
+          target: runtime-distroless
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: openxvs-edge-rpi5:eval-distroless-arm64
+
+      - name: Smoke-test native ARM64 container self-check (NON_FLIGHT_SIM_ONLY=1)
+        run: |
+          docker run --rm --read-only openxvs-edge-rpi5:eval-arm64 | tee /tmp/rpi5_selfcheck.json
+          grep -q '"non_flight_sim_only": true' /tmp/rpi5_selfcheck.json
+          grep -q '"actuator_authority": false' /tmp/rpi5_selfcheck.json
+          grep -q '"ort_dylib_loaded": true' /tmp/rpi5_selfcheck.json
+          grep -q '"active_range_wire_crc_ok": true' /tmp/rpi5_selfcheck.json
+
+      - name: Generate SPDX 2.3 JSON SBOM via Syft and enforce Zero-GPL gate
+        uses: anchore/sbom-action@v0
+        with:
+          image: openxvs-edge-rpi5:eval-arm64
+          format: spdx-json
+          output-file: openxvs-edge-rpi5-arm64.spdx.json
+
+      - name: Audit SPDX SBOM for zero GPL/AGPL contamination in OpenXVS binary
+        run: |
+          test -s openxvs-edge-rpi5-arm64.spdx.json
+          python3 -c '
+          import json
+          doc = json.load(open("openxvs-edge-rpi5-arm64.spdx.json", encoding="utf-8"))
+          assert doc.get("spdxVersion", "").startswith("SPDX-2."), "Invalid SPDX version"
+          bad = [
+              p.get("name") for p in doc.get("packages", [])
+              if "openxvs" in str(p.get("name", "")).lower()
+              and any(g in str(p.get("licenseConcluded", "")).upper() for g in ("GPL", "AGPL"))
+          ]
+          assert not bad, f"GPL/AGPL detected in OpenXVS packages: {bad}"
+          print(f"SPDX SBOM OK: {len(doc.get(\"packages\", []))} packages indexed, 0 OpenXVS GPL hits")
+          '
+
+      - name: Upload SPDX SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openxvs-edge-rpi5-arm64-spdx
+          path: |
+            openxvs-edge-rpi5-arm64.spdx.json
+            /tmp/rpi5_selfcheck.json
+
+      - name: Optional NVIDIA Orin NX, Orin Nano Super 8GB (JP 6.2) & JP 7.2 SBSA OEM Recipe Build
+        if: ${{ inputs.build_nvidia_recipes == true }}
+        run: |
+          docker buildx build --platform linux/arm64 -f docker/orin_nx_jp62.Dockerfile -t openxvs-edge-orin-jp62:eval-arm64 --load .
+          docker buildx build --platform linux/arm64 -f docker/orin_nano_super_jp62.Dockerfile -t openxvs-edge-orin-nano-super-jp62:eval-arm64 --load .
+          docker buildx build --platform linux/arm64 -f docker/orin_nx_jp72.Dockerfile -t openxvs-edge-orin-jp72:eval-arm64 --load .
+
+      - name: Install Cosign (for Private-First offline key signing, ZERO Rekor upload)
+        if: ${{ inputs.push_private_oci == true && secrets.COSIGN_PRIVATE_KEY != '' }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Private-First Push & Sign OCI Digest (cosign --key --tlog-upload=false)
+        if: ${{ inputs.push_private_oci == true && secrets.COSIGN_PRIVATE_KEY != '' && secrets.PRIVATE_OCI_REGISTRY != '' }}
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          PRIVATE_OCI_REGISTRY: ${{ secrets.PRIVATE_OCI_REGISTRY }}
+        run: |
+          IMAGE_REF="${PRIVATE_OCI_REGISTRY}/openxvs-edge-rpi5"
+          docker tag openxvs-edge-rpi5:eval-arm64 "${IMAGE_REF}:eval-arm64"
+          docker push "${IMAGE_REF}:eval-arm64"
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_REF}:eval-arm64")"
+          # STRICT PRIVATE-FIRST RULE: --tlog-upload=false prevents Rekor public transparency leak pre-NeurIPS!
+          cosign sign --key env://COSIGN_PRIVATE_KEY --tlog-upload=false --yes "${DIGEST}"
