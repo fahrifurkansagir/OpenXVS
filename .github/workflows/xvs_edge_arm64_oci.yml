@@ -120,7 +120,8 @@ jobs:
               and any(g in str(p.get("licenseConcluded", "")).upper() for g in ("GPL", "AGPL"))
           ]
           assert not bad, f"GPL/AGPL detected in OpenXVS packages: {bad}"
-          print(f"SPDX SBOM OK: {len(doc.get(\"packages\", []))} packages indexed, 0 OpenXVS GPL hits")
+          pkg_count = len(doc.get("packages", []))
+          print(f"SPDX SBOM OK: {pkg_count} packages indexed, 0 OpenXVS GPL hits")
           '
 
       - name: Upload SPDX SBOM artifact
