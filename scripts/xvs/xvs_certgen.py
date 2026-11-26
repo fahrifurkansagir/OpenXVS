@@ -201,6 +201,7 @@ def synthesize_assurance_bundle(
     *,
     gsn_path: Path = DEFAULT_GSN_PATH,
     repo_root: Path = REPO_ROOT,
+    cleanroom: bool = False,
 ) -> dict[str, Any]:
     """Compile GSN v3 graph, verify cryptographic evidence & fail-closed gap locks."""
     errors: list[str] = []
@@ -290,7 +291,11 @@ def synthesize_assurance_bundle(
             expected_size = int(entry["size_bytes"]) if "size_bytes" in entry else None
 
             if not full_path.is_file():
-                errors.append(f"MISSING_EVIDENCE_FILE: {nid} -> {rel_path}")
+                is_cleanroom_omitted = cleanroom and (
+                    rel_path.startswith("output/") or rel_path.startswith("docs/xvs/reports/")
+                )
+                if not is_cleanroom_omitted:
+                    errors.append(f"MISSING_EVIDENCE_FILE: {nid} -> {rel_path}")
                 gsn_evidence_ledger.append(
                     {
                         "node": nid,
@@ -298,6 +303,7 @@ def synthesize_assurance_bundle(
                         "present": False,
                         "sha256_match": False,
                         "size_match": False,
+                        "skipped_cleanroom": is_cleanroom_omitted,
                     }
                 )
                 continue
@@ -343,7 +349,8 @@ def synthesize_assurance_bundle(
                 }
             )
         else:
-            if required:
+            is_cleanroom_omitted = cleanroom and rel_path.startswith("docs/xvs/reports/")
+            if required and not is_cleanroom_omitted:
                 errors.append(f"MISSING_LIVE_ARTIFACT: {rel_path}")
             live_artifact_ledger.append(
                 {
@@ -352,6 +359,7 @@ def synthesize_assurance_bundle(
                     "present": False,
                     "sha256": None,
                     "size_bytes": 0,
+                    "skipped_cleanroom": is_cleanroom_omitted,
                 }
             )
 
@@ -438,9 +446,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="CI fail-closed mode: exit 1 if any GSN/hash/gap/claim check fails",
     )
+    parser.add_argument(
+        "--cleanroom",
+        action="store_true",
+        help="Public clean-room CI mode: skip gitignored output/ and internal docs/xvs/reports/ while enforcing GSN DAG, gap locks, forbidden claims, 18/18 Kani proofs, and tracked artifacts",
+    )
     args = parser.parse_args(argv)
 
-    bundle = synthesize_assurance_bundle(gsn_path=args.gsn, repo_root=args.repo_root)
+    bundle = synthesize_assurance_bundle(
+        gsn_path=args.gsn,
+        repo_root=args.repo_root,
+        cleanroom=args.cleanroom,
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

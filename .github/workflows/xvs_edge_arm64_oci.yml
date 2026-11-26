@@ -1,12 +1,11 @@
-name: OpenXVS Edge ARM64 OCI Build, SPDX SBOM & Private-First Cosign
+name: OpenXVS Edge ARM64 OCI Build, SPDX SBOM & Offline Cosign
 
 # Hardware-free native ARM64 OCI pipeline using GitHub `ubuntu-24.04-arm`
-# (2,400 native ARM64 min/mo free on private repos; zero QEMU emulation).
+# (native ARM64 runner; zero QEMU emulation).
 #
-# PRIVATE-FIRST GUARDRAILS (clean-room, zero-GPL, non-flight, zero-5D002):
+# GUARDRAILS (clean-room, zero-GPL, non-flight, zero-5D002):
 # - NON_FLIGHT_SIM_ONLY=1 enforced at compile-time and container runtime.
-# - ZERO Rekor transparency-log uploads before Oct 2027 public flip:
-#   always sign with `cosign sign --key ... --tlog-upload=false`.
+# - Offline Cosign signing (`cosign sign --key ... --tlog-upload=false`) when enabled.
 # - ZERO GPL/AGPL crates and ZERO TLS/AES confidentiality crypto crates.
 
 on:
@@ -139,20 +138,23 @@ jobs:
           docker buildx build --platform linux/arm64 -f docker/orin_nano_super_jp62.Dockerfile -t openxvs-edge-orin-nano-super-jp62:eval-arm64 --load .
           docker buildx build --platform linux/arm64 -f docker/orin_nx_jp72.Dockerfile -t openxvs-edge-orin-jp72:eval-arm64 --load .
 
-      - name: Install Cosign (for Private-First offline key signing, ZERO Rekor upload)
-        if: ${{ inputs.push_private_oci == true && secrets.COSIGN_PRIVATE_KEY != '' }}
+      - name: Install Cosign (offline key signing, ZERO Rekor upload)
+        if: ${{ inputs.push_private_oci == true }}
         uses: sigstore/cosign-installer@v3
 
-      - name: Private-First Push & Sign OCI Digest (cosign --key --tlog-upload=false)
-        if: ${{ inputs.push_private_oci == true && secrets.COSIGN_PRIVATE_KEY != '' && secrets.PRIVATE_OCI_REGISTRY != '' }}
+      - name: Push & Sign OCI Digest (cosign --key --tlog-upload=false)
+        if: ${{ inputs.push_private_oci == true }}
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
           PRIVATE_OCI_REGISTRY: ${{ secrets.PRIVATE_OCI_REGISTRY }}
         run: |
+          if [ -z "${COSIGN_PRIVATE_KEY}" ] || [ -z "${PRIVATE_OCI_REGISTRY}" ]; then
+            echo "Skipping OCI push/sign: COSIGN_PRIVATE_KEY or PRIVATE_OCI_REGISTRY secret not set."
+            exit 0
+          fi
           IMAGE_REF="${PRIVATE_OCI_REGISTRY}/openxvs-edge-rpi5"
           docker tag openxvs-edge-rpi5:eval-arm64 "${IMAGE_REF}:eval-arm64"
           docker push "${IMAGE_REF}:eval-arm64"
           DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_REF}:eval-arm64")"
-          # STRICT PRIVATE-FIRST RULE: --tlog-upload=false prevents Rekor public transparency leak pre-NeurIPS!
           cosign sign --key env://COSIGN_PRIVATE_KEY --tlog-upload=false --yes "${DIGEST}"
