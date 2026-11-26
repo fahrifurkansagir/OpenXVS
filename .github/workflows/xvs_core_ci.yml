@@ -101,7 +101,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: |
-          python -m pip install pytest numpy brotli
+          python -m pip install pytest numpy brotli pygltflib scipy pillow
           python scripts/xvs/xvs_certgen.py --check --cleanroom --out /tmp/xvs_certgen_ci_bundle.json
           if [ -f tests/test_cleanroom_export.py ]; then
             PYTHONPATH=src pytest tests/xvs_v2/test_m1_ffi_smoke.py tests/xvs/test_audit_get_defaults.py tests/test_cleanroom_export.py -v

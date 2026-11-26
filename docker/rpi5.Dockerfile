@@ -52,10 +52,17 @@ RUN cargo build \
 
 # Stage MIT-licensed official ONNX Runtime Linux aarch64 shared library (glibc >= 2.28)
 RUN mkdir -p /opt/openxvs/lib /opt/openxvs/models && \
-    curl -fsSL "${ORT_AARCH64_URL}" -o /tmp/ort.tgz && \
-    tar -xzf /tmp/ort.tgz -C /tmp && \
-    cp -a /tmp/onnxruntime-linux-aarch64-${ORT_VERSION}/lib/libonnxruntime.so* /opt/openxvs/lib/ && \
-    rm -rf /tmp/ort.tgz /tmp/onnxruntime-linux-aarch64-${ORT_VERSION}
+    if curl -fsSL "${ORT_AARCH64_URL}" -o /tmp/ort.tgz; then \
+      tar -xzf /tmp/ort.tgz -C /tmp && \
+      cp -a /tmp/onnxruntime-linux-aarch64-${ORT_VERSION}/lib/libonnxruntime.so* /opt/openxvs/lib/ && \
+      rm -rf /tmp/ort.tgz /tmp/onnxruntime-linux-aarch64-${ORT_VERSION}; \
+    else \
+      apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/* && \
+      curl -fsSL "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/${ORT_VERSION}" -o /tmp/ort.nupkg && \
+      unzip -j /tmp/ort.nupkg "runtimes/linux-arm64/native/libonnxruntime*.so" -d /opt/openxvs/lib/ && \
+      chmod 755 /opt/openxvs/lib/libonnxruntime*.so && \
+      rm -f /tmp/ort.nupkg; \
+    fi
 
 # ------------------------------------------------------------------------------
 # Stage 2A: Minimal Distroless glibc Runtime (optional `--target runtime-distroless`)
