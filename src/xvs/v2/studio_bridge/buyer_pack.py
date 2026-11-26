@@ -88,7 +88,7 @@ _PRIVATE_EVAL_HEADER_MD = """# OpenXVS v5.0 — Confidential Non-Flight Desktop/
 >   persons; `Art. 17` imposes a 10-year expiry). Provided exclusively for unpaid desktop/bench
 >   simulation evaluation (`NON_FLIGHT_SIM_ONLY=1`, `ACTUATOR_AUTHORITY = false`, zero flight-
 >   controller actuation, zero `.stl`/`.gcode`/`.kicad*` manufacturing files) under countersigned
->   bilateral evaluation agreement & Non-Flight Evaluation License.
+>   Mutual NDA & Non-Flight Evaluation License.
 > - **Planned Timed Public Open-Core Transition (Informational Only — Zero Current OSS Grant):**
 >   A future clean-room Timed Public Open-Core transition (Model 2: Wave-1 Q1 2027 formal core;
 >   Wave-2 October 2027 community core) is planned separately; **no public open-source license
@@ -277,7 +277,7 @@ def _build_release_governance(release_mode: str) -> tuple[str, dict[str, Any]]:
                 "NON_FLIGHT_SIMULATION_FIREWALL: Directive (EU) 2024/2853 Art. 2(2) OSS carve-out "
                 "is NOT claimed (Art. 4(1)/4(7)/15/17 apply to closed software even at $0); "
                 "restricted strictly to unpaid desktop/bench simulation evaluation "
-                "(ACTUATOR_AUTHORITY=false, zero STL/G-code/KiCad files) under bilateral evaluation agreement + Non-Flight Eval License."
+                "(ACTUATOR_AUTHORITY=false, zero STL/G-code/KiCad files) under Mutual NDA + Non-Flight Eval License."
             ),
             "planned_public_open_core_release": (
                 "Timed Public Open-Core (Model 2: Wave-1 Q1 2027 brand-decoupled formal core; "
@@ -1042,7 +1042,7 @@ def build_buyer_assurance_pack_zip(
         "release_governance": release_governance,
         "domain_scope": "Strictly Civil / Dual-Use Aviation Perception & Runtime Assurance",
         "certification_boundary_disclosure": {
-            "formal_proofs_verified": "18/18 Kani CBMC harnesses (6,714 checks, 0 failed)",
+            "formal_proofs_verified": "26/26 Kani CBMC harnesses (0 failed)",
             "explicit_undeveloped_gaps": ["G5_GAP", "G2_TLA_DEFERRED"],
             "note": (
                 "Target hardware environmental qualification and formal civil airworthiness "

@@ -304,18 +304,20 @@ def compute_simcc_uncertainty_cues(
     hx = -(px * torch.log(px.clamp(min=1.0e-8))).sum(dim=-1) / log_nx
     hy = -(py * torch.log(py.clamp(min=1.0e-8))).sum(dim=-1) / log_ny
 
-    # Peak-to-secondary ratio via 1D MaxPool lobe suppression around primary mode (zero TopK)
-    p1_x = px.amax(dim=-1, keepdim=True)
-    is_pk_x = (px >= (p1_x - 1.0e-7)).to(dtype=torch.float32)
-    lobe_x = F.max_pool1d(is_pk_x, kernel_size=9, stride=1, padding=4)
+    # Peak-to-secondary ratio via ArgMax-centered lobe suppression (zero TopK; exact 0.0 on uniform logits)
+    idx_x = px.argmax(dim=-1, keepdim=True)
+    bins_x_grid = torch.arange(nx, device=px.device, dtype=idx_x.dtype).view(1, 1, nx)
+    lobe_x = ((bins_x_grid - idx_x).abs() <= 4).to(dtype=torch.float32)
+    p1_x = px.amax(dim=-1)
     p2_x = (px * (1.0 - lobe_x)).amax(dim=-1)
-    psr_x = torch.log((p1_x.squeeze(-1) + 1.0e-6) / (p2_x + 1.0e-6)).clamp(min=0.0, max=10.0) * 0.1
+    psr_x = torch.log((p1_x + 1.0e-6) / (p2_x + 1.0e-6)).clamp(min=0.0, max=10.0) * 0.1
 
-    p1_y = py.amax(dim=-1, keepdim=True)
-    is_pk_y = (py >= (p1_y - 1.0e-7)).to(dtype=torch.float32)
-    lobe_y = F.max_pool1d(is_pk_y, kernel_size=9, stride=1, padding=4)
+    idx_y = py.argmax(dim=-1, keepdim=True)
+    bins_y_grid = torch.arange(ny, device=py.device, dtype=idx_y.dtype).view(1, 1, ny)
+    lobe_y = ((bins_y_grid - idx_y).abs() <= 4).to(dtype=torch.float32)
+    p1_y = py.amax(dim=-1)
     p2_y = (py * (1.0 - lobe_y)).amax(dim=-1)
-    psr_y = torch.log((p1_y.squeeze(-1) + 1.0e-6) / (p2_y + 1.0e-6)).clamp(min=0.0, max=10.0) * 0.1
+    psr_y = torch.log((p1_y + 1.0e-6) / (p2_y + 1.0e-6)).clamp(min=0.0, max=10.0) * 0.1
 
     return torch.stack([hx, hy, psr_x, psr_y], dim=-1)
 
@@ -376,7 +378,7 @@ class CholeskyBivariateGnllHead(nn.Module):
     Strictly detaches backbone features (`feat.detach()`) so variance calibration cannot corrupt
     Stage-2A point/line localization, and constructs strictly SPD `Sigma = L @ L^T` with:
       `L = [[exp(clamp(l0, -6, 4)), 0], [l1, exp(clamp(l2, -6, 4))]]`.
-    When `extra_cue_dim > 0`, consumes per-keypoint detached SimCC entropy + PSR cues.
+    When `extra_cue_dim > 0` (extended), consumes per-keypoint detached SimCC entropy + PSR cues.
     """
 
     def __init__(
@@ -572,7 +574,7 @@ def _append_coord_channels_1d(
 ) -> torch.Tensor:
     """Append `(x_norm, y_norm)` CoordConv channels from tiny 1D buffers (3 KB vs 1.13 MiB).
 
-    When `training=True` and `coord_dropout_prob > 0.0`, randomly zeroes `(x_norm, y_norm)`
+    When `training=True` and `coord_dropout_prob > 0.0` (extended), randomly zeroes `(x_norm, y_norm)`
     per sample so the backbone cannot shortcut-memorize absolute pixel coordinates.
     """
     b, _, h, w = feat.shape
@@ -1207,13 +1209,13 @@ def keyline_sigma_nll_loss(
 
 
 class XvsLandV52Model(nn.Module):
-    """XVS-Land architecture: ConvNeXt-V1 CoordConv FPN + SpatialSimCC + CoordConvHesse + SPD GNLL.
+    """XVS-Land v1.1.1 architecture: ConvNeXt-V1 CoordConv FPN + SpatialSimCC + CoordConvHesse + SPD GNLL.
 
     Fixes v4.5 parameter bloat (`20.56M -> ~1.3M` params, `42.5 MiB -> <= 6.0 MiB` FP16 ONNX),
     removes `4x4` spatial crush in SimCC and `1x1` pooling in OKLS, and adds calibrated
     per-keyline uncertainty `keyline_sigma_px [B, 5]` clamped to `[0.5, 50.0]`.
 
-    Optional extended flags (all defaulting to base 6-output behavior):
+    Additive extended flags (all defaulting to exact v5.2 behavior):
       - `enable_runway_present_head=True`: adds lightweight `<15K`-param `runway_present_logit [B, 1]` head.
       - `coord_dropout_prob=0.5`: randomly drops CoordConv `(x, y)` channels during training.
       - `use_endpoint_prior=False`: disables static `endpoint_prior_norm` center shortcut.
@@ -1358,7 +1360,7 @@ class XvsLandV52Model(nn.Module):
 
 
 class XvsLandV52OnnxWrapper(nn.Module):
-    """Static Opset-17 flat-tuple ONNX export wrapper for `XvsLandV52Model` (6 or 7 outputs)."""
+    """Static Opset-17 flat-tuple ONNX export wrapper for `XvsLandV52Model` (6 outputs v5.2; 7 outputs extended)."""
 
     OUTPUT_NAMES: tuple[str, ...] = (
         "keypoints_xy",

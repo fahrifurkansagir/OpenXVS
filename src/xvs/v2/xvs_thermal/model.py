@@ -47,7 +47,7 @@ def _broadcast_health(q: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     else:
         raise ValueError(f"Unsupported health tensor ndim={q_t.ndim}, shape={tuple(q_t.shape)}")
     valid = torch.isfinite(q_t) & (q_t >= 0.0) & (q_t <= 1.0)
-    return torch.where(valid, q_t, torch.zeros_like(q_t))
+    return torch.where(valid, q_t, q_t.new_zeros(()))
 
 
 class _ConvBnSilu(nn.Module):
@@ -148,8 +148,8 @@ class DeterministicHealthGate(nn.Module):
         # sensor can NEVER contaminate gradients or fused activations.
         eo_active = q_e > 0.0
         lwir_active = q_l > 0.0
-        f_eo_safe = torch.where(eo_active, f_eo, torch.zeros_like(f_eo))
-        f_lwir_safe = torch.where(lwir_active, f_lwir, torch.zeros_like(f_lwir))
+        f_eo_safe = torch.where(eo_active, f_eo, f_eo.new_zeros(()))
+        f_lwir_safe = torch.where(lwir_active, f_lwir, f_lwir.new_zeros(()))
 
         # Strictly positive learned weights in (0.05, 1.0) so a healthy lone sensor never divides by 0
         w_eo = 0.05 + 0.95 * torch.sigmoid(self.eo_rel(f_eo_safe))
@@ -159,20 +159,20 @@ class DeterministicHealthGate(nn.Module):
         num_lwir = q_l * w_lwir
         denom = num_eo + num_lwir
         any_active = denom > 0.0
-        safe_denom = torch.where(any_active, denom, torch.ones_like(denom))
+        safe_denom = torch.where(any_active, denom, denom.new_ones(()))
 
-        w_eo_eff = torch.where(eo_active & any_active, num_eo / safe_denom, torch.zeros_like(num_eo))
+        w_eo_eff = torch.where(eo_active & any_active, num_eo / safe_denom, num_eo.new_zeros(()))
         w_lwir_eff = torch.where(
-            lwir_active & any_active, num_lwir / safe_denom, torch.zeros_like(num_lwir)
+            lwir_active & any_active, num_lwir / safe_denom, num_lwir.new_zeros(())
         )
 
         # Differential interaction term multiplies by (w_eo_eff * w_lwir_eff), identically 0 if either blind
         both_active = eo_active & lwir_active
         diff_raw = self.diff_proj(f_eo_safe - f_lwir_safe)
-        diff_term = torch.where(both_active, (w_eo_eff * w_lwir_eff) * diff_raw, torch.zeros_like(diff_raw))
+        diff_term = torch.where(both_active, (w_eo_eff * w_lwir_eff) * diff_raw, diff_raw.new_zeros(()))
 
-        eo_term = torch.where(eo_active, w_eo_eff * f_eo_safe, torch.zeros_like(f_eo_safe))
-        lwir_term = torch.where(lwir_active, w_lwir_eff * f_lwir_safe, torch.zeros_like(f_lwir_safe))
+        eo_term = torch.where(eo_active, w_eo_eff * f_eo_safe, f_eo_safe.new_zeros(()))
+        lwir_term = torch.where(lwir_active, w_lwir_eff * f_lwir_safe, f_lwir_safe.new_zeros(()))
         f_fused = eo_term + lwir_term + diff_term
 
         return {
@@ -219,7 +219,7 @@ class EvidentialDirichletHead(nn.Module):
         evidence = F.softplus(logits)
         if dual_blind is not None:
             mask = dual_blind.to(device=evidence.device, dtype=torch.bool)
-            evidence = torch.where(mask, torch.zeros_like(evidence), evidence)
+            evidence = torch.where(mask, evidence.new_zeros(()), evidence)
         alpha = evidence + 1.0
         strength = alpha.sum(dim=1, keepdim=True)
         vacuity = float(self.num_classes) / strength
@@ -254,7 +254,7 @@ class _UnimodalAuxHead(nn.Module):
 class XvsThermalNet(nn.Module):
     """Asymmetric EO + 2-ch LWIR multispectral detection & OOD fusion network (DR-04 / SP2 §3.3).
 
-    Optional flag `enable_disagreement_vacuity=True` (default `False` for base compat)
+    Additive extended flag `enable_disagreement_vacuity=True` (default `False` for v5.2 compat)
     concatenates `[|p_eo - p_lwir| * both_active, (1 - cos(f_eo, f_lwir)) * both_active]`
     into `EvidentialDirichletHead` so EO<->LWIR parallax conflicts raise vacuity >= 0.80
     while strictly preserving exact `dual_blind vacuity == 1.0000` and zero blind-sensor leakage.
@@ -284,7 +284,7 @@ class XvsThermalNet(nn.Module):
         self.eo_aux_head = _UnimodalAuxHead(in_ch=feat_ch)
         self.lwir_aux_head = _UnimodalAuxHead(in_ch=feat_ch)
         self.fused_head = _UnimodalAuxHead(in_ch=feat_ch)
-        ev_in_ch = feat_ch + 2 if self.enable_disagreement_vacuity else feat_ch
+        ev_in_ch = feat_ch + 4 if self.enable_disagreement_vacuity else feat_ch
         self.evidential_head = EvidentialDirichletHead(
             in_ch=ev_in_ch, num_classes=num_evidential_classes
         )
@@ -325,22 +325,22 @@ class XvsThermalNet(nn.Module):
         # On dual-blind, suppress fused heatmap logits cleanly to large negative (zero detections)
         fused_hm = torch.where(
             dual_blind,
-            torch.full_like(fused_det["hm_logits"], -20.0),
+            fused_det["hm_logits"].new_full((), -20.0),
             fused_det["hm_logits"],
         )
         fused_box = torch.where(
             dual_blind,
-            torch.zeros_like(fused_det["box_reg"]),
+            fused_det["box_reg"].new_zeros(()),
             fused_det["box_reg"],
         )
 
         d_hm: torch.Tensor | None = None
         d_cos: torch.Tensor | None = None
         if self.enable_disagreement_vacuity:
-            # Cross-modal spatial peak & feature cosine disagreement gated strictly by `both_active`
-            p_eo = torch.sigmoid(eo_aux["hm_logits"])
-            p_lwir = torch.sigmoid(lwir_aux["hm_logits"])
-            d_hm = torch.where(both_active, torch.abs(p_eo - p_lwir), torch.zeros_like(p_eo))
+            # Cross-modal spatial peak, cosine & global/salient pooled disagreement gated strictly by `both_active`
+            p_eo = torch.where(both_active, torch.sigmoid(eo_aux["hm_logits"]), eo_aux["hm_logits"].new_zeros(()))
+            p_lwir = torch.where(both_active, torch.sigmoid(lwir_aux["hm_logits"]), lwir_aux["hm_logits"].new_zeros(()))
+            d_hm = torch.where(both_active, torch.abs(p_eo - p_lwir), p_eo.new_zeros(()))
 
             fe_s = gated["f_eo_safe"]
             fl_s = gated["f_lwir_safe"]
@@ -348,9 +348,24 @@ class XvsThermalNet(nn.Module):
             norm_e = torch.sqrt((fe_s * fe_s).sum(dim=1, keepdim=True) + 1.0e-6)
             norm_l = torch.sqrt((fl_s * fl_s).sum(dim=1, keepdim=True) + 1.0e-6)
             cos_el = (dot_el / (norm_e * norm_l)).clamp(min=-1.0, max=1.0)
-            d_cos = torch.where(both_active, 1.0 - cos_el, torch.zeros_like(cos_el))
+            d_cos = torch.where(both_active, 1.0 - cos_el, cos_el.new_zeros(()))
 
-            ev_in = torch.cat([f_fused, d_hm, d_cos], dim=1)
+            # Global peak & soft top-k salient disagreement broadcast so localized (6,6) aircraft
+            # parallax genuinely elevates frame-level Dirichlet vacuity without border overfitting.
+            d_hm_global = torch.where(
+                both_active,
+                d_hm.amax(dim=(2, 3), keepdim=True),
+                d_hm.new_zeros(()),
+            ).expand_as(d_hm)
+            sal_logit = (torch.maximum(p_eo, p_lwir) * 12.0).flatten(2)
+            sal_w = F.softmax(sal_logit, dim=-1).view_as(p_eo)
+            d_cos_salient = torch.where(
+                both_active,
+                (sal_w * d_cos).sum(dim=(2, 3), keepdim=True),
+                d_cos.new_zeros(()),
+            ).expand_as(d_cos)
+
+            ev_in = torch.cat([f_fused, d_hm, d_cos, d_hm_global, d_cos_salient], dim=1)
         else:
             ev_in = f_fused
         ev = self.evidential_head(ev_in, dual_blind=dual_blind)
@@ -451,6 +466,23 @@ def compute_parallax_vacuity_loss(
     return {"total": total, "kl_uniform": kl_term, "vacuity_hinge": hinge_term}
 
 
+def _sparse_focal_bce_with_logits(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    pos_weight: float = 16.0,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    """Positive-weighted generalized focal BCE for extreme foreground sparsity (tiny IR targets)."""
+    l_f = logits.float()
+    t_f = target.float().clamp(0.0, 1.0)
+    bce = F.binary_cross_entropy_with_logits(l_f, t_f, reduction="none")
+    prob = torch.sigmoid(l_f)
+    focal_w = torch.abs(t_f - prob).clamp(min=1.0e-4) ** float(gamma)
+    pw = 1.0 + (float(pos_weight) - 1.0) * t_f
+    return (pw * focal_w * bce).mean()
+
+
 def compute_thermal_multitask_loss(
     outputs: dict[str, torch.Tensor],
     target_hm: torch.Tensor,
@@ -464,8 +496,10 @@ def compute_thermal_multitask_loss(
     lambda_parallax_kl: float = 0.5,
     lambda_parallax_hinge: float = 1.5,
     parallax_vacuity_target: float = 0.85,
+    hm_pos_weight: float = 16.0,
+    hm_focal_gamma: float = 2.0,
 ) -> dict[str, torch.Tensor]:
-    """Multi-task fusion + auxiliary uni-modal + evidential Dirichlet loss (with parallax vacuity)."""
+    """Multi-task fusion + auxiliary uni-modal + evidential Dirichlet loss (DR-04:203 + extended parallax vacuity)."""
     eo_tgt = target_hm if eo_target_hm is None else eo_target_hm
     lwir_tgt = target_hm if lwir_target_hm is None else lwir_target_hm
 
@@ -478,14 +512,14 @@ def compute_thermal_multitask_loss(
         aligned_m = None
         fused_tgt = target_hm.float()
 
-    l_fused = F.binary_cross_entropy_with_logits(
-        outputs["fused_hm_logits"].float(), fused_tgt
+    l_fused = _sparse_focal_bce_with_logits(
+        outputs["fused_hm_logits"], fused_tgt, pos_weight=hm_pos_weight, gamma=hm_focal_gamma
     )
-    l_eo_aux = F.binary_cross_entropy_with_logits(
-        outputs["eo_aux_hm_logits"].float(), eo_tgt.float()
+    l_eo_aux = _sparse_focal_bce_with_logits(
+        outputs["eo_aux_hm_logits"], eo_tgt, pos_weight=hm_pos_weight, gamma=hm_focal_gamma
     )
-    l_lwir_aux = F.binary_cross_entropy_with_logits(
-        outputs["lwir_aux_hm_logits"].float(), lwir_tgt.float()
+    l_lwir_aux = _sparse_focal_bce_with_logits(
+        outputs["lwir_aux_hm_logits"], lwir_tgt, pos_weight=hm_pos_weight, gamma=hm_focal_gamma
     )
 
     # Evidential expected cross-entropy (Sensoy et al. Dirichlet MSE/log-risk form)

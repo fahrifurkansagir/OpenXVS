@@ -20,7 +20,9 @@ import base64
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
+import shutil
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -85,6 +87,14 @@ def _qs_first(qs: dict[str, list[str]], key: str, default: str) -> str:
     if key in qs and qs[key]:
         return str(qs[key][0])
     return default
+
+
+def _parse_finite_float_qs(qs: dict[str, list[str]], key: str, default: str) -> float:
+    raw = _qs_first(qs, key, default)
+    val = float(raw)
+    if not math.isfinite(val):
+        raise ValueError(f"Query parameter {key!r} must be finite, got {raw!r}")
+    return val
 
 
 class StudioBridgeHTTPServer(ThreadingHTTPServer):
@@ -157,26 +167,52 @@ class StudioBridgeHandler(BaseHTTPRequestHandler):
         file_size = int(mp4_path.stat().st_size)
         range_hdr = self.headers["Range"] if "Range" in self.headers else ""
         start = 0
-        end = file_size - 1
+        end = max(0, file_size - 1)
         partial = False
+        range_unsatisfiable = False
 
         if range_hdr.startswith("bytes="):
             spec = range_hdr[len("bytes=") :].split(",", 1)[0].strip()
             if "-" in spec:
                 s_part, e_part = spec.split("-", 1)
                 try:
-                    if s_part:
-                        start = max(0, int(s_part))
-                    if e_part:
-                        end = min(file_size - 1, int(e_part))
-                    if start <= end < file_size:
-                        partial = True
+                    if not s_part and e_part:
+                        # RFC 7233 suffix-byte-range-spec: `bytes=-500`
+                        suffix_len = int(e_part)
+                        if suffix_len <= 0 or file_size <= 0:
+                            range_unsatisfiable = True
+                        else:
+                            start = max(0, file_size - suffix_len)
+                            end = file_size - 1
+                            partial = True
+                    elif s_part:
+                        start = int(s_part)
+                        end = int(e_part) if e_part else (file_size - 1)
+                        if start < 0 or file_size <= 0 or start >= file_size or end < start:
+                            range_unsatisfiable = True
+                        else:
+                            end = min(file_size - 1, end)
+                            partial = True
+                    else:
+                        range_unsatisfiable = True
                 except ValueError:
-                    partial = False
+                    range_unsatisfiable = True
+            else:
+                range_unsatisfiable = True
 
-        length = max(0, end - start + 1)
+        if range_unsatisfiable:
+            self.send_response(int(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE))
+            self._send_cors_headers()
+            self._send_non_flight_headers()
+            self.send_header("Content-Range", f"bytes */{file_size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        length = max(0, end - start + 1) if file_size > 0 else 0
         self.send_response(int(HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK))
         self._send_cors_headers()
+        self._send_non_flight_headers()
         self.send_header("Content-Type", "video/mp4")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Disposition", f'inline; filename="openxvs_{job_id}.mp4"')
@@ -185,15 +221,18 @@ class StudioBridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         self.end_headers()
 
-        with mp4_path.open("rb") as f:
-            f.seek(start)
-            remaining = length
-            while remaining > 0:
-                chunk = f.read(min(65536, remaining))
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                remaining -= len(chunk)
+        try:
+            with mp4_path.open("rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
     def do_OPTIONS(self) -> None:
         self.send_response(int(HTTPStatus.NO_CONTENT))
@@ -319,6 +358,46 @@ class StudioBridgeHandler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(content_len)
 
+    def _stream_bounded_body_to_file(self, dest_path: Path, max_bytes: int) -> int | None:
+        """Stream POST request body to disk in 64 KiB chunks (eliminates 150 MiB RAM spikes)."""
+        cl_raw = self.headers["Content-Length"] if "Content-Length" in self.headers else "0"
+        try:
+            content_len = int(cl_raw)
+        except ValueError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid Content-Length header"})
+            return None
+        if content_len > max_bytes:
+            self._send_json(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                {"error": f"Payload size {content_len} exceeds {max_bytes} byte limit"},
+            )
+            return None
+        if content_len <= 0:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": f"Empty payload (must be 1..{max_bytes} bytes)"},
+            )
+            return None
+        remaining = content_len
+        written = 0
+        try:
+            with dest_path.open("wb") as fout:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    fout.write(chunk)
+                    written += len(chunk)
+                    remaining -= len(chunk)
+        except Exception:
+            dest_path.unlink(missing_ok=True)
+            raise
+        if written <= 0:
+            dest_path.unlink(missing_ok=True)
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Empty video payload"})
+            return None
+        return written
+
     def _drain_small_body(self, max_drain_bytes: int = 65536) -> None:
         """Drain small unread POST bodies before early 4xx responses to avoid Windows TCP RST."""
         cl_raw = self.headers["Content-Length"] if "Content-Length" in self.headers else "0"
@@ -355,6 +434,20 @@ class StudioBridgeHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"Image decode error: {exc}"})
                 return
+            q_eo_val = 0.85
+            q_lwir_val = 0.95
+            fog_val = 0.0
+            gps_off_val = 0.0
+            try:
+                if channel == "thermal":
+                    q_eo_val = _parse_finite_float_qs(qs, "q_eo", "0.85")
+                    q_lwir_val = _parse_finite_float_qs(qs, "q_lwir", "0.95")
+                    fog_val = _parse_finite_float_qs(qs, "fog", "0.0")
+                elif channel == "nav":
+                    gps_off_val = _parse_finite_float_qs(qs, "gps_offset_m", "0.0")
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"Invalid query float parameter: {exc}"})
+                return
             try:
                 if channel == "d2":
                     res = self.server.engine.infer_eo_sky(img_bgr, return_jpeg=True, multi_crop_fallback=True)
@@ -363,15 +456,15 @@ class StudioBridgeHandler(BaseHTTPRequestHandler):
                 elif channel == "thermal":
                     res = self.server.engine.infer_thermal_dve(
                         img_bgr,
-                        q_eo=float(_qs_first(qs, "q_eo", "0.85")),
-                        q_lwir=float(_qs_first(qs, "q_lwir", "0.95")),
-                        fog_density=float(_qs_first(qs, "fog", "0.0")),
+                        q_eo=q_eo_val,
+                        q_lwir=q_lwir_val,
+                        fog_density=fog_val,
                         return_jpeg=True,
                     )
                 else:
                     res = self.server.engine.infer_crossview_nav(
                         img_bgr,
-                        gps_offset_m=float(_qs_first(qs, "gps_offset_m", "0.0")),
+                        gps_offset_m=gps_off_val,
                         return_jpeg=True,
                     )
             except Exception as exc:
@@ -420,22 +513,27 @@ class StudioBridgeHandler(BaseHTTPRequestHandler):
                 sample_fps = int(_qs_first(qs, "sample_fps", "10"))
                 max_frames = int(_qs_first(qs, "max_frames", "120"))
             except ValueError:
+                self._drain_small_body()
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "sample_fps and max_frames must be integers"})
                 return
-            raw_body = self._read_bounded_body(MAX_VIDEO_UPLOAD_BYTES)
-            if raw_body is None:
+            staged_path = self.server.video_manager.allocate_upload_path()
+            written = self._stream_bounded_body_to_file(staged_path, MAX_VIDEO_UPLOAD_BYTES)
+            if written is None:
+                shutil.rmtree(staged_path.parent, ignore_errors=True)
                 return
             try:
-                job = self.server.video_manager.start_upload_job(
-                    raw_body,
+                job = self.server.video_manager.start_upload_file_job(
+                    staged_path,
                     channel=channel,
                     sample_fps=sample_fps,
                     max_frames=max_frames,
                 )
             except ValueError as exc:
+                shutil.rmtree(staged_path.parent, ignore_errors=True)
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             except Exception as exc:
+                shutil.rmtree(staged_path.parent, ignore_errors=True)
                 self._send_json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"error": f"Video job start failed: {type(exc).__name__}: {exc}"},

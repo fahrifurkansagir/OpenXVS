@@ -508,7 +508,12 @@ def test_studio_hil_bridge_closed_loop_mavlink2_and_flightgear_udp() -> None:
 
 def test_run_hil_loopback_self_test_includes_closed_loop_tx_proof() -> None:
     """`run_hil_loopback_self_test()` must verify closed-loop TX (`tx_packets > 0`, zero `#84`)."""
-    report = run_hil_loopback_self_test()
+    try:
+        report = run_hil_loopback_self_test()
+    except FileNotFoundError as exc:
+        if "xvs-ffi" in str(exc) or "xvs_core" in str(exc):
+            pytest.skip(f"Compiled xvs-ffi library not built yet: {exc}")
+        raise
     assert report["pass"] is True
     assert report["gpl_free"] is True
     assert len(report["checks"]) == 4  # Backwards compatibility with v4.5 contract

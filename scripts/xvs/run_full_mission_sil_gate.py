@@ -35,7 +35,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import Any, Sequence
 
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
@@ -424,7 +424,8 @@ class _MissionWireProxy:
                         self.params[pname] = float(pval)
 
     def _loop_ap_to_br(self) -> None:
-        assert self._s_wsl is not None
+        if self._s_wsl is None:
+            raise RuntimeError("WSL proxy RX socket was not initialized before starting listener thread")
         fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             while not self._stop.is_set():
@@ -443,7 +444,8 @@ class _MissionWireProxy:
             fwd.close()
 
     def _loop_br_to_ap(self) -> None:
-        assert self._s_br is not None
+        if self._s_br is None:
+            raise RuntimeError("Bridge proxy RX socket was not initialized before starting listener thread")
         fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             while not self._stop.is_set():
@@ -472,6 +474,34 @@ class _MissionWireProxy:
                         pass
         finally:
             fwd.close()
+
+    def snapshot_latest(
+        self,
+    ) -> tuple[
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+    ]:
+        with self._lock:
+            return (
+                dict(self.latest_hb) if self.latest_hb is not None else None,
+                dict(self.latest_att) if self.latest_att is not None else None,
+                dict(self.latest_gpi) if self.latest_gpi is not None else None,
+                dict(self.latest_gps_raw) if self.latest_gps_raw is not None else None,
+            )
+
+    def get_params_snapshot(self, keys: Sequence[str]) -> dict[str, float | None]:
+        with self._lock:
+            return {k: self.params.get(k) for k in keys}
+
+    def get_acks_snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(a) for a in self.acks]
+
+    def get_bridge_msg84_seen(self) -> int:
+        with self._lock:
+            return int(self.bridge_msg84_seen)
 
 
 def _make_rta_float_telemetry(
@@ -510,7 +540,8 @@ def _make_rta_float_telemetry(
 
 def run_full_mission_sil_gate() -> dict[str, Any]:
     t0 = time.perf_counter()
-    assert "pymavlink" not in sys.modules, "GPL pymavlink MUST NEVER be imported!"
+    if "pymavlink" in sys.modules:
+        raise RuntimeError("GPL pymavlink MUST NEVER be imported!")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     tape_path = OUT_DIR / "mission_flight_tape.ndjson"
     report_path = OUT_DIR / "full_mission_sil_report.json"
@@ -607,12 +638,14 @@ finally:
         end = time.monotonic() + timeout_s
         while time.monotonic() < end:
             proxy.send_oob_hb()
-            g = proxy.latest_gpi
+            _, _, g, gps = proxy.snapshot_latest()
             if g is not None and (int(g["time_boot_ms"]) - last_boot_ms) >= 1000:
-                return dict(g), (dict(proxy.latest_gps_raw) if proxy.latest_gps_raw else None)
+                return g, gps
             time.sleep(0.025)
-        assert proxy.latest_gpi is not None
-        return dict(proxy.latest_gpi), (dict(proxy.latest_gps_raw) if proxy.latest_gps_raw else None)
+        _, _, g_last, gps_last = proxy.snapshot_latest()
+        if g_last is None:
+            raise RuntimeError("Timed out waiting for initial GLOBAL_POSITION_INT telemetry from ArduPlane")
+        return g_last, gps_last
 
     logger = ShadowModeTelemetryLogger(
         tape_path,
@@ -629,7 +662,8 @@ finally:
             stderr=subprocess.STDOUT,
             text=True,
         )
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            raise RuntimeError("Failed to capture stdout pipe from WSL2 ArduPlane launcher")
         first_line = proc.stdout.readline().strip()
         m = re.match(r"AP_READY pid=(\d+) ap_port=(\d+) tx_port=(\d+)", first_line)
         if not m:
@@ -654,10 +688,12 @@ finally:
         while time.monotonic() < t_boot:
             proxy.send_oob_hb()
             st_b = mgr.status()
-            if proxy.latest_hb and proxy.latest_att and proxy.latest_gpi and int(st_b["attitude_count"]) >= 2:
+            hb_b, att_b, gpi_b, _ = proxy.snapshot_latest()
+            if hb_b and att_b and gpi_b and int(st_b["attitude_count"]) >= 2:
                 break
             time.sleep(0.1)
-        if proxy.latest_hb is None:
+        hb_boot, _, _, _ = proxy.snapshot_latest()
+        if hb_boot is None:
             raise RuntimeError("No HEARTBEAT from live WSL2 ArduPlane")
         for mid, iv_us in ((30, 50_000.0), (33, 50_000.0), (74, 50_000.0), (24, 100_000.0)):
             proxy.send_oob_cmd_long(MAV_CMD_SET_MESSAGE_INTERVAL, p1=float(mid), p2=iv_us)
@@ -673,15 +709,17 @@ finally:
         t_tk0 = time.monotonic()
         while (time.monotonic() - t_tk0) < 18.0:
             proxy.send_oob_hb()
-            if proxy.latest_gpi and float(proxy.latest_gpi["relative_alt_m"]) >= 60.0:
+            hb_tk, _, gpi_tk, _ = proxy.snapshot_latest()
+            if gpi_tk and float(gpi_tk["relative_alt_m"]) >= 60.0:
                 break
-            if (time.monotonic() - t_tk0) > 1.5 and proxy.latest_hb and not proxy.latest_hb["armed"]:
+            if (time.monotonic() - t_tk0) > 1.5 and hb_tk and not hb_tk["armed"]:
                 proxy.send_oob_cmd_long(MAV_CMD_DO_SET_MODE, p1=1.0, p2=float(PLANE_MODE_TAKEOFF))
                 proxy.send_oob_cmd_long(MAV_CMD_COMPONENT_ARM_DISARM, p1=1.0, p2=21196.0)
             time.sleep(0.1)
         proxy.send_oob_cmd_long(MAV_CMD_DO_SET_MODE, p1=1.0, p2=float(PLANE_MODE_GUIDED))
         sleep_hb(1.0)
-        cruise_alt_agl_m = float(proxy.latest_gpi["relative_alt_m"]) if proxy.latest_gpi else 0.0
+        _, _, gpi_cr, _ = proxy.snapshot_latest()
+        cruise_alt_agl_m = float(gpi_cr["relative_alt_m"]) if gpi_cr else 0.0
 
         # Inject live 15 m/s crosswind (SIM_WIND_SPD=15, SIM_WIND_TURB=5, SIM_WIND_DIR=208)
         proxy.send_oob_param_set("SIM_WIND_SPD", 15.0)
@@ -691,7 +729,7 @@ finally:
         for pn in ("SIM_WIND_SPD", "SIM_WIND_TURB", "SIM_WIND_DIR"):
             proxy.send_oob_param_read(pn)
         sleep_hb(0.5)
-        wind_rb = {k: proxy.params.get(k) for k in ("SIM_WIND_SPD", "SIM_WIND_TURB", "SIM_WIND_DIR")}
+        wind_rb = proxy.get_params_snapshot(("SIM_WIND_SPD", "SIM_WIND_TURB", "SIM_WIND_DIR"))
 
         # Attach DatumAlignmentGuard (KSFO GEOID18) and initialize INS-coupled CUSUM + BaroThermalDriftGuard
         guard = DatumAlignmentGuard(geoid_undulation_m=KSFO_28L_GEOID18_UNDULATION_M)
@@ -711,8 +749,9 @@ finally:
             min_tx_interval_s=0.4,
         )
 
-        assert proxy.latest_gpi is not None
-        g0 = dict(proxy.latest_gpi)
+        _, _, g0, _ = proxy.snapshot_latest()
+        if g0 is None:
+            raise RuntimeError("Missing GLOBAL_POSITION_INT telemetry prior to Phase 1 cruise epochs")
         origin_n0, origin_e0 = _latlon_to_ned_m(g0["lat_deg"], g0["lon_deg"], KSFO_HOME_LAT, KSFO_HOME_LON)
         prev_ms = int(g0["time_boot_ms"])
         prev_vn = float(g0["vn_mps"])
@@ -823,7 +862,11 @@ finally:
         p2_bank_a_err_m: float | None = None
         p2_bank_b_err_m: float | None = None
         p2_stat_at_q: float = 0.0
-        acks_42007_pre = sum(1 for a in proxy.acks if a["command"] == ARDUPILOT_MAV_CMD_SET_EKF_SOURCE_SET and a["result"] == 0)
+        acks_42007_pre = sum(
+            1
+            for a in proxy.get_acks_snapshot()
+            if a["command"] == ARDUPILOT_MAV_CMD_SET_EKF_SOURCE_SET and a["result"] == 0
+        )
 
         for step_k in range(1, 25):
             off_n = ramp_rate_mps * float(step_k) * u_n
@@ -838,7 +881,8 @@ finally:
             prev_ms = int(g_cur["time_boot_ms"])
             prev_vn, prev_ve = float(g_cur["vn_mps"]), float(g_cur["ve_mps"])
 
-            assert gps_cur is not None
+            if gps_cur is None:
+                raise RuntimeError("Missing GPS_RAW_INT (#24) during Phase 2 GPS spoof ramp")
             gn_gl, ge_gl = _latlon_to_ned_m(gps_cur["lat_deg"], gps_cur["lon_deg"], KSFO_HOME_LAT, KSFO_HOME_LON)
             rel_gnss = np.array([gn_gl - origin_n0, ge_gl - origin_e0], dtype=np.float64)
             rel_true = rel_gnss - np.array([off_n, off_e], dtype=np.float64)
@@ -910,14 +954,28 @@ finally:
                         geoid_undulation_m=KSFO_28L_GEOID18_UNDULATION_M,
                         apply_geoid_conversion=True,
                     )
-                    if sum(1 for a in proxy.acks if a["command"] == ARDUPILOT_MAV_CMD_SET_EKF_SOURCE_SET and a["result"] == 0) > acks_42007_pre:
+                    if (
+                        sum(
+                            1
+                            for a in proxy.get_acks_snapshot()
+                            if a["command"] == ARDUPILOT_MAV_CMD_SET_EKF_SOURCE_SET and a["result"] == 0
+                        )
+                        > acks_42007_pre
+                    ):
                         break
                     time.sleep(0.05)
                 break
 
         st_p2 = mgr.status()
         p2_datum_dec = st_p2["last_datum_decision"]
-        p2_ack_42007 = sum(1 for a in proxy.acks if a["command"] == ARDUPILOT_MAV_CMD_SET_EKF_SOURCE_SET and a["result"] == 0) - acks_42007_pre
+        p2_ack_42007 = (
+            sum(
+                1
+                for a in proxy.get_acks_snapshot()
+                if a["command"] == ARDUPILOT_MAV_CMD_SET_EKF_SOURCE_SET and a["result"] == 0
+            )
+            - acks_42007_pre
+        )
         print(
             f"  [Phase 2] TTD={p2_ttd_s}s | BankA_err={p2_bank_a_err_m:.2f}m (<30m HAL) | BankB_err={p2_bank_b_err_m:.2f}m | "
             f"DatumOK={p2_datum_dec['allowed'] if p2_datum_dec else None} (innov={p2_datum_dec['abs_vertical_innovation_m'] if p2_datum_dec else None}m) | "
@@ -970,9 +1028,11 @@ finally:
 
         # Clear threat to resume level cruise & log Phase 3 avoidance tape record
         mgr.set_autonomy_triggers(cbdr_threat_active=False, tx_command_mode="command_int_heading", min_tx_interval_s=0.4)
-        g_p3 = dict(proxy.latest_gpi) if proxy.latest_gpi else g0
+        _, _, g_p3_snap, _ = proxy.snapshot_latest()
+        g_p3 = g_p3_snap if g_p3_snap is not None else g0
         p3_n, p3_e = _latlon_to_ned_m(g_p3["lat_deg"], g_p3["lon_deg"], KSFO_HOME_LAT, KSFO_HOME_LON)
         p3_rel = [round(p3_n - origin_n0, 4), round(p3_e - origin_e0, 4)]
+        msg84_p3 = proxy.get_bridge_msg84_seen()
         logger.record_event(
             timestamp_mono_us=next_tape_us(),
             event_type="mission_epoch_1hz",
@@ -989,17 +1049,18 @@ finally:
                 "cmd82_min_roll_deg": round(p3b_min_roll, 2),
                 "cmd82_type_mask": last_cmd82.get("type_mask"),
                 "min_vfr_ias_mps": round(p3_min_ias, 2),
-                "msg84_count": int(proxy.bridge_msg84_seen),
+                "msg84_count": int(msg84_p3),
                 "approach_active": False,
                 "v_vpl_m": 5.0,
             },
         )
-        ack_43002_ok = any(a["command"] == MAV_CMD_GUIDED_CHANGE_HEADING and a["result"] == 0 for a in proxy.acks)
-        ack_192_ok = any(a["command"] == MAV_CMD_DO_REPOSITION and a["result"] == 0 for a in proxy.acks)
+        p3_acks = proxy.get_acks_snapshot()
+        ack_43002_ok = any(a["command"] == MAV_CMD_GUIDED_CHANGE_HEADING and a["result"] == 0 for a in p3_acks)
+        ack_192_ok = any(a["command"] == MAV_CMD_DO_REPOSITION and a["result"] == 0 for a in p3_acks)
         cmd82_mask = int(last_cmd82["type_mask"]) if "type_mask" in last_cmd82 else None
         print(
             f"  [Phase 3] #75 max|roll|={p3a_max_roll:.1f}deg dHdg={p3a_delta_hdg:.1f}deg ACK(43002={ack_43002_ok},192={ack_192_ok}) | "
-            f"#82 min_roll={p3b_min_roll:.1f}deg mask={hex(cmd82_mask) if cmd82_mask is not None else 'NONE'} | min_IAS={p3_min_ias:.2f} m/s | #84={proxy.bridge_msg84_seen}",
+            f"#82 min_roll={p3b_min_roll:.1f}deg mask={hex(cmd82_mask) if cmd82_mask is not None else 'NONE'} | min_IAS={p3_min_ias:.2f} m/s | #84={msg84_p3}",
             flush=True,
         )
 
@@ -1017,9 +1078,14 @@ finally:
         sleep_hb(1.85)
         st_p4 = mgr.status()
         ekf_after_ge2s = int(st_p4["ekf3_active_source"])
-        total_ack_42007_ok = sum(1 for a in proxy.acks if a["command"] == ARDUPILOT_MAV_CMD_SET_EKF_SOURCE_SET and a["result"] == 0)
+        total_ack_42007_ok = sum(
+            1
+            for a in proxy.get_acks_snapshot()
+            if a["command"] == ARDUPILOT_MAV_CMD_SET_EKF_SOURCE_SET and a["result"] == 0
+        )
 
-        g_p4 = dict(proxy.latest_gpi) if proxy.latest_gpi else g0
+        _, _, g_p4_snap, _ = proxy.snapshot_latest()
+        g_p4 = g_p4_snap if g_p4_snap is not None else g0
         p4_n, p4_e = _latlon_to_ned_m(g_p4["lat_deg"], g_p4["lon_deg"], KSFO_HOME_LAT, KSFO_HOME_LON)
         p4_rel = [round(p4_n - origin_n0, 4), round(p4_e - origin_e0, 4)]
         logger.record_event(
@@ -1054,7 +1120,10 @@ finally:
 
         # 5.1 Nominal cruise before approach
         o_nom = ffi.rta_step(rta_handle, ffi.rta_build_input_from_f64(_make_rta_float_telemetry()))
-        assert int(o_nom.mode) == 4 and int(o_nom.mandatory_go_around) == 0
+        if not (int(o_nom.mode) == 4 and int(o_nom.mandatory_go_around) == 0):
+            raise RuntimeError(
+                f"Expected nominal P4 cruise before Phase 5 approach fault, got mode={o_nom.mode} mga={o_nom.mandatory_go_around}"
+            )
 
         # 5.2 Approach vertical integrity breach (V_VPL=15.0m > V_VAL=10.0m) -> immediate 0-tick P0 latch!
         o_fault = ffi.rta_step(
@@ -1145,10 +1214,11 @@ finally:
 
         st_end = mgr.status()
         tx_msgids = {int(k): int(v) for k, v in st_end["tx_msgids_emitted"].items()}
+        final_msg84_seen = proxy.get_bridge_msg84_seen()
         msg84_zero = (
             not bool(st_end["msg84_ever_emitted"])
             and MSGID_SET_POSITION_TARGET_LOCAL_NED not in tx_msgids
-            and proxy.bridge_msg84_seen == 0
+            and final_msg84_seen == 0
         )
 
     finally:
@@ -1319,7 +1389,7 @@ finally:
             "cmd82_thrust_norm": last_cmd82.get("thrust_norm"),
             "min_vfr_hud_ias_mps": round(p3_min_ias, 2),
             "msg84_ever_emitted": not msg84_zero,
-            "wire_msg84_seen": int(proxy.bridge_msg84_seen),
+            "wire_msg84_seen": int(final_msg84_seen),
         },
         "phase4_gnss_recovery_dwell": {
             "ekf3_during_lt2s_dwell": ekf_during_lt2s,

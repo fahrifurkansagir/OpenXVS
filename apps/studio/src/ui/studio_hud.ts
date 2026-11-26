@@ -1,11 +1,15 @@
 /**
- * OpenXVS Studio v5.2 Glassmorphic HUD + Persistent 4-Channel Sensor Drawer + Weather Popover
- * + Live v5.2 Avionics Telemetry (12-Sector EO, LWIR FFC/Contrast-Collapse, Dual-Tier FSYNC <=1.0ms,
- *   M-of-N Bearing TBC) + Formal & Bare-Metal Assurance Badges + Multi-Ship Coord (F1/F4).
+ * OpenXVS Studio Glassmorphic HUD + Persistent 4-Channel Sensor Drawer + Weather Popover
+ * + Live Avionics Health & Formal Assurance Sub-Tab + Multi-Ship Coord (F1/F4).
  *
- * Preserves `D16-W19-m3`: mounts the 4-channel drawer DOM ONCE and updates labels/active attributes
- * in place so live/uploaded `<img>` previews are NEVER destroyed when clicking HUD buttons,
- * and displays exact short `checkpoint_sha256` badges (`SHA 2c9578f3`, etc.) on every channel.
+ * Engineering Guarantees:
+ *   - Mounts topbar, bottom dock, weather popover, and right sensor drawer DOM ONCE on boot;
+ *     every click updates text/attributes in place (`document.activeElement` never destroyed).
+ *   - Caches all HUD DOM element refs on mount; throttles telemetry text updates to 10 Hz
+ *     and synthetic fallback canvas draws to 8 Hz with diff-guarded writes (`setTextIfChanged`).
+ *   - Right drawer splits `4-Ch Feeds` and `Avionics & Assurance` into two clean sub-tabs so
+ *     all channel cards + Upload CTA fit with 0 px vertical overflow at 1280x800 and 1440x900.
+ *   - Updates `document.documentElement.lang` on every locale switch (eliminates dotted `İ` bug).
  */
 
 import type { VisualWorldMode } from "../scene/atmosphere_world.ts";
@@ -18,13 +22,22 @@ import {
   type WeatherState,
 } from "../sim/studio_sim.ts";
 import {
+  formatFallbackChannelCaption,
   renderFallbackSensorCanvas,
   type BridgeChannelResult,
   type NativeSensorHealthPayload,
   type SensorChannelId,
   type StudioBridgeClient,
 } from "./bridge_client.ts";
-import { getStudioStrings, type StudioCameraPreset, type StudioLocale } from "./i18n.ts";
+import {
+  STUDIO_ASSURANCE_V52_SPEC,
+  formatBreachReason,
+  formatShieldReason,
+  formatTouchdownGrade,
+  getStudioStrings,
+  type StudioCameraPreset,
+  type StudioLocale,
+} from "./i18n.ts";
 import {
   EO_SECTOR_COUNT,
   formatBearingTbcBadge,
@@ -45,6 +58,8 @@ export {
   type HudBadgeState,
 } from "./v52_telemetry.ts";
 
+export type DrawerTabId = "feeds" | "avionics";
+
 export interface StudioHudCallbacks {
   readonly onScenarioChange: (scenario: StudioScenarioId) => void;
   readonly onCameraChange: (preset: StudioCameraPreset) => void;
@@ -56,11 +71,17 @@ export interface StudioHudCallbacks {
   readonly onResetApproach: () => void;
   readonly onDomeToggle: (visible: boolean) => void;
   readonly onOpenVideoBench: () => void;
+  readonly onDrawerToggle?: (open: boolean) => void;
+  readonly onLocaleChange?: (locale: StudioLocale) => void;
+  readonly onRetryBridge?: () => Promise<boolean> | void;
 }
 
 const SCENARIO_ORDER: readonly StudioScenarioId[] = ["cbdr", "forcedland", "thermal_fog", "gps_spoof"];
 const CAMERA_ORDER: readonly StudioCameraPreset[] = ["chase", "wingman", "overview", "cockpit"];
 const CHANNEL_ORDER: readonly SensorChannelId[] = ["d2", "land", "thermal", "nav"];
+
+const TELEMETRY_TEXT_INTERVAL_MS = 100; // 10 Hz
+const FALLBACK_CANVAS_INTERVAL_MS = 125; // 8 Hz
 
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -88,7 +109,7 @@ export function formatSensorHealthBadge(
     return {
       text: hs.sensorStandby,
       title:
-        "SensorHealthMonitor v5.2: 12-Sector EO, LWIR FFC/Contrast-Collapse, Dual-Tier FSYNC <=1ms & M-of-N TBC (awaiting telemetry)",
+        "SensorHealthMonitor: 12-Sector EO, LWIR FFC/Contrast-Collapse, Dual-Tier FSYNC <=1ms & M-of-N TBC (awaiting telemetry)",
       state: "standby",
     };
   }
@@ -230,6 +251,7 @@ export class StudioHud {
   private readonly host: HTMLElement;
   private readonly callbacks: StudioHudCallbacks;
   private readonly bridge: StudioBridgeClient;
+  private readonly abortCtrl = new AbortController();
 
   private readonly topbarEl: HTMLElement;
   private readonly statusStripEl: HTMLDivElement;
@@ -246,13 +268,82 @@ export class StudioHud {
   private shieldEnabled = true;
   private weather: WeatherState = { ...DEFAULT_WEATHER_STATE };
   private weatherOpen = false;
+  private benchOpen = false;
   private domeVisible = false;
   private drawerOpen = typeof window !== "undefined" && window.innerWidth >= 1280;
+  private drawerTab: DrawerTabId = "feeds";
   private drawerBeforeCockpit: boolean | null = null;
   private uploadChannel: SensorChannelId = "d2";
+  private uploadBusy = false;
+  private uploadFeedbackKey: "none" | "offline" | "failed" | "custom" = "none";
+  private uploadCustomMsg = "";
+  private retryBridgeBusy = false;
   private sensorHealth: NativeSensorHealthPayload | null = null;
 
+  private lastTelemetryTextMs = -Infinity;
+  private lastFallbackCanvasMs = -Infinity;
+  private lastSyncedBridgeOnline: boolean | null = null;
+  private lastSyncedBridgeTransport: string | null = null;
+
+  // Cached Topbar & Status Strip DOM refs (zero per-frame querySelector)
+  private brandTitleEl: HTMLElement | null = null;
+  private brandVerEl: HTMLElement | null = null;
+  private bannerEl: HTMLElement | null = null;
+  private brandBadgeEl: HTMLElement | null = null;
+  private modeBtnEl: HTMLButtonElement | null = null;
+  private ctrlBtnEl: HTMLButtonElement | null = null;
+  private shieldBtnEl: HTMLButtonElement | null = null;
+  private weatherBtnEl: HTMLButtonElement | null = null;
+  private benchBtnEl: HTMLButtonElement | null = null;
+  private sensorsBtnEl: HTMLButtonElement | null = null;
+  private localeBtnEl: HTMLButtonElement | null = null;
+  private fpsPillEl: HTMLElement | null = null;
+  private sensorHealthBadgeEl: HTMLElement | null = null;
+  private multishipBadgeEl: HTMLElement | null = null;
+
+  // Cached Bottom Dock DOM refs
+  private manualHintEl: HTMLElement | null = null;
+  private telemKeyRangeEl: HTMLElement | null = null;
+  private telemKeySc3bfEl: HTMLElement | null = null;
+  private telemKeyBankEl: HTMLElement | null = null;
+  private telemKeySpeedEl: HTMLElement | null = null;
+  private telemRangeEl: HTMLElement | null = null;
+  private telemSc3bfEl: HTMLElement | null = null;
+  private telemBankEl: HTMLElement | null = null;
+  private telemSpeedEl: HTMLElement | null = null;
+  private domeBtnEl: HTMLButtonElement | null = null;
+  private readonly camBtnEls = new Map<StudioCameraPreset, HTMLButtonElement>();
+  private readonly scenBtnEls = new Map<StudioScenarioId, HTMLButtonElement>();
+
+  // Cached Drawer DOM refs
+  private drawerTitleEl: HTMLElement | null = null;
+  private bridgeBadgeEl: HTMLElement | null = null;
+  private retryBridgeBtnEl: HTMLButtonElement | null = null;
+  private tabFeedsBtnEl: HTMLButtonElement | null = null;
+  private tabAvionicsBtnEl: HTMLButtonElement | null = null;
+  private paneFeedsEl: HTMLElement | null = null;
+  private paneAvionicsEl: HTMLElement | null = null;
+  private avionicsTitleEl: HTMLElement | null = null;
+  private assuranceTitleEl: HTMLElement | null = null;
+  private specsSummaryEl: HTMLElement | null = null;
+  private navSpecEl: HTMLElement | null = null;
+  private assuranceSpecEl: HTMLElement | null = null;
+  private sectorBadgeEl: HTMLElement | null = null;
+  private sectorBarEl: HTMLElement | null = null;
+  private lwirBadgeEl: HTMLElement | null = null;
+  private fsyncBadgeEl: HTMLElement | null = null;
+  private tbcBadgeEl: HTMLElement | null = null;
+  private uploadHintEl: HTMLElement | null = null;
+  private uploadChSelectEl: HTMLSelectElement | null = null;
+  private uploadBtnEl: HTMLButtonElement | null = null;
+  private uploadStatusEl: HTMLElement | null = null;
+
+  // Cached Weather DOM refs
+  private readonly weatherTextEls = new Map<string, HTMLElement>();
+  private readonly weatherInputEls = new Map<string, HTMLInputElement>();
+
   private readonly channelTitleEls = new Map<SensorChannelId, HTMLElement>();
+  private readonly channelCaptionEls = new Map<SensorChannelId, HTMLElement>();
   private readonly channelCanvases = new Map<SensorChannelId, HTMLCanvasElement>();
   private readonly channelImgs = new Map<SensorChannelId, HTMLImageElement>();
   private readonly channelLatEls = new Map<SensorChannelId, HTMLElement>();
@@ -266,6 +357,10 @@ export class StudioHud {
     this.bridge = bridge;
     this.callbacks = callbacks;
 
+    if (typeof document !== "undefined") {
+      document.documentElement.lang = this.locale;
+    }
+
     this.topbarEl = document.createElement("header");
     this.topbarEl.className = "studio-topbar";
 
@@ -274,21 +369,30 @@ export class StudioHud {
     this.statusStripEl.innerHTML =
       `<span id="studio-sensor-health-badge" class="studio-status-badge" data-state="standby"></span>` +
       `<span id="studio-multiship-badge" class="studio-status-badge" data-state="standby"></span>`;
+    this.sensorHealthBadgeEl = this.statusStripEl.querySelector("#studio-sensor-health-badge");
+    this.multishipBadgeEl = this.statusStripEl.querySelector("#studio-multiship-badge");
 
     this.alertEl = document.createElement("div");
+    this.alertEl.id = "studio-flight-alert";
     this.alertEl.className = "studio-flight-alert";
+    this.alertEl.setAttribute("role", "status");
+    this.alertEl.setAttribute("aria-live", "polite");
     this.alertEl.dataset.visible = "false";
 
     this.weatherEl = document.createElement("div");
+    this.weatherEl.id = "studio-weather-popover";
     this.weatherEl.className = "studio-weather-popover";
+    this.weatherEl.setAttribute("role", "dialog");
     this.weatherEl.dataset.open = "false";
 
     this.bottomDockEl = document.createElement("div");
     this.bottomDockEl.className = "studio-bottom-dock";
 
     this.drawerEl = document.createElement("aside");
+    this.drawerEl.id = "studio-sensor-drawer";
     this.drawerEl.className = "studio-sensor-drawer";
     this.drawerEl.dataset.open = String(this.drawerOpen);
+    this.applyDrawerInert(this.drawerOpen);
 
     this.host.appendChild(this.topbarEl);
     this.host.appendChild(this.statusStripEl);
@@ -297,20 +401,57 @@ export class StudioHud {
     this.host.appendChild(this.bottomDockEl);
     this.host.appendChild(this.drawerEl);
 
+    this.mountTopbarOnce();
+    this.mountBottomDockOnce();
     this.mountDrawerOnce();
     this.mountWeatherOnce();
-    this.renderBars();
+    this.bindGlobalPopoverDismiss();
+
+    this.syncBars();
     this.syncDrawerText();
     this.syncWeatherUi();
     this.syncStatusBadges();
+    this.syncBridgeBadge(true);
+  }
+
+  dispose(): void {
+    this.abortCtrl.abort();
+  }
+
+  private applyDrawerInert(open: boolean): void {
+    this.drawerEl.inert = !open;
+    setAttrIfChanged(this.drawerEl, "aria-hidden", String(!open));
+  }
+
+  private bindGlobalPopoverDismiss(): void {
+    if (typeof document === "undefined") return;
+    document.addEventListener(
+      "pointerdown",
+      (ev) => {
+        if (!this.weatherOpen) return;
+        const target = ev.target as Node | null;
+        if (!target) return;
+        if (this.weatherEl.contains(target) || this.weatherBtnEl?.contains(target)) {
+          return;
+        }
+        this.setWeatherOpen(false, false);
+      },
+      { signal: this.abortCtrl.signal },
+    );
   }
 
   setLocale(next: StudioLocale): void {
     this.locale = next;
-    this.renderBars();
+    if (typeof document !== "undefined") {
+      document.documentElement.lang = next;
+    }
+    this.syncBars();
     this.syncDrawerText();
     this.syncWeatherUi();
     this.syncStatusBadges();
+    this.syncBridgeBadge(true);
+    this.syncUploadStatusText();
+    this.callbacks.onLocaleChange?.(next);
   }
 
   getLocale(): StudioLocale {
@@ -319,14 +460,14 @@ export class StudioHud {
 
   setScenario(next: StudioScenarioId): void {
     this.scenario = next;
-    this.renderBars();
+    this.syncBars();
   }
 
   setCameraPreset(next: StudioCameraPreset): void {
     const prev = this.cameraPreset;
     this.cameraPreset = next;
-    // Auto-collapse 4-Channel AI drawer in Cockpit view so both G1000 displays are 100% unobstructed;
-    // restore previous drawer state automatically when returning to external cameras!
+    // Auto-collapse right drawer in Cockpit view so both G1000 displays stay 100% unobstructed;
+    // restore previous drawer state automatically when returning to external cameras.
     if (next === "cockpit" && prev !== "cockpit") {
       this.drawerBeforeCockpit = this.drawerOpen;
       this.setDrawerOpen(false);
@@ -334,22 +475,22 @@ export class StudioHud {
       this.setDrawerOpen(this.drawerBeforeCockpit);
       this.drawerBeforeCockpit = null;
     }
-    this.renderBars();
+    this.syncBars();
   }
 
   setVisualMode(next: VisualWorldMode): void {
     this.visualMode = next;
-    this.renderBars();
+    this.syncBars();
   }
 
   setControlMode(next: FlightControlMode): void {
     this.controlMode = next;
-    this.renderBars();
+    this.syncBars();
   }
 
   setShieldEnabled(enabled: boolean): void {
     this.shieldEnabled = enabled;
-    this.renderBars();
+    this.syncBars();
   }
 
   setWeather(next: WeatherState): void {
@@ -357,20 +498,61 @@ export class StudioHud {
     this.syncWeatherUi();
   }
 
+  setWeatherOpen(open: boolean, restoreFocus = false): void {
+    if (this.weatherOpen === open) return;
+    this.weatherOpen = open;
+    this.weatherEl.dataset.open = String(open);
+    setAttrIfChanged(this.weatherBtnEl, "data-active", String(open));
+    setAttrIfChanged(this.weatherBtnEl, "aria-expanded", String(open));
+    if (!open && restoreFocus) {
+      this.weatherBtnEl?.focus();
+    }
+  }
+
+  isWeatherOpen(): boolean {
+    return this.weatherOpen;
+  }
+
+  setBenchOpen(open: boolean): void {
+    this.benchOpen = open;
+    setAttrIfChanged(this.benchBtnEl, "data-active", String(open));
+    setAttrIfChanged(this.benchBtnEl, "aria-expanded", String(open));
+  }
+
   setDomeVisible(visible: boolean): void {
     this.domeVisible = visible;
-    this.renderBars();
+    this.syncBars();
   }
 
   setDrawerOpen(open: boolean): void {
+    const changed = this.drawerOpen !== open;
     this.drawerOpen = open;
     this.drawerEl.dataset.open = String(open);
-    const btn = this.topbarEl.querySelector<HTMLButtonElement>("#studio-sensors-btn");
-    if (btn) btn.dataset.active = String(open);
+    this.applyDrawerInert(open);
+    setAttrIfChanged(this.sensorsBtnEl, "data-active", String(open));
+    setAttrIfChanged(this.sensorsBtnEl, "aria-expanded", String(open));
+    if (changed) {
+      this.callbacks.onDrawerToggle?.(open);
+    }
   }
 
   isDrawerOpen(): boolean {
     return this.drawerOpen;
+  }
+
+  setDrawerTab(tab: DrawerTabId): void {
+    this.drawerTab = tab;
+    const isFeeds = tab === "feeds";
+    setAttrIfChanged(this.tabFeedsBtnEl, "aria-selected", String(isFeeds));
+    setAttrIfChanged(this.tabFeedsBtnEl, "data-active", String(isFeeds));
+    setAttrIfChanged(this.tabAvionicsBtnEl, "aria-selected", String(!isFeeds));
+    setAttrIfChanged(this.tabAvionicsBtnEl, "data-active", String(!isFeeds));
+    this.paneFeedsEl?.classList.toggle("hidden", !isFeeds);
+    this.paneAvionicsEl?.classList.toggle("hidden", isFeeds);
+  }
+
+  getDrawerTab(): DrawerTabId {
+    return this.drawerTab;
   }
 
   applySensorHealth(health: NativeSensorHealthPayload | null): void {
@@ -379,32 +561,28 @@ export class StudioHud {
   }
 
   private syncStatusBadges(): void {
-    const shEl = this.statusStripEl.querySelector<HTMLElement>("#studio-sensor-health-badge");
-    const msEl = this.statusStripEl.querySelector<HTMLElement>("#studio-multiship-badge");
-    if (shEl) {
+    if (this.sensorHealthBadgeEl) {
       const info = formatSensorHealthBadge(this.sensorHealth, this.locale);
-      setTextIfChanged(shEl, info.text);
-      setAttrIfChanged(shEl, "title", info.title);
-      setAttrIfChanged(shEl, "data-state", info.state);
+      setTextIfChanged(this.sensorHealthBadgeEl, info.text);
+      setAttrIfChanged(this.sensorHealthBadgeEl, "title", info.title);
+      setAttrIfChanged(this.sensorHealthBadgeEl, "data-state", info.state);
     }
-    if (msEl) {
+    if (this.multishipBadgeEl) {
       const info = formatMultiShipCoordBadge(this.sensorHealth, this.locale);
-      setTextIfChanged(msEl, info.text);
-      setAttrIfChanged(msEl, "title", info.title);
-      setAttrIfChanged(msEl, "data-state", info.state);
+      setTextIfChanged(this.multishipBadgeEl, info.text);
+      setAttrIfChanged(this.multishipBadgeEl, "title", info.title);
+      setAttrIfChanged(this.multishipBadgeEl, "data-state", info.state);
     }
-    this.syncV52AvionicsPanel();
+    this.syncAvionicsPanel();
   }
 
-  private syncV52AvionicsPanel(): void {
+  private syncAvionicsPanel(): void {
     const sectorInfo = formatSectorOpticalHealth(this.sensorHealth, this.locale);
-    const sectorBadge = this.drawerEl.querySelector<HTMLElement>("#studio-v52-sector-badge");
-    setTextIfChanged(sectorBadge, sectorInfo.text);
-    setAttrIfChanged(sectorBadge, "title", sectorInfo.title);
-    setAttrIfChanged(sectorBadge, "data-state", sectorInfo.state);
+    setTextIfChanged(this.sectorBadgeEl, sectorInfo.text);
+    setAttrIfChanged(this.sectorBadgeEl, "title", sectorInfo.title);
+    setAttrIfChanged(this.sectorBadgeEl, "data-state", sectorInfo.state);
 
-    const sectorBar = this.drawerEl.querySelector<HTMLElement>("#studio-v52-sector-bar");
-    setAttrIfChanged(sectorBar, "title", sectorInfo.title);
+    setAttrIfChanged(this.sectorBarEl, "title", sectorInfo.title);
     for (let i = 0; i < this.sectorCellEls.length; i++) {
       const cell = this.sectorCellEls[i];
       const band = sectorInfo.sectorBands[i] ?? "standby";
@@ -418,36 +596,59 @@ export class StudioHud {
     }
 
     const lwirInfo = formatLwirFfcContrastBadge(this.sensorHealth, this.locale);
-    const lwirEl = this.drawerEl.querySelector<HTMLElement>("#studio-v52-lwir-badge");
-    setTextIfChanged(lwirEl, lwirInfo.text);
-    setAttrIfChanged(lwirEl, "title", lwirInfo.title);
-    setAttrIfChanged(lwirEl, "data-state", lwirInfo.state);
+    setTextIfChanged(this.lwirBadgeEl, lwirInfo.text);
+    setAttrIfChanged(this.lwirBadgeEl, "title", lwirInfo.title);
+    setAttrIfChanged(this.lwirBadgeEl, "data-state", lwirInfo.state);
 
     const fsyncInfo = formatFsyncPrecisionBadge(this.sensorHealth, this.locale);
-    const fsyncEl = this.drawerEl.querySelector<HTMLElement>("#studio-v52-fsync-badge");
-    setTextIfChanged(fsyncEl, fsyncInfo.text);
-    setAttrIfChanged(fsyncEl, "title", fsyncInfo.title);
-    setAttrIfChanged(fsyncEl, "data-state", fsyncInfo.state);
+    setTextIfChanged(this.fsyncBadgeEl, fsyncInfo.text);
+    setAttrIfChanged(this.fsyncBadgeEl, "title", fsyncInfo.title);
+    setAttrIfChanged(this.fsyncBadgeEl, "data-state", fsyncInfo.state);
 
     const tbcInfo = formatBearingTbcBadge(this.sensorHealth, this.locale);
-    const tbcEl = this.drawerEl.querySelector<HTMLElement>("#studio-v52-tbc-badge");
-    setTextIfChanged(tbcEl, tbcInfo.text);
-    setAttrIfChanged(tbcEl, "title", tbcInfo.title);
-    setAttrIfChanged(tbcEl, "data-state", tbcInfo.state);
+    setTextIfChanged(this.tbcBadgeEl, tbcInfo.text);
+    setAttrIfChanged(this.tbcBadgeEl, "title", tbcInfo.title);
+    setAttrIfChanged(this.tbcBadgeEl, "data-state", tbcInfo.state);
   }
 
-  syncBridgeBadge(): void {
-    const badge = this.drawerEl.querySelector<HTMLElement>("#studio-bridge-badge");
-    if (!badge) return;
-    const s = getStudioStrings(this.locale);
+  syncBridgeBadge(force = false): void {
     const online = this.bridge.isOnline();
-    badge.dataset.online = String(online);
-    if (online && this.bridge.getTransport() === "tauri-ipc") {
-      badge.textContent = s.drawer.bridgeNative;
-      badge.title = s.stackV5Spec;
+    const transport = this.bridge.getTransport();
+    if (
+      !force &&
+      this.lastSyncedBridgeOnline === online &&
+      this.lastSyncedBridgeTransport === transport
+    ) {
+      return;
+    }
+    this.lastSyncedBridgeOnline = online;
+    this.lastSyncedBridgeTransport = transport;
+
+    const s = getStudioStrings(this.locale);
+    setAttrIfChanged(this.bridgeBadgeEl, "data-online", String(online));
+    if (online && transport === "tauri-ipc") {
+      setTextIfChanged(this.bridgeBadgeEl, s.drawer.bridgeNative);
+      setAttrIfChanged(this.bridgeBadgeEl, "title", s.stackV5Spec);
     } else {
-      badge.textContent = online ? s.drawer.bridgeOnline : s.drawer.bridgeFallback;
-      badge.title = online ? s.stackV5Spec : s.drawer.bridgeFallback;
+      setTextIfChanged(
+        this.bridgeBadgeEl,
+        online ? s.drawer.bridgeOnline : s.drawer.bridgeFallback,
+      );
+      setAttrIfChanged(
+        this.bridgeBadgeEl,
+        "title",
+        online ? s.stackV5Spec : s.drawer.bridgeFallback,
+      );
+    }
+
+    if (this.retryBridgeBtnEl) {
+      const showRetry = !online && !this.bridge.isNativeTauriIpc();
+      this.retryBridgeBtnEl.classList.toggle("hidden", !showRetry);
+      this.retryBridgeBtnEl.disabled = this.retryBridgeBusy;
+      setTextIfChanged(
+        this.retryBridgeBtnEl,
+        this.retryBridgeBusy ? s.drawer.retryingBridge : s.drawer.retryBridgeBtn,
+      );
     }
   }
 
@@ -466,6 +667,7 @@ export class StudioHud {
       }
       const img = this.channelImgs.get(id);
       const canvas = this.channelCanvases.get(id);
+      const caption = this.channelCaptionEls.get(id);
       const latEl = this.channelLatEls.get(id);
       const shaEl = this.channelShaEls.get(id);
 
@@ -474,17 +676,23 @@ export class StudioHud {
         img.classList.remove("hidden");
         canvas.style.display = "none";
       }
+      if (caption) {
+        setTextIfChanged(caption, res.summary);
+      }
       if (latEl) {
         if (id === "nav" && res.metrics && typeof res.metrics.xfeat_keypoints_count === "number") {
           const msStr = res.latencyMs !== null ? `${res.latencyMs.toFixed(1)}ms` : "LIVE";
-          latEl.textContent = `${msStr} · XF ${res.metrics.xfeat_keypoints_count}`;
+          setTextIfChanged(latEl, `${msStr} · XF ${res.metrics.xfeat_keypoints_count}`);
         } else {
-          latEl.textContent = res.latencyMs !== null ? `${res.latencyMs.toFixed(1)} ms` : res.summary;
+          setTextIfChanged(
+            latEl,
+            res.latencyMs !== null ? `${res.latencyMs.toFixed(1)} ms` : res.summary,
+          );
         }
       }
       if (shaEl) {
         if (res.checkpointShaShort) {
-          shaEl.textContent = `SHA ${res.checkpointShaShort}`;
+          setTextIfChanged(shaEl, `SHA ${res.checkpointShaShort}`);
           shaEl.classList.remove("hidden");
         } else {
           shaEl.classList.add("hidden");
@@ -494,71 +702,333 @@ export class StudioHud {
     this.syncBridgeBadge();
   }
 
-  updateTelemetry(snap: StudioSimSnapshot, fps: number): void {
-    const s = getStudioStrings(this.locale);
+  updateTelemetry(snap: StudioSimSnapshot, fps: number, force = false): void {
+    const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
 
-    const fpsEl = this.topbarEl.querySelector<HTMLElement>("#studio-fps-pill");
-    if (fpsEl) fpsEl.textContent = `${Math.round(fps)} FPS`;
+    if (force || nowMs - this.lastTelemetryTextMs >= TELEMETRY_TEXT_INTERVAL_MS) {
+      this.lastTelemetryTextMs = nowMs;
+      const s = getStudioStrings(this.locale);
 
-    const rangeEl = this.bottomDockEl.querySelector<HTMLElement>("#telem-range");
-    if (rangeEl) {
-      const locked =
-        snap.activeRange.mode === ActiveRangeModeTs.Locked || snap.activeRange.sigmaRM <= 95;
-      rangeEl.textContent = `${Math.round(snap.activeRange.rHatM)}m ±${Math.round(snap.activeRange.sigmaRM)}m ${locked ? s.telemetry.locked : s.telemetry.swerve}`;
-      rangeEl.dataset.state = locked ? "nominal" : "caution";
+      setTextIfChanged(this.fpsPillEl, `${Math.round(fps)} FPS`);
+
+      if (this.telemRangeEl) {
+        const locked =
+          snap.activeRange.mode === ActiveRangeModeTs.Locked || snap.activeRange.sigmaRM <= 95;
+        setTextIfChanged(
+          this.telemRangeEl,
+          `${Math.round(snap.activeRange.rHatM)}m ±${Math.round(snap.activeRange.sigmaRM)}m ${locked ? s.telemetry.locked : s.telemetry.swerve}`,
+        );
+        setAttrIfChanged(this.telemRangeEl, "data-state", locked ? "nominal" : "caution");
+      }
+
+      if (this.telemSc3bfEl) {
+        setTextIfChanged(
+          this.telemSc3bfEl,
+          snap.sc3bfSafe ? s.telemetry.safe : s.telemetry.evade,
+        );
+        setAttrIfChanged(this.telemSc3bfEl, "data-state", snap.sc3bfSafe ? "nominal" : "alert");
+      }
+
+      if (this.telemBankEl) {
+        const bankDeg = (snap.ownship.rollRad * 180) / Math.PI;
+        setTextIfChanged(this.telemBankEl, `${bankDeg >= 0 ? "+" : ""}${bankDeg.toFixed(1)}°`);
+      }
+
+      if (this.telemSpeedEl) {
+        setTextIfChanged(this.telemSpeedEl, `${Math.round(snap.ownship.tasMps * 1.94384)} kt`);
+      }
+
+      // Floating alert pill for Shield Override / Envelope Breach / Runway Touchdown (fully localized)
+      if (snap.shieldOverrideActive) {
+        setAttrIfChanged(this.alertEl, "data-visible", "true");
+        setAttrIfChanged(this.alertEl, "data-kind", "override");
+        setTextIfChanged(
+          this.alertEl,
+          `${s.telemetry.shieldOverridePrefix}: ${formatShieldReason(snap.shieldReason, this.locale)}`,
+        );
+      } else if (snap.envelopeBreach) {
+        setAttrIfChanged(this.alertEl, "data-visible", "true");
+        setAttrIfChanged(this.alertEl, "data-kind", "breach");
+        setTextIfChanged(
+          this.alertEl,
+          `${s.telemetry.breachPrefix} (${formatBreachReason(snap.breachReason, this.locale)})`,
+        );
+      } else if (snap.touchdown.landed) {
+        setAttrIfChanged(this.alertEl, "data-visible", "true");
+        setAttrIfChanged(this.alertEl, "data-kind", "touchdown");
+        setTextIfChanged(
+          this.alertEl,
+          `${s.telemetry.touchdownPrefix}: ${formatTouchdownGrade(snap.touchdown.grade, this.locale)} · ${Math.round(snap.touchdown.sinkRateFpm)} fpm · ${snap.touchdown.centerlineOffsetM >= 0 ? "+" : ""}${snap.touchdown.centerlineOffsetM.toFixed(1)}m`,
+        );
+      } else {
+        setAttrIfChanged(this.alertEl, "data-visible", "false");
+      }
+
+      // Sync non-cropped HTML telemetry captions for fallback channels at 10 Hz
+      if (this.drawerOpen && this.drawerTab === "feeds" && !this.bridge.isOnline()) {
+        for (const ch of CHANNEL_ORDER) {
+          if (this.channelHasCustomImage.has(ch)) continue;
+          const cap = this.channelCaptionEls.get(ch);
+          setTextIfChanged(cap, formatFallbackChannelCaption(ch, snap));
+        }
+      }
     }
 
-    const scEl = this.bottomDockEl.querySelector<HTMLElement>("#telem-sc3bf");
-    if (scEl) {
-      scEl.textContent = snap.sc3bfSafe ? s.telemetry.safe : s.telemetry.evade;
-      scEl.dataset.state = snap.sc3bfSafe ? "nominal" : "alert";
-    }
-
-    const bankEl = this.bottomDockEl.querySelector<HTMLElement>("#telem-bank");
-    if (bankEl) {
-      const bankDeg = (snap.ownship.rollRad * 180) / Math.PI;
-      bankEl.textContent = `${bankDeg >= 0 ? "+" : ""}${bankDeg.toFixed(1)}°`;
-    }
-
-    const spdEl = this.bottomDockEl.querySelector<HTMLElement>("#telem-speed");
-    if (spdEl) {
-      spdEl.textContent = `${Math.round(snap.ownship.tasMps * 1.94384)} kt`;
-    }
-
-    // Floating alert pill for Shield Override / Envelope Breach / Runway Touchdown
-    if (snap.shieldOverrideActive) {
-      this.alertEl.dataset.visible = "true";
-      this.alertEl.dataset.kind = "override";
-      this.alertEl.textContent = `${s.telemetry.shieldOverridePrefix}: ${snap.shieldReason}`;
-    } else if (snap.envelopeBreach) {
-      this.alertEl.dataset.visible = "true";
-      this.alertEl.dataset.kind = "breach";
-      this.alertEl.textContent = `${s.telemetry.breachPrefix} (${snap.breachReason ?? "SHIELD OFF"})`;
-    } else if (snap.touchdown.landed) {
-      this.alertEl.dataset.visible = "true";
-      this.alertEl.dataset.kind = "touchdown";
-      this.alertEl.textContent = `${s.telemetry.touchdownPrefix}: ${snap.touchdown.grade} · ${Math.round(snap.touchdown.sinkRateFpm)} fpm · ${snap.touchdown.centerlineOffsetM >= 0 ? "+" : ""}${snap.touchdown.centerlineOffsetM.toFixed(1)}m`;
-    } else {
-      this.alertEl.dataset.visible = "false";
-    }
-
-    // Fallback synthetic canvases only for slots without a live/uploaded image
-    if (this.drawerOpen && !this.bridge.isOnline()) {
+    // Fallback synthetic canvases throttled to 8 Hz and only when Feeds tab is visible & offline
+    if (
+      this.drawerOpen &&
+      this.drawerTab === "feeds" &&
+      !this.bridge.isOnline() &&
+      (force || nowMs - this.lastFallbackCanvasMs >= FALLBACK_CANVAS_INTERVAL_MS)
+    ) {
+      this.lastFallbackCanvasMs = nowMs;
       for (const ch of CHANNEL_ORDER) {
         if (this.channelHasCustomImage.has(ch)) continue;
         const canvas = this.channelCanvases.get(ch);
         const img = this.channelImgs.get(ch);
         if (canvas) {
-          canvas.style.display = "block";
+          if (canvas.style.display !== "block") canvas.style.display = "block";
           renderFallbackSensorCanvas(canvas, ch, snap);
         }
-        if (img) img.classList.add("hidden");
+        if (img && !img.classList.contains("hidden")) {
+          img.classList.add("hidden");
+        }
       }
       this.syncBridgeBadge();
     }
   }
 
-  /** Builds the 4-channel sensor drawer DOM ONCE so `<img>` previews persist across UI clicks (D16-W19-m3). */
+  /** Mounts topbar DOM ONCE so clicking buttons NEVER destroys keyboard focus (`document.activeElement`). */
+  private mountTopbarOnce(): void {
+    this.topbarEl.innerHTML =
+      `<div class="studio-brand-wrap">` +
+      `<span class="studio-dot" aria-hidden="true"></span>` +
+      `<span id="studio-brand-title" class="studio-brand"></span>` +
+      `<span id="studio-brand-ver" class="studio-ver"></span>` +
+      `</div>` +
+      `<div id="studio-scenario-banner" class="studio-scenario-banner"></div>` +
+      `<div class="studio-top-actions">` +
+      `<span id="studio-brand-badge" class="studio-pill studio-pill-emerald studio-brand-badge"></span>` +
+      `<button type="button" id="studio-mode-btn" class="studio-btn"></button>` +
+      `<button type="button" id="studio-ctrl-btn" class="studio-btn"></button>` +
+      `<button type="button" id="studio-shield-btn" class="studio-btn"></button>` +
+      `<button type="button" id="studio-weather-btn" class="studio-btn" aria-controls="studio-weather-popover" aria-expanded="false"></button>` +
+      `<button type="button" id="studio-bench-btn" class="studio-btn" aria-haspopup="dialog" aria-expanded="false" data-active="false"></button>` +
+      `<button type="button" id="studio-sensors-btn" class="studio-btn" aria-controls="studio-sensor-drawer"></button>` +
+      `<button type="button" id="studio-locale-btn" class="studio-btn"></button>` +
+      `<span id="studio-fps-pill" class="studio-pill studio-pill-cyan">-- FPS</span>` +
+      `</div>`;
+
+    this.brandTitleEl = this.topbarEl.querySelector("#studio-brand-title");
+    this.brandVerEl = this.topbarEl.querySelector("#studio-brand-ver");
+    this.bannerEl = this.topbarEl.querySelector("#studio-scenario-banner");
+    this.brandBadgeEl = this.topbarEl.querySelector("#studio-brand-badge");
+    this.modeBtnEl = this.topbarEl.querySelector("#studio-mode-btn");
+    this.ctrlBtnEl = this.topbarEl.querySelector("#studio-ctrl-btn");
+    this.shieldBtnEl = this.topbarEl.querySelector("#studio-shield-btn");
+    this.weatherBtnEl = this.topbarEl.querySelector("#studio-weather-btn");
+    this.benchBtnEl = this.topbarEl.querySelector("#studio-bench-btn");
+    this.sensorsBtnEl = this.topbarEl.querySelector("#studio-sensors-btn");
+    this.localeBtnEl = this.topbarEl.querySelector("#studio-locale-btn");
+    this.fpsPillEl = this.topbarEl.querySelector("#studio-fps-pill");
+
+    const sig = this.abortCtrl.signal;
+    this.localeBtnEl?.addEventListener(
+      "click",
+      () => this.setLocale(this.locale === "tr" ? "en" : "tr"),
+      { signal: sig },
+    );
+    this.modeBtnEl?.addEventListener(
+      "click",
+      () => {
+        const next: VisualWorldMode = this.visualMode === "photoreal" ? "obsidian" : "photoreal";
+        this.setVisualMode(next);
+        this.callbacks.onVisualModeChange(next);
+      },
+      { signal: sig },
+    );
+    this.ctrlBtnEl?.addEventListener(
+      "click",
+      () => {
+        const next: FlightControlMode = this.controlMode === "autopilot" ? "manual" : "autopilot";
+        this.setControlMode(next);
+        this.callbacks.onControlModeChange(next);
+      },
+      { signal: sig },
+    );
+    this.shieldBtnEl?.addEventListener(
+      "click",
+      () => {
+        const next = !this.shieldEnabled;
+        this.setShieldEnabled(next);
+        this.callbacks.onShieldToggle(next);
+      },
+      { signal: sig },
+    );
+    this.weatherBtnEl?.addEventListener(
+      "click",
+      () => this.setWeatherOpen(!this.weatherOpen, false),
+      { signal: sig },
+    );
+    this.benchBtnEl?.addEventListener(
+      "click",
+      () => this.callbacks.onOpenVideoBench(),
+      { signal: sig },
+    );
+    this.sensorsBtnEl?.addEventListener(
+      "click",
+      () => this.setDrawerOpen(!this.drawerOpen),
+      { signal: sig },
+    );
+  }
+
+  /** Mounts bottom telemetry/camera/scenario dock DOM ONCE (preserves focus across clicks). */
+  private mountBottomDockOnce(): void {
+    const camButtons = CAMERA_ORDER.map(
+      (id) => `<button type="button" class="studio-btn" data-studio-cam="${id}"></button>`,
+    ).join("");
+    const scenButtons = SCENARIO_ORDER.map(
+      (id) => `<button type="button" class="studio-btn" data-studio-scen="${id}"></button>`,
+    ).join("");
+
+    this.bottomDockEl.innerHTML =
+      `<div id="studio-manual-hint" class="studio-manual-hint hidden"></div>` +
+      `<div class="studio-dock-strip">` +
+      `<div class="studio-telem-chip"><span id="telem-k-range" class="studio-telem-k"></span><span id="telem-range" class="studio-telem-v" data-state="caution">—</span></div>` +
+      `<div class="studio-telem-chip"><span id="telem-k-sc3bf" class="studio-telem-k"></span><span id="telem-sc3bf" class="studio-telem-v" data-state="nominal">6/6</span></div>` +
+      `<div class="studio-telem-chip"><span id="telem-k-bank" class="studio-telem-k"></span><span id="telem-bank" class="studio-telem-v">0.0°</span></div>` +
+      `<div class="studio-telem-chip"><span id="telem-k-speed" class="studio-telem-k"></span><span id="telem-speed" class="studio-telem-v">101 kt</span></div>` +
+      `<span class="studio-sep" aria-hidden="true"></span>` +
+      camButtons +
+      `<span class="studio-sep" aria-hidden="true"></span>` +
+      `<button type="button" id="studio-dome-btn" class="studio-btn"></button>` +
+      `</div>` +
+      `<div class="studio-dock-strip">${scenButtons}</div>`;
+
+    this.manualHintEl = this.bottomDockEl.querySelector("#studio-manual-hint");
+    this.telemKeyRangeEl = this.bottomDockEl.querySelector("#telem-k-range");
+    this.telemKeySc3bfEl = this.bottomDockEl.querySelector("#telem-k-sc3bf");
+    this.telemKeyBankEl = this.bottomDockEl.querySelector("#telem-k-bank");
+    this.telemKeySpeedEl = this.bottomDockEl.querySelector("#telem-k-speed");
+    this.telemRangeEl = this.bottomDockEl.querySelector("#telem-range");
+    this.telemSc3bfEl = this.bottomDockEl.querySelector("#telem-sc3bf");
+    this.telemBankEl = this.bottomDockEl.querySelector("#telem-bank");
+    this.telemSpeedEl = this.bottomDockEl.querySelector("#telem-speed");
+    this.domeBtnEl = this.bottomDockEl.querySelector("#studio-dome-btn");
+
+    const sig = this.abortCtrl.signal;
+    this.domeBtnEl?.addEventListener(
+      "click",
+      () => {
+        this.setDomeVisible(!this.domeVisible);
+        this.callbacks.onDomeToggle(this.domeVisible);
+      },
+      { signal: sig },
+    );
+
+    for (const id of CAMERA_ORDER) {
+      const btn = this.bottomDockEl.querySelector<HTMLButtonElement>(`[data-studio-cam="${id}"]`);
+      if (btn) {
+        this.camBtnEls.set(id, btn);
+        btn.addEventListener(
+          "click",
+          () => {
+            this.setCameraPreset(id);
+            this.callbacks.onCameraChange(id);
+          },
+          { signal: sig },
+        );
+      }
+    }
+
+    for (const id of SCENARIO_ORDER) {
+      const btn = this.bottomDockEl.querySelector<HTMLButtonElement>(`[data-studio-scen="${id}"]`);
+      if (btn) {
+        this.scenBtnEls.set(id, btn);
+        btn.addEventListener(
+          "click",
+          () => {
+            this.setScenario(id);
+            this.callbacks.onScenarioChange(id);
+          },
+          { signal: sig },
+        );
+      }
+    }
+  }
+
+  /** Patches topbar & bottom-dock labels and ARIA states in place without wiping innerHTML. */
+  private syncBars(): void {
+    const s = getStudioStrings(this.locale);
+    const modeLabel = this.visualMode === "photoreal" ? s.modePhotoreal : s.modeObsidian;
+    const ctrlLabel = this.controlMode === "manual" ? s.controlManual : s.controlAutopilot;
+    const shieldLabel = this.shieldEnabled ? s.shieldOn : s.shieldOff;
+    const bannerText = s.scenarios[this.scenario].banner;
+
+    setTextIfChanged(this.brandTitleEl, s.brandTitle);
+    setTextIfChanged(this.brandVerEl, s.brandVersion);
+    setTextIfChanged(this.bannerEl, bannerText);
+    setAttrIfChanged(this.bannerEl, "title", bannerText);
+
+    setTextIfChanged(this.brandBadgeEl, s.brandBadge);
+    setAttrIfChanged(this.brandBadgeEl, "title", s.brandBadgeTitle);
+
+    setTextIfChanged(this.modeBtnEl, modeLabel);
+    setAttrIfChanged(this.modeBtnEl, "data-active", String(this.visualMode === "photoreal"));
+    setAttrIfChanged(this.modeBtnEl, "aria-pressed", String(this.visualMode === "photoreal"));
+
+    setTextIfChanged(this.ctrlBtnEl, ctrlLabel);
+    setAttrIfChanged(this.ctrlBtnEl, "data-active", String(this.controlMode === "manual"));
+    setAttrIfChanged(this.ctrlBtnEl, "aria-pressed", String(this.controlMode === "manual"));
+
+    setTextIfChanged(this.shieldBtnEl, shieldLabel);
+    setAttrIfChanged(this.shieldBtnEl, "data-tone", this.shieldEnabled ? "emerald" : "rose");
+    setAttrIfChanged(this.shieldBtnEl, "aria-pressed", String(this.shieldEnabled));
+
+    setTextIfChanged(this.weatherBtnEl, s.weatherBtn);
+    setAttrIfChanged(this.weatherBtnEl, "data-active", String(this.weatherOpen));
+    setAttrIfChanged(this.weatherBtnEl, "aria-expanded", String(this.weatherOpen));
+
+    setTextIfChanged(this.benchBtnEl, s.videoLabBtn);
+    setAttrIfChanged(this.benchBtnEl, "data-active", String(this.benchOpen));
+    setAttrIfChanged(this.benchBtnEl, "aria-expanded", String(this.benchOpen));
+
+    setTextIfChanged(this.sensorsBtnEl, s.sensorsToggle);
+    setAttrIfChanged(this.sensorsBtnEl, "data-active", String(this.drawerOpen));
+    setAttrIfChanged(this.sensorsBtnEl, "aria-expanded", String(this.drawerOpen));
+
+    setTextIfChanged(this.localeBtnEl, s.localeToggle);
+
+    setTextIfChanged(this.manualHintEl, s.manualHint);
+    this.manualHintEl?.classList.toggle("hidden", this.controlMode !== "manual");
+
+    setTextIfChanged(this.telemKeyRangeEl, s.telemetry.range);
+    setTextIfChanged(this.telemKeySc3bfEl, s.telemetry.sc3bf);
+    setTextIfChanged(this.telemKeyBankEl, s.telemetry.bank);
+    setTextIfChanged(this.telemKeySpeedEl, s.telemetry.speed);
+
+    for (const id of CAMERA_ORDER) {
+      const btn = this.camBtnEls.get(id);
+      const active = this.cameraPreset === id;
+      setTextIfChanged(btn, s.cameras[id]);
+      setAttrIfChanged(btn, "data-active", String(active));
+      setAttrIfChanged(btn, "aria-pressed", String(active));
+    }
+
+    for (const id of SCENARIO_ORDER) {
+      const btn = this.scenBtnEls.get(id);
+      const active = this.scenario === id;
+      setTextIfChanged(btn, s.scenarios[id].label);
+      setAttrIfChanged(btn, "data-active", String(active));
+      setAttrIfChanged(btn, "aria-pressed", String(active));
+    }
+
+    setTextIfChanged(this.domeBtnEl, s.domeToggle);
+    setAttrIfChanged(this.domeBtnEl, "data-active", String(this.domeVisible));
+    setAttrIfChanged(this.domeBtnEl, "aria-pressed", String(this.domeVisible));
+  }
+
+  /** Builds the 2-tab sensor drawer DOM ONCE so `<img>` previews persist across UI clicks. */
   private mountDrawerOnce(): void {
     const channelCards = CHANNEL_ORDER.map(
       (id) =>
@@ -571,8 +1041,9 @@ export class StudioHud {
         `</span>` +
         `</div>` +
         `<div class="studio-channel-media">` +
-        `<canvas width="288" height="100" data-ch-canvas="${id}"></canvas>` +
+        `<canvas width="288" height="76" data-ch-canvas="${id}"></canvas>` +
         `<img class="hidden" alt="${esc(id)}" data-ch-img="${id}" />` +
+        `<div class="studio-channel-caption" data-ch-caption="${id}"></div>` +
         `</div>` +
         `</div>`,
     ).join("");
@@ -592,10 +1063,34 @@ export class StudioHud {
     this.drawerEl.innerHTML =
       `<div class="studio-drawer-head">` +
       `<span id="studio-drawer-title" class="studio-drawer-title"></span>` +
+      `<div class="studio-drawer-head-right">` +
       `<span id="studio-bridge-badge" class="studio-bridge-badge" data-online="false"></span>` +
+      `<button type="button" id="studio-bridge-retry-btn" class="studio-btn studio-btn-compact hidden"></button>` +
       `</div>` +
+      `</div>` +
+      `<div class="studio-drawer-tabs" role="tablist" aria-label="Sensor Drawer Views">` +
+      `<button type="button" id="studio-drawer-tab-feeds" class="studio-drawer-tab" role="tab" aria-selected="true" aria-controls="studio-drawer-pane-feeds" data-active="true"></button>` +
+      `<button type="button" id="studio-drawer-tab-avionics" class="studio-drawer-tab" role="tab" aria-selected="false" aria-controls="studio-drawer-pane-avionics" data-active="false"></button>` +
+      `</div>` +
+      `<div id="studio-drawer-pane-feeds" class="studio-drawer-pane" role="tabpanel" aria-labelledby="studio-drawer-tab-feeds">` +
       `<div class="studio-channel-grid">${channelCards}</div>` +
-      `<section id="studio-v52-avionics-panel" class="studio-v52-panel" aria-label="v5.2 Avionics Health and Assurance">` +
+      `<div class="studio-upload-zone" id="studio-upload-zone">` +
+      `<div id="studio-upload-hint" class="studio-upload-hint"></div>` +
+      `<div class="studio-upload-row">` +
+      `<select id="studio-upload-ch" class="studio-select">` +
+      `<option value="d2" selected>XVS-D2</option>` +
+      `<option value="land">XVS-Land</option>` +
+      `<option value="thermal">XVS-Thermal</option>` +
+      `<option value="nav">XVS-Nav</option>` +
+      `</select>` +
+      `<input id="studio-upload-input" type="file" accept="image/*" style="display:none" />` +
+      `<button type="button" id="studio-upload-btn" class="studio-btn" style="flex:1"></button>` +
+      `</div>` +
+      `<div id="studio-upload-status" class="studio-upload-status hidden" role="status" aria-live="polite"></div>` +
+      `</div>` +
+      `</div>` +
+      `<div id="studio-drawer-pane-avionics" class="studio-drawer-pane hidden" role="tabpanel" aria-labelledby="studio-drawer-tab-avionics">` +
+      `<section id="studio-v52-avionics-panel" class="studio-v52-panel" aria-labelledby="studio-v52-panel-title">` +
       `<div class="studio-v52-head">` +
       `<span id="studio-v52-panel-title" class="studio-v52-title"></span>` +
       `</div>` +
@@ -611,28 +1106,44 @@ export class StudioHud {
       `<span id="studio-v52-tbc-badge" class="studio-v52-badge studio-v52-tbc-chip" data-state="standby"></span>` +
       `</div>` +
       `</section>` +
+      `<details class="studio-specs-disclosure" open>` +
+      `<summary id="studio-specs-summary"></summary>` +
       `<div id="studio-nav-v5-spec" class="studio-nav-v5-spec"></div>` +
-      `<div class="studio-upload-zone" id="studio-upload-zone">` +
-      `<div id="studio-upload-hint" class="studio-upload-hint"></div>` +
-      `<div class="studio-upload-row">` +
-      `<select id="studio-upload-ch" class="studio-select">` +
-      `<option value="d2" selected>XVS-D2</option>` +
-      `<option value="land">XVS-Land</option>` +
-      `<option value="thermal">XVS-Thermal</option>` +
-      `<option value="nav">XVS-Nav v5.0</option>` +
-      `</select>` +
-      `<input id="studio-upload-input" type="file" accept="image/*" style="display:none" />` +
-      `<button id="studio-upload-btn" class="studio-btn" style="flex:1"></button>` +
-      `</div>` +
+      `<div id="studio-assurance-spec" class="studio-nav-v5-spec"></div>` +
+      `</details>` +
       `</div>`;
+
+    this.drawerTitleEl = this.drawerEl.querySelector("#studio-drawer-title");
+    this.bridgeBadgeEl = this.drawerEl.querySelector("#studio-bridge-badge");
+    this.retryBridgeBtnEl = this.drawerEl.querySelector("#studio-bridge-retry-btn");
+    this.tabFeedsBtnEl = this.drawerEl.querySelector("#studio-drawer-tab-feeds");
+    this.tabAvionicsBtnEl = this.drawerEl.querySelector("#studio-drawer-tab-avionics");
+    this.paneFeedsEl = this.drawerEl.querySelector("#studio-drawer-pane-feeds");
+    this.paneAvionicsEl = this.drawerEl.querySelector("#studio-drawer-pane-avionics");
+    this.avionicsTitleEl = this.drawerEl.querySelector("#studio-v52-panel-title");
+    this.assuranceTitleEl = this.drawerEl.querySelector("#studio-v52-assurance-title");
+    this.specsSummaryEl = this.drawerEl.querySelector("#studio-specs-summary");
+    this.navSpecEl = this.drawerEl.querySelector("#studio-nav-v5-spec");
+    this.assuranceSpecEl = this.drawerEl.querySelector("#studio-assurance-spec");
+    this.sectorBadgeEl = this.drawerEl.querySelector("#studio-v52-sector-badge");
+    this.sectorBarEl = this.drawerEl.querySelector("#studio-v52-sector-bar");
+    this.lwirBadgeEl = this.drawerEl.querySelector("#studio-v52-lwir-badge");
+    this.fsyncBadgeEl = this.drawerEl.querySelector("#studio-v52-fsync-badge");
+    this.tbcBadgeEl = this.drawerEl.querySelector("#studio-v52-tbc-badge");
+    this.uploadHintEl = this.drawerEl.querySelector("#studio-upload-hint");
+    this.uploadChSelectEl = this.drawerEl.querySelector("#studio-upload-ch");
+    this.uploadBtnEl = this.drawerEl.querySelector("#studio-upload-btn");
+    this.uploadStatusEl = this.drawerEl.querySelector("#studio-upload-status");
 
     for (const id of CHANNEL_ORDER) {
       const t = this.drawerEl.querySelector<HTMLElement>(`[data-ch-title="${id}"]`);
+      const cap = this.drawerEl.querySelector<HTMLElement>(`[data-ch-caption="${id}"]`);
       const c = this.drawerEl.querySelector<HTMLCanvasElement>(`[data-ch-canvas="${id}"]`);
       const img = this.drawerEl.querySelector<HTMLImageElement>(`[data-ch-img="${id}"]`);
       const lat = this.drawerEl.querySelector<HTMLElement>(`[data-ch-lat="${id}"]`);
       const sha = this.drawerEl.querySelector<HTMLElement>(`[data-ch-sha="${id}"]`);
       if (t) this.channelTitleEls.set(id, t);
+      if (cap) this.channelCaptionEls.set(id, cap);
       if (c) this.channelCanvases.set(id, c);
       if (img) this.channelImgs.set(id, img);
       if (lat) this.channelLatEls.set(id, lat);
@@ -650,90 +1161,216 @@ export class StudioHud {
       if (key) this.assuranceChipEls.set(key, el);
     });
 
-    const chSel = this.drawerEl.querySelector<HTMLSelectElement>("#studio-upload-ch");
-    chSel?.addEventListener("change", () => {
-      this.uploadChannel = chSel.value as SensorChannelId;
+    const sig = this.abortCtrl.signal;
+
+    this.tabFeedsBtnEl?.addEventListener("click", () => this.setDrawerTab("feeds"), { signal: sig });
+    this.tabAvionicsBtnEl?.addEventListener("click", () => this.setDrawerTab("avionics"), {
+      signal: sig,
     });
+
+    this.retryBridgeBtnEl?.addEventListener(
+      "click",
+      () => {
+        if (this.retryBridgeBusy) return;
+        this.retryBridgeBusy = true;
+        this.syncBridgeBadge(true);
+        void Promise.resolve(this.callbacks.onRetryBridge?.()).finally(() => {
+          this.retryBridgeBusy = false;
+          this.syncBridgeBadge(true);
+        });
+      },
+      { signal: sig },
+    );
+
+    this.uploadChSelectEl?.addEventListener(
+      "change",
+      () => {
+        if (this.uploadChSelectEl) {
+          this.uploadChannel = this.uploadChSelectEl.value as SensorChannelId;
+        }
+      },
+      { signal: sig },
+    );
 
     const fileInput = this.drawerEl.querySelector<HTMLInputElement>("#studio-upload-input");
-    this.drawerEl.querySelector<HTMLButtonElement>("#studio-upload-btn")?.addEventListener("click", () => {
-      fileInput?.click();
-    });
+    this.uploadBtnEl?.addEventListener(
+      "click",
+      () => {
+        if (this.uploadBusy) return;
+        if (!this.bridge.isOnline() && !this.bridge.isNativeTauriIpc()) {
+          // Probe once or allow user to pick file? Show explicit offline state immediately if offline,
+          // while still letting user select file if they want — wait: showing immediate offline feedback
+          // makes clicking Upload while offline clearly actionable instead of opening a silent file picker!
+          this.setUploadFeedback("offline", "");
+          return;
+        }
+        fileInput?.click();
+      },
+      { signal: sig },
+    );
 
     const handleFile = async (file: File) => {
-      const buf = await file.arrayBuffer();
-      const res = await this.bridge.analyzeImage(this.uploadChannel, buf, file.type || "image/jpeg");
-      if (res) {
-        this.applyBridgeChannels({ [this.uploadChannel]: res }, true);
+      if (this.uploadBusy) return;
+      this.uploadBusy = true;
+      this.setUploadFeedback("none", "");
+      this.syncUploadButtonState();
+      try {
+        if (!this.bridge.isOnline()) {
+          await this.bridge.probeHealth();
+          this.syncBridgeBadge(true);
+        }
+        if (!this.bridge.isOnline()) {
+          this.setUploadFeedback("offline", "");
+          return;
+        }
+        const buf = await file.arrayBuffer();
+        const res = await this.bridge.analyzeImage(
+          this.uploadChannel,
+          buf,
+          file.type || "image/jpeg",
+        );
+        if (res) {
+          this.applyBridgeChannels({ [this.uploadChannel]: res }, true);
+          const latTxt = res.latencyMs !== null ? `${res.latencyMs.toFixed(1)} ms` : "OK";
+          const shaTxt = res.checkpointShaShort ? ` · SHA ${res.checkpointShaShort}` : "";
+          this.setUploadFeedback("custom", `${this.uploadChannel.toUpperCase()} · ${latTxt}${shaTxt}`);
+        } else {
+          this.setUploadFeedback("failed", "");
+        }
+      } catch {
+        this.setUploadFeedback("failed", "");
+      } finally {
+        this.uploadBusy = false;
+        if (fileInput) fileInput.value = "";
+        this.syncUploadButtonState();
       }
     };
 
-    fileInput?.addEventListener("change", () => {
-      const f = fileInput.files?.[0];
-      if (f) void handleFile(f);
-    });
+    fileInput?.addEventListener(
+      "change",
+      () => {
+        const f = fileInput.files?.[0];
+        if (f) void handleFile(f);
+      },
+      { signal: sig },
+    );
 
     const dropZone = this.drawerEl.querySelector<HTMLElement>("#studio-upload-zone");
-    dropZone?.addEventListener("dragover", (e) => e.preventDefault());
-    dropZone?.addEventListener("drop", (e) => {
-      e.preventDefault();
-      const f = e.dataTransfer?.files?.[0];
-      if (f) void handleFile(f);
-    });
+    dropZone?.addEventListener("dragover", (e) => e.preventDefault(), { signal: sig });
+    dropZone?.addEventListener(
+      "drop",
+      (e) => {
+        e.preventDefault();
+        const f = e.dataTransfer?.files?.[0];
+        if (f) void handleFile(f);
+      },
+      { signal: sig },
+    );
+  }
+
+  private setUploadFeedback(
+    kind: "none" | "offline" | "failed" | "custom",
+    customMsg: string,
+  ): void {
+    this.uploadFeedbackKey = kind;
+    this.uploadCustomMsg = customMsg;
+    this.syncUploadStatusText();
+  }
+
+  private syncUploadButtonState(): void {
+    const d = getStudioStrings(this.locale).drawer;
+    if (this.uploadBtnEl) {
+      this.uploadBtnEl.disabled = this.uploadBusy;
+      setTextIfChanged(this.uploadBtnEl, this.uploadBusy ? d.uploadAnalyzing : d.uploadBtn);
+    }
+  }
+
+  private syncUploadStatusText(): void {
+    if (!this.uploadStatusEl) return;
+    const d = getStudioStrings(this.locale).drawer;
+    if (this.uploadFeedbackKey === "none") {
+      this.uploadStatusEl.classList.add("hidden");
+      setTextIfChanged(this.uploadStatusEl, "");
+      return;
+    }
+    this.uploadStatusEl.classList.remove("hidden");
+    if (this.uploadFeedbackKey === "offline") {
+      setAttrIfChanged(this.uploadStatusEl, "data-tone", "error");
+      setTextIfChanged(this.uploadStatusEl, d.uploadOffline);
+    } else if (this.uploadFeedbackKey === "failed") {
+      setAttrIfChanged(this.uploadStatusEl, "data-tone", "error");
+      setTextIfChanged(this.uploadStatusEl, d.uploadFailed);
+    } else {
+      setAttrIfChanged(this.uploadStatusEl, "data-tone", "ok");
+      setTextIfChanged(this.uploadStatusEl, this.uploadCustomMsg);
+    }
   }
 
   private syncDrawerText(): void {
     const full = getStudioStrings(this.locale);
     const s = full.drawer;
-    setTextIfChanged(this.drawerEl.querySelector<HTMLElement>("#studio-drawer-title"), s.title);
-    setTextIfChanged(
-      this.drawerEl.querySelector<HTMLElement>("#studio-v52-panel-title"),
-      s.avionicsTitle,
-    );
-    setTextIfChanged(
-      this.drawerEl.querySelector<HTMLElement>("#studio-v52-assurance-title"),
-      s.assuranceTitle,
-    );
+    setTextIfChanged(this.drawerTitleEl, s.title);
+    setTextIfChanged(this.tabFeedsBtnEl, s.tabFeeds);
+    setTextIfChanged(this.tabAvionicsBtnEl, s.tabAvionics);
+    setTextIfChanged(this.avionicsTitleEl, s.avionicsTitle);
+    setTextIfChanged(this.assuranceTitleEl, s.assuranceTitle);
+    setTextIfChanged(this.specsSummaryEl, s.specsSummary);
     for (const badge of getFormalAssuranceBadges(this.locale)) {
       const chip = this.assuranceChipEls.get(badge.id);
       setTextIfChanged(chip, badge.text);
       setAttrIfChanged(chip, "title", badge.title);
     }
-    setTextIfChanged(
-      this.drawerEl.querySelector<HTMLElement>("#studio-nav-v5-spec"),
-      full.navV5Spec,
-    );
-    setTextIfChanged(
-      this.drawerEl.querySelector<HTMLElement>("#studio-upload-hint"),
-      s.uploadHint,
-    );
-    setTextIfChanged(
-      this.drawerEl.querySelector<HTMLElement>("#studio-upload-btn"),
-      s.uploadBtn,
-    );
+    setTextIfChanged(this.navSpecEl, full.navV5Spec);
+    setTextIfChanged(this.assuranceSpecEl, STUDIO_ASSURANCE_V52_SPEC);
+    setTextIfChanged(this.uploadHintEl, s.uploadHint);
+    setAttrIfChanged(this.uploadChSelectEl, "aria-label", s.uploadSelectAria);
+    this.syncUploadButtonState();
     for (const id of CHANNEL_ORDER) {
       setTextIfChanged(this.channelTitleEls.get(id), s.channels[id]);
     }
-    this.syncV52AvionicsPanel();
-    this.syncBridgeBadge();
+    this.syncAvionicsPanel();
+    this.syncBridgeBadge(true);
   }
 
   private mountWeatherOnce(): void {
     this.weatherEl.innerHTML =
       `<div id="w-title" class="studio-weather-title"></div>` +
-      `<label class="studio-slider-row"><div class="studio-slider-head"><span id="w-lbl-tod"></span><b id="w-val-tod">16.5h</b></div><input id="w-tod" type="range" min="5" max="22" step="0.25" value="16.5" /></label>` +
-      `<label class="studio-slider-row"><div class="studio-slider-head"><span id="w-lbl-vis"></span><b id="w-val-vis">18 km</b></div><input id="w-vis" type="range" min="0.5" max="25" step="0.5" value="18" /></label>` +
+      `<label class="studio-slider-row"><div class="studio-slider-head"><span id="w-lbl-tod"></span><b id="w-val-tod">16:30</b></div><input id="w-tod" type="range" min="5" max="22" step="0.25" value="16.5" /></label>` +
+      `<label class="studio-slider-row"><div class="studio-slider-head"><span id="w-lbl-vis"></span><b id="w-val-vis">18.0 km</b></div><input id="w-vis" type="range" min="0.5" max="25" step="0.5" value="18" /></label>` +
       `<label class="studio-slider-row"><div class="studio-slider-head"><span id="w-lbl-wind"></span><b id="w-val-wind">12 kt</b></div><input id="w-wind" type="range" min="0" max="45" step="1" value="12" /></label>` +
       `<label class="studio-slider-row"><div class="studio-slider-head"><span id="w-lbl-cloud"></span><b id="w-val-cloud">42%</b></div><input id="w-cloud" type="range" min="0" max="1" step="0.05" value="0.42" /></label>` +
       `<label class="studio-slider-row"><div class="studio-slider-head"><span id="w-lbl-rain"></span><b id="w-val-rain">0%</b></div><input id="w-rain" type="range" min="0" max="1" step="0.05" value="0" /></label>` +
       `<div class="studio-weather-btns">` +
-      `<button id="w-eng-btn" class="studio-btn" style="flex:1"></button>` +
-      `<button id="w-rst-btn" class="studio-btn"></button>` +
+      `<button type="button" id="w-eng-btn" class="studio-btn" style="flex:1"></button>` +
+      `<button type="button" id="w-rst-btn" class="studio-btn"></button>` +
       `</div>`;
 
+    for (const id of [
+      "w-title",
+      "w-lbl-tod",
+      "w-lbl-vis",
+      "w-lbl-wind",
+      "w-lbl-cloud",
+      "w-lbl-rain",
+      "w-val-tod",
+      "w-val-vis",
+      "w-val-wind",
+      "w-val-cloud",
+      "w-val-rain",
+      "w-eng-btn",
+      "w-rst-btn",
+    ]) {
+      const el = this.weatherEl.querySelector<HTMLElement>(`#${id}`);
+      if (el) this.weatherTextEls.set(id, el);
+    }
+
+    const sig = this.abortCtrl.signal;
     const bindSlider = (id: string, handler: (v: number) => void) => {
       const el = this.weatherEl.querySelector<HTMLInputElement>(`#${id}`);
-      el?.addEventListener("input", () => handler(Number(el.value)));
+      if (el) {
+        this.weatherInputEls.set(id, el);
+        el.addEventListener("input", () => handler(Number(el.value)), { signal: sig });
+      }
     };
     bindSlider("w-tod", (v) => {
       this.weather = { ...this.weather, timeOfDayH: v };
@@ -761,23 +1398,22 @@ export class StudioHud {
       this.callbacks.onWeatherChange({ rainIntensity: v });
     });
 
-    this.weatherEl.querySelector<HTMLButtonElement>("#w-eng-btn")?.addEventListener("click", () => {
-      this.callbacks.onToggleEngineOut();
-    });
-    this.weatherEl.querySelector<HTMLButtonElement>("#w-rst-btn")?.addEventListener("click", () => {
-      this.callbacks.onResetApproach();
-    });
+    this.weatherEl
+      .querySelector<HTMLButtonElement>("#w-eng-btn")
+      ?.addEventListener("click", () => this.callbacks.onToggleEngineOut(), { signal: sig });
+    this.weatherEl
+      .querySelector<HTMLButtonElement>("#w-rst-btn")
+      ?.addEventListener("click", () => this.callbacks.onResetApproach(), { signal: sig });
   }
 
   private syncWeatherUi(): void {
     const w = getStudioStrings(this.locale).weather;
-    const setTxt = (id: string, txt: string) => {
-      const el = this.weatherEl.querySelector<HTMLElement>(`#${id}`);
-      if (el) el.textContent = txt;
-    };
+    setAttrIfChanged(this.weatherEl, "aria-label", w.title);
+    const setTxt = (id: string, txt: string) => setTextIfChanged(this.weatherTextEls.get(id), txt);
     const setVal = (id: string, val: number) => {
-      const el = this.weatherEl.querySelector<HTMLInputElement>(`#${id}`);
-      if (el) el.value = String(val);
+      const el = this.weatherInputEls.get(id);
+      const str = String(val);
+      if (el && el.value !== str) el.value = str;
     };
     setTxt("w-title", w.title);
     setTxt("w-lbl-tod", w.timeOfDay);
@@ -801,117 +1437,5 @@ export class StudioHud {
     setVal("w-wind", this.weather.crosswindKt);
     setVal("w-cloud", this.weather.cloudCover);
     setVal("w-rain", this.weather.rainIntensity);
-  }
-
-  private renderBars(): void {
-    const s = getStudioStrings(this.locale);
-    const modeLabel = this.visualMode === "photoreal" ? s.modePhotoreal : s.modeObsidian;
-    const ctrlLabel = this.controlMode === "manual" ? s.controlManual : s.controlAutopilot;
-    const shieldLabel = this.shieldEnabled ? s.shieldOn : s.shieldOff;
-    const bannerText = s.scenarios[this.scenario].banner;
-
-    this.topbarEl.innerHTML =
-      `<div class="studio-brand-wrap">` +
-      `<span class="studio-dot"></span>` +
-      `<span class="studio-brand">${esc(s.brandTitle)}</span>` +
-      `<span class="studio-ver">${esc(s.brandVersion)}</span>` +
-      `</div>` +
-      `<div class="studio-scenario-banner" title="${esc(bannerText)}">${esc(bannerText)}</div>` +
-      `<div class="studio-top-actions">` +
-      `<span class="studio-pill studio-pill-emerald" title="${esc(s.brandBadgeTitle)}">${esc(s.brandBadge)}</span>` +
-      `<button id="studio-mode-btn" class="studio-btn" data-active="${this.visualMode === "photoreal"}">${esc(modeLabel)}</button>` +
-      `<button id="studio-ctrl-btn" class="studio-btn" data-active="${this.controlMode === "manual"}">${esc(ctrlLabel)}</button>` +
-      `<button id="studio-shield-btn" class="studio-btn" data-tone="${this.shieldEnabled ? "emerald" : "rose"}">${esc(shieldLabel)}</button>` +
-      `<button id="studio-weather-btn" class="studio-btn" data-active="${this.weatherOpen}">${esc(s.weatherBtn)}</button>` +
-      `<button id="studio-bench-btn" class="studio-btn" data-active="true">${esc(s.videoLabBtn)}</button>` +
-      `<button id="studio-sensors-btn" class="studio-btn" data-active="${this.drawerOpen}">${esc(s.sensorsToggle)}</button>` +
-      `<button id="studio-locale-btn" class="studio-btn">${esc(s.localeToggle)}</button>` +
-      `<span id="studio-fps-pill" class="studio-pill studio-pill-cyan">60 FPS</span>` +
-      `</div>`;
-
-    const camButtons = CAMERA_ORDER.map(
-      (id) =>
-        `<button class="studio-btn" data-studio-cam="${id}" data-active="${this.cameraPreset === id}">${esc(s.cameras[id])}</button>`,
-    ).join("");
-
-    const scenButtons = SCENARIO_ORDER.map(
-      (id) =>
-        `<button class="studio-btn" data-studio-scen="${id}" data-active="${this.scenario === id}">${esc(s.scenarios[id].label)}</button>`,
-    ).join("");
-
-    this.bottomDockEl.innerHTML =
-      `<div class="studio-manual-hint${this.controlMode === "manual" ? "" : " hidden"}">${esc(s.manualHint)}</div>` +
-      `<div class="studio-dock-strip">` +
-      `<div class="studio-telem-chip"><span class="studio-telem-k">${esc(s.telemetry.range)}</span><span id="telem-range" class="studio-telem-v" data-state="caution">—</span></div>` +
-      `<div class="studio-telem-chip"><span class="studio-telem-k">${esc(s.telemetry.sc3bf)}</span><span id="telem-sc3bf" class="studio-telem-v" data-state="nominal">6/6</span></div>` +
-      `<div class="studio-telem-chip"><span class="studio-telem-k">${esc(s.telemetry.bank)}</span><span id="telem-bank" class="studio-telem-v">0.0°</span></div>` +
-      `<div class="studio-telem-chip"><span class="studio-telem-k">${esc(s.telemetry.speed)}</span><span id="telem-speed" class="studio-telem-v">101 kt</span></div>` +
-      `<span class="studio-sep"></span>` +
-      camButtons +
-      `<span class="studio-sep"></span>` +
-      `<button id="studio-dome-btn" class="studio-btn" data-active="${this.domeVisible}">${esc(s.domeToggle)}</button>` +
-      `</div>` +
-      `<div class="studio-dock-strip">${scenButtons}</div>`;
-
-    this.wireBarEvents();
-  }
-
-  private wireBarEvents(): void {
-    this.topbarEl.querySelector<HTMLButtonElement>("#studio-locale-btn")?.addEventListener("click", () => {
-      this.setLocale(this.locale === "tr" ? "en" : "tr");
-    });
-
-    this.topbarEl.querySelector<HTMLButtonElement>("#studio-mode-btn")?.addEventListener("click", () => {
-      const next: VisualWorldMode = this.visualMode === "photoreal" ? "obsidian" : "photoreal";
-      this.setVisualMode(next);
-      this.callbacks.onVisualModeChange(next);
-    });
-
-    this.topbarEl.querySelector<HTMLButtonElement>("#studio-ctrl-btn")?.addEventListener("click", () => {
-      const next: FlightControlMode = this.controlMode === "autopilot" ? "manual" : "autopilot";
-      this.setControlMode(next);
-      this.callbacks.onControlModeChange(next);
-    });
-
-    this.topbarEl.querySelector<HTMLButtonElement>("#studio-shield-btn")?.addEventListener("click", () => {
-      const next = !this.shieldEnabled;
-      this.setShieldEnabled(next);
-      this.callbacks.onShieldToggle(next);
-    });
-
-    this.topbarEl.querySelector<HTMLButtonElement>("#studio-weather-btn")?.addEventListener("click", () => {
-      this.weatherOpen = !this.weatherOpen;
-      this.weatherEl.dataset.open = String(this.weatherOpen);
-      this.renderBars();
-    });
-
-    this.topbarEl.querySelector<HTMLButtonElement>("#studio-bench-btn")?.addEventListener("click", () => {
-      this.callbacks.onOpenVideoBench();
-    });
-
-    this.topbarEl.querySelector<HTMLButtonElement>("#studio-sensors-btn")?.addEventListener("click", () => {
-      this.setDrawerOpen(!this.drawerOpen);
-    });
-
-    this.bottomDockEl.querySelector<HTMLButtonElement>("#studio-dome-btn")?.addEventListener("click", () => {
-      this.setDomeVisible(!this.domeVisible);
-      this.callbacks.onDomeToggle(this.domeVisible);
-    });
-
-    this.bottomDockEl.querySelectorAll<HTMLButtonElement>("[data-studio-cam]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const preset = btn.dataset.studioCam as StudioCameraPreset;
-        this.setCameraPreset(preset);
-        this.callbacks.onCameraChange(preset);
-      });
-    });
-
-    this.bottomDockEl.querySelectorAll<HTMLButtonElement>("[data-studio-scen]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const scen = btn.dataset.studioScen as StudioScenarioId;
-        this.setScenario(scen);
-        this.callbacks.onScenarioChange(scen);
-      });
-    });
   }
 }

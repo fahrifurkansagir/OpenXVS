@@ -82,6 +82,37 @@ def _wrap_angle_rad(angle: float) -> float:
     return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
 
 
+def _safe_spd_inv_cholesky_2x2(
+    cov_2x2: np.ndarray,
+    min_eig: float = 1e-6,
+) -> tuple[np.ndarray, float, float]:
+    """Return `(inv_L, var_u, var_v)` for a 2x2 covariance matrix, guarding non-finite/non-PSD inputs."""
+    c_raw = np.asarray(cov_2x2, dtype=np.float64)
+    if c_raw.shape != (2, 2) or not np.all(np.isfinite(c_raw)):
+        inv_l = np.eye(2, dtype=np.float64) * 1e-3
+        return inv_l, 1e6, 1e6
+    c_mat = 0.5 * (c_raw + c_raw.T)
+    c00 = float(c_mat[0, 0]) + min_eig
+    c01 = float(c_mat[0, 1])
+    c11 = float(c_mat[1, 1]) + min_eig
+    det = c00 * c11 - c01 * c01
+    if c00 <= min_eig or c11 <= min_eig or det <= (min_eig * min_eig):
+        eigvals, eigvecs = np.linalg.eigh(c_mat)
+        clipped = np.maximum(eigvals, float(min_eig))
+        c_psd = (eigvecs * clipped[None, :]) @ eigvecs.T
+        c00 = float(c_psd[0, 0])
+        c01 = float(c_psd[0, 1])
+        c11 = float(c_psd[1, 1])
+    l00 = math.sqrt(max(c00, min_eig))
+    l10 = c01 / l00
+    l11_sq = c11 - l10 * l10
+    l11 = math.sqrt(max(l11_sq, min_eig))
+    inv_l00 = 1.0 / l00
+    inv_l11 = 1.0 / l11
+    inv_l = np.array([[inv_l00, 0.0], [-l10 * inv_l00 * inv_l11, inv_l11]], dtype=np.float64)
+    return inv_l, max(c00, min_eig), max(c11, min_eig)
+
+
 def build_ksfo_28l_reference_features(
     runway_width_m: float = 61.0,
     runway_length_m: float = 3471.0,
@@ -189,39 +220,46 @@ def solve_4dof_map_pnpl(
     covs = np.asarray(obs_cov_2x2, dtype=np.float64)
     n_kp = int(pts.shape[0])
 
-    # Precompute Cholesky inverse factors for anisotropic 2x2 keypoint covariances
-    inv_l_list: list[np.ndarray] = []
-    kp_w_diag: list[float] = []
+    # Precompute Cholesky inverse factors for anisotropic 2x2 keypoint covariances (PSD/NaN guarded)
+    inv_l_arr = np.zeros((n_kp, 2, 2), dtype=np.float64)
+    kp_w_diag = np.zeros((2 * n_kp,), dtype=np.float64)
     for i in range(n_kp):
-        c_mat = 0.5 * (covs[i] + covs[i].T) + 1e-6 * np.eye(2)
-        chol = np.linalg.cholesky(c_mat)
-        inv_l = np.linalg.inv(chol)
-        inv_l_list.append(inv_l)
-        kp_w_diag.extend([1.0 / max(c_mat[0, 0], 1e-6), 1.0 / max(c_mat[1, 1], 1e-6)])
+        inv_l, var_u, var_v = _safe_spd_inv_cholesky_2x2(covs[i], min_eig=1e-6)
+        inv_l_arr[i] = inv_l
+        kp_w_diag[2 * i] = 1.0 / var_u
+        kp_w_diag[2 * i + 1] = 1.0 / var_v
 
     has_lines = keyline_pairs is not None and obs_keylines_hesse is not None and len(keyline_pairs) > 0
     n_kl = len(keyline_pairs) if (has_lines and keyline_pairs is not None) else 0
     lines_hesse = np.asarray(obs_keylines_hesse, dtype=np.float64) if has_lines else np.zeros((0, 3))
     default_line_sig = max(float(keyline_sigma_px), 1e-3)
-    if has_lines:
+    if has_lines and keyline_pairs is not None:
         if keyline_sigmas_px is not None:
             kl_sig_arr = np.asarray(keyline_sigmas_px, dtype=np.float64).reshape(-1)
             if kl_sig_arr.size < n_kl:
                 raise ValueError(
                     f"keyline_sigmas_px length ({kl_sig_arr.size}) < number of keylines ({n_kl})"
                 )
-            kl_sigs = np.array(
-                [
-                    max(float(kl_sig_arr[k]), 1e-3) if math.isfinite(float(kl_sig_arr[k])) else default_line_sig
-                    for k in range(n_kl)
-                ],
-                dtype=np.float64,
-            )
+            kl_sigs = np.where(
+                np.isfinite(kl_sig_arr[:n_kl]),
+                np.maximum(kl_sig_arr[:n_kl], 1e-3),
+                default_line_sig,
+            ).astype(np.float64)
         else:
             kl_sigs = np.full(n_kl, default_line_sig, dtype=np.float64)
         inv_line_sigs = 1.0 / kl_sigs
+        kl_i0 = np.array([int(p[0]) for p in keyline_pairs], dtype=np.intp)
+        kl_i1 = np.array([int(p[1]) for p in keyline_pairs], dtype=np.intp)
+        kl_rho = lines_hesse[:n_kl, 0].astype(np.float64, copy=False)
+        kl_cos = lines_hesse[:n_kl, 1].astype(np.float64, copy=False)
+        kl_sin = lines_hesse[:n_kl, 2].astype(np.float64, copy=False)
     else:
         inv_line_sigs = np.zeros(0, dtype=np.float64)
+        kl_i0 = np.zeros(0, dtype=np.intp)
+        kl_i1 = np.zeros(0, dtype=np.intp)
+        kl_rho = np.zeros(0, dtype=np.float64)
+        kl_cos = np.zeros(0, dtype=np.float64)
+        kl_sin = np.zeros(0, dtype=np.float64)
 
     use_robust = math.isfinite(float(huber_delta_sigma)) and float(huber_delta_sigma) > 0.0
     delta = float(huber_delta_sigma) if use_robust else math.inf
@@ -240,82 +278,107 @@ def solve_4dof_map_pnpl(
 
     x = np.array([float(init_pos_ned[0]), float(init_pos_ned[1]), float(init_pos_ned[2]), float(init_yaw_rad)])
 
-    def _eval_whitened_residuals(state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        uv_pred, _ = project_runway_points_ned(
-            pts, state[:3], state[3], pitch_rad, roll_rad, fx, fy, cx, cy, r_body_cam=r_body_cam
-        )
-        res_white: list[float] = []
-        res_raw_px: list[float] = []
-        for i in range(n_kp):
-            diff = uv_pred[i] - uv_obs[i]
-            res_raw_px.extend([float(diff[0]), float(diff[1])])
-            w_diff = inv_l_list[i] @ diff
-            res_white.extend([float(w_diff[0]), float(w_diff[1])])
+    # Precompute constant pitch/roll -> camera rotation (yaw varies per LM step)
+    r_pr_cam = euler_to_r(0.0, float(pitch_rad), float(roll_rad)) @ np.asarray(r_body_cam, dtype=np.float64)
+    r_pr_row0 = r_pr_cam[0]
+    r_pr_row1 = r_pr_cam[1]
+    r_pr_row2 = r_pr_cam[2]
+    fx_f, fy_f, cx_f, cy_f = float(fx), float(fy), float(cx), float(cy)
+    n_groups = n_kp + n_kl
 
-        if has_lines and keyline_pairs is not None:
-            for k_idx, (i0, i1) in enumerate(keyline_pairs):
-                rho_k, cos_k, sin_k = (
-                    float(lines_hesse[k_idx, 0]),
-                    float(lines_hesse[k_idx, 1]),
-                    float(lines_hesse[k_idx, 2]),
-                )
-                inv_sig_k = float(inv_line_sigs[k_idx])
-                for ep in (i0, i1):
-                    d_line = cos_k * float(uv_pred[ep, 0]) + sin_k * float(uv_pred[ep, 1]) - rho_k
-                    res_white.append(d_line * inv_sig_k)
-        return np.asarray(res_white, dtype=np.float64), np.asarray(res_raw_px, dtype=np.float64)
+    def _project_fast(pos_ned: np.ndarray, yaw: float) -> np.ndarray:
+        cy_y = math.cos(yaw)
+        sy_y = math.sin(yaw)
+        r_ned_cam = np.empty((3, 3), dtype=np.float64)
+        r_ned_cam[0] = cy_y * r_pr_row0 - sy_y * r_pr_row1
+        r_ned_cam[1] = sy_y * r_pr_row0 + cy_y * r_pr_row1
+        r_ned_cam[2] = r_pr_row2
+        p_cam = (pts - pos_ned) @ r_ned_cam
+        z_safe = np.maximum(p_cam[:, 2], 1e-6)
+        inv_z = 1.0 / z_safe
+        uv = np.empty((n_kp, 2), dtype=np.float64)
+        uv[:, 0] = fx_f * (p_cam[:, 0] * inv_z) + cx_f
+        uv[:, 1] = fy_f * (p_cam[:, 1] * inv_z) + cy_f
+        return uv
+
+    def _eval_whitened_residuals(state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        uv_pred = _project_fast(state[:3], float(state[3]))
+        diff = uv_pred - uv_obs  # (n_kp, 2)
+        res_raw_px = diff.reshape(-1)
+        if n_kp > 0:
+            # Vectorized 2x2 Cholesky whitening: w_diff[i] = inv_l_arr[i] @ diff[i]
+            w_kp = np.einsum("nij,nj->ni", inv_l_arr, diff).reshape(-1)
+        else:
+            w_kp = np.zeros(0, dtype=np.float64)
+
+        if has_lines:
+            d0 = (kl_cos * uv_pred[kl_i0, 0] + kl_sin * uv_pred[kl_i0, 1] - kl_rho) * inv_line_sigs
+            d1 = (kl_cos * uv_pred[kl_i1, 0] + kl_sin * uv_pred[kl_i1, 1] - kl_rho) * inv_line_sigs
+            res_white = np.empty((2 * n_groups,), dtype=np.float64)
+            res_white[: 2 * n_kp] = w_kp
+            res_white[2 * n_kp :: 2] = d0
+            res_white[2 * n_kp + 1 :: 2] = d1
+            return res_white, res_raw_px
+        return w_kp, res_raw_px
 
     def _group_norms_and_irls(
         r_vec: np.ndarray,
         mode: str = "huber",
     ) -> tuple[np.ndarray, float, np.ndarray]:
-        """Compute grouped 2D residual norms, M-estimator objective, and per-element IRLS weights."""
-        n_groups = n_kp + n_kl
+        """Vectorized grouped 2D residual norms, M-estimator objective, and per-element IRLS weights."""
         if not use_robust or n_groups == 0:
             w_elem = np.ones_like(r_vec)
             return w_elem, 0.5 * float(r_vec @ r_vec), np.zeros(n_groups, dtype=np.float64)
 
         pairs = r_vec.reshape(n_groups, 2)
         norms = np.hypot(pairs[:, 0], pairs[:, 1])
-        w_grp = np.ones(n_groups, dtype=np.float64)
-        obj = 0.0
-        for g_idx in range(n_groups):
-            m = float(norms[g_idx])
-            if m <= delta:
-                w_grp[g_idx] = 1.0
-                obj += 0.5 * m * m
-            elif mode == "tukey":
-                # Exact C1-smooth Huber-to-Tukey redescending M-estimator:
-                # quadratic for m <= delta, smoothly decays to w=0 at c = 2.5*delta (zero pull from gross faults)
-                c_cut = 2.5 * delta
-                if m < c_cut:
-                    t = (m - delta) / (c_cut - delta)
-                    one_m_t2 = 1.0 - t * t
-                    w_grp[g_idx] = (delta / m) * (one_m_t2 * one_m_t2)
-                    obj += 0.5 * delta * delta + delta * (c_cut - delta) * (
-                        t - (2.0 / 3.0) * (t**3) + 0.2 * (t**5)
-                    )
-                else:
-                    w_grp[g_idx] = 0.0
-                    obj += 0.5 * delta * delta + (8.0 / 15.0) * delta * (c_cut - delta)
-            else:
-                w_grp[g_idx] = delta / m
-                obj += delta * (m - 0.5 * delta)
+        inlier = norms <= delta
+        m_safe = np.where(inlier, 1.0, np.maximum(norms, 1e-12))
+
+        if mode == "tukey":
+            # Exact C1-smooth Huber-to-Tukey redescending M-estimator:
+            # quadratic for m <= delta, smoothly decays to w=0 at c = 2.5*delta (zero pull from gross faults)
+            c_cut = 2.5 * delta
+            span = c_cut - delta
+            mid = (~inlier) & (norms < c_cut)
+            t = np.where(mid, (norms - delta) / span, 0.0)
+            one_m_t2 = 1.0 - t * t
+            w_grp = np.where(
+                inlier,
+                1.0,
+                np.where(mid, (delta / m_safe) * (one_m_t2 * one_m_t2), 0.0),
+            )
+            t3 = t * t * t
+            obj_arr = np.where(
+                inlier,
+                0.5 * norms * norms,
+                np.where(
+                    mid,
+                    0.5 * delta * delta + delta * span * (t - (2.0 / 3.0) * t3 + 0.2 * t3 * t * t),
+                    0.5 * delta * delta + (8.0 / 15.0) * delta * span,
+                ),
+            )
+        else:
+            w_grp = np.where(inlier, 1.0, delta / m_safe)
+            obj_arr = np.where(inlier, 0.5 * norms * norms, delta * (norms - 0.5 * delta))
+
         w_elem = np.repeat(w_grp, 2)
-        return w_elem, obj, norms
+        return w_elem, float(np.sum(obj_arr)), norms
 
     def _eval_jacobian(state: np.ndarray) -> np.ndarray:
         eps_vec = (1e-4, 1e-4, 1e-4, 1e-7)
-        r0, _ = _eval_whitened_residuals(state)
-        j_mat = np.zeros((r0.size, 4), dtype=np.float64)
+        j_mat = np.empty((2 * n_groups, 4), dtype=np.float64)
+        sp = state.copy()
+        sm = state.copy()
         for col in range(4):
             h = eps_vec[col]
-            sp = state.copy()
-            sm = state.copy()
-            sp[col] += h
-            sm[col] -= h
+            s_orig = state[col]
+            sp[col] = s_orig + h
+            sm[col] = s_orig - h
             rp, _ = _eval_whitened_residuals(sp)
             rm, _ = _eval_whitened_residuals(sm)
+            sp[col] = s_orig
+            sm[col] = s_orig
             j_mat[:, col] = (rp - rm) / (2.0 * h)
         return j_mat
 
@@ -395,14 +458,21 @@ def solve_4dof_map_pnpl(
     j_raw = _eval_jacobian(x)
     j_eff = j_raw * sqrt_w[:, None]
     h_final = j_eff.T @ j_eff + inv_p_prior
-    cov_4x4 = np.linalg.inv(h_final + 1e-9 * np.eye(4))
+    h_reg = 0.5 * (h_final + h_final.T) + 1e-9 * np.eye(4, dtype=np.float64)
+    if not np.all(np.isfinite(h_reg)):
+        cov_4x4 = np.diag([1e6, 1e6, 1e6, 1.0]).astype(np.float64)
+    else:
+        try:
+            cov_4x4 = np.linalg.inv(h_reg)
+        except np.linalg.LinAlgError:
+            cov_4x4 = np.linalg.pinv(h_reg)
+        cov_4x4 = 0.5 * (cov_4x4 + cov_4x4.T)
 
-    w_full = list(kp_w_diag)
     if has_lines and keyline_pairs is not None:
-        for k_idx in range(n_kl):
-            inv_var_k = float(inv_line_sigs[k_idx] * inv_line_sigs[k_idx])
-            w_full.extend([inv_var_k, inv_var_k])
-    w_full_arr = np.asarray(w_full, dtype=np.float64) * w_irls
+        kl_w = np.repeat(inv_line_sigs * inv_line_sigs, 2)
+        w_full_arr = np.concatenate([kp_w_diag, kl_w]) * w_irls
+    else:
+        w_full_arr = kp_w_diag * w_irls
 
     rms_px = float(np.sqrt(np.mean(raw_px * raw_px))) if raw_px.size > 0 else 0.0
     r_eff = r_final * sqrt_w
@@ -468,27 +538,44 @@ class ApproachEkf5Hz:
         sigma_gyro_z: float = 0.005,
     ) -> None:
         """Propagate 11-state kinematics and covariance over `dt` (default 0.2 s = 5 Hz)."""
-        a_corr = np.asarray(accel_ned_mps2, dtype=np.float64) - self.x[7:10]
-        wz_corr = float(yaw_rate_rad_s) - float(self.x[10])
+        dt_f = float(dt)
+        if not (math.isfinite(dt_f) and dt_f > 0.0):
+            raise ValueError(f"ApproachEkf5Hz.predict dt must be finite > 0, got {dt!r}")
+        acc_in = np.asarray(accel_ned_mps2, dtype=np.float64).reshape(3)
+        wz_in = float(yaw_rate_rad_s)
+        sig_a = float(sigma_accel)
+        sig_g = float(sigma_gyro_z)
+        if not (
+            np.all(np.isfinite(acc_in))
+            and math.isfinite(wz_in)
+            and math.isfinite(sig_a)
+            and sig_a >= 0.0
+            and math.isfinite(sig_g)
+            and sig_g >= 0.0
+        ):
+            raise ValueError("ApproachEkf5Hz.predict received non-finite or negative-noise inputs")
 
-        self.x[0:3] += self.x[3:6] * dt + 0.5 * a_corr * (dt * dt)
-        self.x[3:6] += a_corr * dt
-        self.x[6] = _wrap_angle_rad(float(self.x[6]) + wz_corr * dt)
+        a_corr = acc_in - self.x[7:10]
+        wz_corr = wz_in - float(self.x[10])
+
+        self.x[0:3] += self.x[3:6] * dt_f + 0.5 * a_corr * (dt_f * dt_f)
+        self.x[3:6] += a_corr * dt_f
+        self.x[6] = _wrap_angle_rad(float(self.x[6]) + wz_corr * dt_f)
 
         f_mat = np.eye(self.STATE_DIM, dtype=np.float64)
-        f_mat[0:3, 3:6] = np.eye(3) * dt
-        f_mat[0:3, 7:10] = -0.5 * (dt * dt) * np.eye(3)
-        f_mat[3:6, 7:10] = -dt * np.eye(3)
-        f_mat[6, 10] = -dt
+        f_mat[0:3, 3:6] = np.eye(3) * dt_f
+        f_mat[0:3, 7:10] = -0.5 * (dt_f * dt_f) * np.eye(3)
+        f_mat[3:6, 7:10] = -dt_f * np.eye(3)
+        f_mat[6, 10] = -dt_f
 
         q_mat = np.zeros((self.STATE_DIM, self.STATE_DIM), dtype=np.float64)
-        q_pos = (0.5 * sigma_accel * dt * dt) ** 2
-        q_vel = (sigma_accel * dt) ** 2
+        q_pos = (0.5 * sig_a * dt_f * dt_f) ** 2
+        q_vel = (sig_a * dt_f) ** 2
         q_mat[0:3, 0:3] = np.eye(3) * (q_pos + 1e-4)
         q_mat[3:6, 3:6] = np.eye(3) * q_vel
-        q_mat[6, 6] = (sigma_gyro_z * dt) ** 2
-        q_mat[7:10, 7:10] = np.eye(3) * ((1e-3) ** 2 * dt)
-        q_mat[10, 10] = (1e-4) ** 2 * dt
+        q_mat[6, 6] = (sig_g * dt_f) ** 2
+        q_mat[7:10, 7:10] = np.eye(3) * ((1e-3) ** 2 * dt_f)
+        q_mat[10, 10] = (1e-4) ** 2 * dt_f
 
         self.p_cov = f_mat @ self.p_cov @ f_mat.T + q_mat
         self.p_cov = 0.5 * (self.p_cov + self.p_cov.T)
@@ -507,7 +594,15 @@ class ApproachEkf5Hz:
             dtype=np.float64,
         )
         r_mat = np.asarray(r_4x4, dtype=np.float64)
-        if not (np.all(np.isfinite(z)) and np.all(np.isfinite(r_mat))):
+        gate_f = float(gate_chi2)
+        if (
+            r_mat.shape != (4, 4)
+            or not (np.all(np.isfinite(z)) and np.all(np.isfinite(r_mat)) and math.isfinite(gate_f) and gate_f >= 0.0)
+        ):
+            return EkfUpdateResult(False, math.inf, gate_chi2, self.x[0:3].copy(), self.x[3:6].copy(), float(self.x[6]))
+
+        r_sym = 0.5 * (r_mat + r_mat.T)
+        if float(np.linalg.eigvalsh(r_sym)[0]) < -1e-9:
             return EkfUpdateResult(False, math.inf, gate_chi2, self.x[0:3].copy(), self.x[3:6].copy(), float(self.x[6]))
 
         h_mat = np.zeros((4, self.STATE_DIM), dtype=np.float64)
@@ -523,15 +618,20 @@ class ApproachEkf5Hz:
             ],
             dtype=np.float64,
         )
-        s_mat = h_mat @ self.p_cov @ h_mat.T + 0.5 * (r_mat + r_mat.T)
+        s_mat = h_mat @ self.p_cov @ h_mat.T + r_sym
+        s_mat = 0.5 * (s_mat + s_mat.T)
+        if not np.all(np.isfinite(s_mat)):
+            return EkfUpdateResult(False, math.inf, gate_chi2, self.x[0:3].copy(), self.x[3:6].copy(), float(self.x[6]))
         try:
-            s_inv = np.linalg.inv(s_mat)
+            chol_s = np.linalg.cholesky(s_mat)
+            w_inn = np.linalg.solve(chol_s, y_inn)
+            s_inv = np.linalg.solve(chol_s.T, np.linalg.solve(chol_s, np.eye(4, dtype=np.float64)))
         except np.linalg.LinAlgError:
             return EkfUpdateResult(False, math.inf, gate_chi2, self.x[0:3].copy(), self.x[3:6].copy(), float(self.x[6]))
 
-        d2 = float(y_inn @ (s_inv @ y_inn))
-        # Fail-closed Mahalanobis gate
-        if not (d2 <= gate_chi2):
+        d2 = float(w_inn @ w_inn)
+        # Fail-closed Mahalanobis gate (explicitly requires finite non-negative d2)
+        if not (math.isfinite(d2) and 0.0 <= d2 <= gate_f):
             return EkfUpdateResult(False, d2, gate_chi2, self.x[0:3].copy(), self.x[3:6].copy(), float(self.x[6]))
 
         k_gain = self.p_cov @ h_mat.T @ s_inv
@@ -540,7 +640,7 @@ class ApproachEkf5Hz:
 
         # Joseph-form update preserves symmetry & PSD strictly
         i_kh = np.eye(self.STATE_DIM) - k_gain @ h_mat
-        self.p_cov = i_kh @ self.p_cov @ i_kh.T + k_gain @ r_mat @ k_gain.T
+        self.p_cov = i_kh @ self.p_cov @ i_kh.T + k_gain @ r_sym @ k_gain.T
         self.p_cov = 0.5 * (self.p_cov + self.p_cov.T)
 
         return EkfUpdateResult(True, d2, gate_chi2, self.x[0:3].copy(), self.x[3:6].copy(), float(self.x[6]))

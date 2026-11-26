@@ -1,23 +1,14 @@
 /**
- * OpenXVS Studio v5.2 — Video, Live Camera, HIL Self-Test & Standalone Eval Workbench.
+ * OpenXVS Studio — Video, Live Camera, HIL Self-Test & Standalone Eval Workbench.
  *
- * Zero broken tabs across BOTH execution modes:
- *   - Standalone `.exe` (Tauri v2 Pure-Rust ORT IPC — ZERO Python, ZERO `:8765` HTTP):
- *       * Tab A — Video / Sequence Analyzer:
- *           1-Click Built-In Real Flight Sequence via `native_video_sequence_tick({ channel, frameIdx })`,
- *           plus local `.mp4`/`.webm` frame extraction via `<video>` + `<canvas>` -> `native_analyze_image`,
- *           live annotated preview, interactive native sequence playback scrubber, metrics cards, and JSON export.
- *       * Tab B — Live Webcam / USB Camera (`getUserMedia` -> `native_analyze_image`).
- *       * Tab C — HIL Self-Test (`native_hil_loopback_test`) & 1-Click Standalone Eval Report
- *           (`native_export_eval_report` -> instant `.json` download with SHA-256 + `NOT FOR FLIGHT` stamp).
- *   - Browser dev mode (`:4174` + `:8765` HTTP bridge):
- *       * Preserves full HTTP `.MP4` batch upload, built-in clip processing, H.264 `<video controls>`,
- *         `.MP4` download, live webcam `/api/analyze_frame_fast`, HIL UDP bridge, and `.ZIP` Buyer Pack.
+ * Uses native HTML `<dialog>` (`showModal()` top-layer, built-in Escape close, backdrop,
+ * focus trap & focus restoration), accessible `role="tablist"`/`role="tab"`, GPU-composited
+ * `scaleX()` progress bar, fully localized TR/EN UI & errors, safe offline CTA gating,
+ * and timeout-guarded frame extraction.
  */
 
 import {
   DEFAULT_NATIVE_SEQUENCE_FRAMES,
-  NON_FLIGHT_WATERMARK,
   normalizeBase64DataUrl,
   stampNonFlightExport,
   type HilLoopbackReport,
@@ -30,7 +21,13 @@ import {
   type VideoJobStatus,
   type VideoJobSummary,
 } from "./bridge_client.ts";
-import { getStudioStrings, type StudioLocale } from "./i18n.ts";
+import {
+  STUDIO_ASSURANCE_V52_SPEC,
+  STUDIO_NAV_V5_SPEC,
+  STUDIO_STACK_V5_SPEC,
+  getStudioStrings,
+  type StudioLocale,
+} from "./i18n.ts";
 import { renderFormalAssuranceStripHtml } from "./v52_telemetry.ts";
 
 export type BenchTabId = "video" | "webcam" | "hil";
@@ -45,8 +42,26 @@ export interface NativeSequenceFrameRecord {
   readonly activeRangeLocked: boolean;
 }
 
+type BenchErrorMessage =
+  | { readonly kind: "bridge_required" }
+  | { readonly kind: "text"; readonly text: string };
+
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function renderBenchErrorHtml(locale: StudioLocale, err: BenchErrorMessage | null): string {
+  if (!err) return "";
+  if (err.kind === "bridge_required") {
+    const b = getStudioStrings(locale).bench;
+    return (
+      `<div class="bench-error" role="alert">` +
+      `${esc(b.bridgeRequiredPrefix)} <code>${esc(b.bridgeRequiredCmd)}</code>` +
+      (b.bridgeRequiredSuffix ? ` ${esc(b.bridgeRequiredSuffix)}` : "") +
+      `</div>`
+    );
+  }
+  return `<div class="bench-error" role="alert">${esc(err.text)}</div>`;
 }
 
 /** Pure aggregator turning native Pure-Rust ORT sequence ticks into a standard VideoJobSummary. */
@@ -106,7 +121,9 @@ export function renderHilLoopbackCardsHtml(
       const tamp = Number(details.tamper_cases_rejected ?? 3);
       return {
         title: tr ? "MAVLink2 #52001 İmzalı UDP" : "MAVLink2 #52001 Signed UDP",
-        detail: tr ? `${ok}/${ok} 77B paket · ${tamp}/${tamp} tamper reddi` : `${ok}/${ok} 77B frames · ${tamp}/${tamp} tamper rejected`,
+        detail: tr
+          ? `${ok}/${ok} 77B paket · ${tamp}/${tamp} tamper reddi`
+          : `${ok}/${ok} 77B frames · ${tamp}/${tamp} tamper rejected`,
       };
     }
     if (name.includes("dr06")) {
@@ -118,20 +135,26 @@ export function renderHilLoopbackCardsHtml(
     if (name.includes("active_range") || name.includes("64b")) {
       const tamp = Number(details.tamper_cases_rejected ?? 4);
       return {
-        title: tr ? "XVS-ActiveRange 64B CRC32" : "XVS-ActiveRange 64B CRC32",
-        detail: tr ? `64B wire OK · ${tamp}/${tamp} bit-flip reddi` : `64B wire OK · ${tamp}/${tamp} bit-flip rejected`,
+        title: "XVS-ActiveRange 64B CRC32",
+        detail: tr
+          ? `64B wire OK · ${tamp}/${tamp} bit-flip reddi`
+          : `64B wire OK · ${tamp}/${tamp} bit-flip rejected`,
       };
     }
     if (name.includes("multiship") || name.includes("coord")) {
       return {
-        title: tr ? "MultiShipCoord (F1/F4/F3)" : "MultiShipCoord (F1/F4/F3)",
-        detail: tr ? "FAR 91.113 · F4 hayalet koruması · Ring0 P0 OK" : "FAR 91.113 · F4 ghost guard · Ring0 P0 OK",
+        title: "MultiShipCoord (F1/F4/F3)",
+        detail: tr
+          ? "FAR 91.113 · F4 hayalet koruması · Ring0 P0 OK"
+          : "FAR 91.113 · F4 ghost guard · Ring0 P0 OK",
       };
     }
     const fgTel = Number(details.telemetry_packets_verified ?? 10);
     return {
-      title: tr ? "FlightGear Generic UDP" : "FlightGear Generic UDP",
-      detail: tr ? `${fgTel}/${fgTel} NED telemetri + kontrol OK` : `${fgTel}/${fgTel} NED telemetry + control OK`,
+      title: "FlightGear Generic UDP",
+      detail: tr
+        ? `${fgTel}/${fgTel} NED telemetri + kontrol OK`
+        : `${fgTel}/${fgTel} NED telemetry + control OK`,
     };
   };
 
@@ -161,7 +184,7 @@ export function renderHilLoopbackCardsHtml(
   );
 }
 
-/** Resolves the channel-aware 1-click built-in demo clip and localized button label (`D16-W21-m2`). */
+/** Resolves the channel-aware 1-click built-in demo clip and localized button label. */
 export function getBuiltinVideoClipConfig(
   locale: StudioLocale,
   channel: SensorChannelId,
@@ -258,14 +281,18 @@ export async function executeNativeVideoSequence(
   };
 }
 
+const TAB_ORDER: readonly BenchTabId[] = ["video", "webcam", "hil"];
+
 export class RealWorldBenchModal {
-  private readonly backdropEl: HTMLDivElement;
+  private readonly dialogEl: HTMLDialogElement;
   private readonly bridge: StudioBridgeClient;
   private readonly onOpenChange?: (open: boolean) => void;
+  private readonly abortCtrl = new AbortController();
 
   private locale: StudioLocale = "tr";
   private open = false;
   private activeTab: BenchTabId = "video";
+  private triggerEl: HTMLElement | null = null;
 
   // Tab A: Video Analyzer & Native Pure-Rust Sequence state
   private selectedFile: File | null = null;
@@ -274,7 +301,7 @@ export class RealWorldBenchModal {
   private maxFrames = 60;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private latestJob: VideoJobStatus | null = null;
-  private videoError: string | null = null;
+  private videoError: BenchErrorMessage | null = null;
   private nativeSeqRunId = 0;
   private nativeSeqRunning = false;
   private nativeFrames: NativeSequenceFrameRecord[] = [];
@@ -287,14 +314,14 @@ export class RealWorldBenchModal {
   private camRunning = false;
   private camLoopActive = false;
   private camCaptureCanvas: HTMLCanvasElement | null = null;
-  private camError: string | null = null;
+  private camError: BenchErrorMessage | null = null;
 
-  // Tab C: Autopilot HIL & Standalone Eval / Buyer Pack state
+  // Tab C: Autopilot HIL & Standalone Eval / Assurance Pack state
   private hilModeSelect: HilMode = "idle";
   private hilStatus: HilStatusPayload | null = null;
   private hilLoopback: HilLoopbackReport | null = null;
   private hilRunning = false;
-  private hilError: string | null = null;
+  private hilError: BenchErrorMessage | null = null;
   private evalExporting = false;
   private latestEvalExport: NativeEvalReportPayload | null = null;
 
@@ -306,14 +333,43 @@ export class RealWorldBenchModal {
     this.bridge = bridge;
     this.onOpenChange = onOpenChange;
 
-    this.backdropEl = document.createElement("div");
-    this.backdropEl.className = "bench-backdrop";
-    this.backdropEl.dataset.open = "false";
-    this.backdropEl.addEventListener("click", (ev) => {
-      if (ev.target === this.backdropEl) this.setOpen(false);
-    });
-    host.appendChild(this.backdropEl);
+    this.dialogEl = document.createElement("dialog");
+    this.dialogEl.id = "bench-dialog";
+    this.dialogEl.className = "bench-dialog";
+    this.dialogEl.setAttribute("aria-labelledby", "bench-dialog-title");
+
+    const sig = this.abortCtrl.signal;
+    // Backdrop click outside the modal surface closes native <dialog>
+    this.dialogEl.addEventListener(
+      "click",
+      (ev) => {
+        if (ev.target === this.dialogEl) {
+          this.setOpen(false);
+        }
+      },
+      { signal: sig },
+    );
+    // Native Escape key fires `cancel` on <dialog>
+    this.dialogEl.addEventListener(
+      "cancel",
+      (ev) => {
+        ev.preventDefault();
+        this.setOpen(false);
+      },
+      { signal: sig },
+    );
+
+    host.appendChild(this.dialogEl);
     this.render();
+  }
+
+  dispose(): void {
+    this.stopWebcam();
+    this.stopNativeSequence();
+    this.stopNativePlayback();
+    this.clearPoll();
+    this.abortCtrl.abort();
+    this.dialogEl.remove();
   }
 
   setLocale(locale: StudioLocale): void {
@@ -328,13 +384,41 @@ export class RealWorldBenchModal {
   setOpen(next: boolean): void {
     if (this.open === next) return;
     this.open = next;
-    this.backdropEl.dataset.open = String(next);
-    if (!next) {
+    if (next) {
+      this.triggerEl =
+        typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      this.render();
+      if (typeof this.dialogEl.showModal === "function") {
+        if (!this.dialogEl.open) {
+          this.dialogEl.showModal();
+        }
+      } else {
+        this.dialogEl.setAttribute("open", "");
+      }
+      // Move initial focus cleanly to the active tab or close button inside top-layer dialog
+      const activeTabBtn = this.dialogEl.querySelector<HTMLButtonElement>(
+        `[data-bench-tab="${this.activeTab}"]`,
+      );
+      activeTabBtn?.focus();
+    } else {
       this.stopWebcam();
       this.stopNativeSequence();
       this.stopNativePlayback();
-    } else {
-      this.render();
+      this.clearPoll();
+      if (typeof this.dialogEl.close === "function") {
+        if (this.dialogEl.open) {
+          this.dialogEl.close();
+        }
+      } else {
+        this.dialogEl.removeAttribute("open");
+      }
+      // Restore focus back to the trigger button
+      if (this.triggerEl && this.triggerEl.isConnected) {
+        this.triggerEl.focus();
+      }
+      this.triggerEl = null;
     }
     this.onOpenChange?.(next);
   }
@@ -380,9 +464,9 @@ export class RealWorldBenchModal {
   private syncNativePlayerFrame(): void {
     const rec = this.nativeFrames[this.nativePlaybackIdx];
     if (!rec) return;
-    const img = this.backdropEl.querySelector<HTMLImageElement>("#bench-native-player-img");
-    const slider = this.backdropEl.querySelector<HTMLInputElement>("#bench-native-scrubber");
-    const meta = this.backdropEl.querySelector<HTMLElement>("#bench-native-frame-meta");
+    const img = this.dialogEl.querySelector<HTMLImageElement>("#bench-native-player-img");
+    const slider = this.dialogEl.querySelector<HTMLInputElement>("#bench-native-scrubber");
+    const meta = this.dialogEl.querySelector<HTMLElement>("#bench-native-frame-meta");
     if (img && rec.imageDataUrl) {
       img.src = rec.imageDataUrl;
       img.classList.remove("hidden");
@@ -414,15 +498,20 @@ export class RealWorldBenchModal {
 
     try {
       await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new Error(getStudioStrings(this.locale).bench.videoDecodeError));
+        }, 10000);
         const onLoaded = () => {
           cleanup();
           resolve();
         };
         const onErr = () => {
           cleanup();
-          reject(new Error("WebView2 could not decode this video container/codec."));
+          reject(new Error(getStudioStrings(this.locale).bench.videoDecodeError));
         };
         const cleanup = () => {
+          clearTimeout(timer);
           video.removeEventListener("loadedmetadata", onLoaded);
           video.removeEventListener("error", onErr);
         };
@@ -455,14 +544,31 @@ export class RealWorldBenchModal {
       for (let i = 0; i < total; i++) {
         if (this.nativeSeqRunId !== runId) break;
         const targetTime = Math.min(Math.max(0, i * stepS), Math.max(0, duration - 0.02));
-        await new Promise<void>((resolve) => {
-          const onSeeked = () => {
-            video.removeEventListener("seeked", onSeeked);
-            resolve();
-          };
-          video.addEventListener("seeked", onSeeked);
-          video.currentTime = targetTime;
-        });
+        // Skip redundant `seeked` wait when already at targetTime (prevents hang at i=0 / t=0!)
+        if (Math.abs(video.currentTime - targetTime) >= 1e-3) {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              cleanup();
+              resolve();
+            }, 2500);
+            const onSeeked = () => {
+              cleanup();
+              resolve();
+            };
+            const onErr = () => {
+              cleanup();
+              reject(new Error(getStudioStrings(this.locale).bench.videoDecodeError));
+            };
+            const cleanup = () => {
+              clearTimeout(timer);
+              video.removeEventListener("seeked", onSeeked);
+              video.removeEventListener("error", onErr);
+            };
+            video.addEventListener("seeked", onSeeked);
+            video.addEventListener("error", onErr);
+            video.currentTime = targetTime;
+          });
+        }
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const blob = await new Promise<Blob | null>((resolve) =>
           canvas.toBlob((b) => resolve(b), "image/jpeg", 0.86),
@@ -504,7 +610,10 @@ export class RealWorldBenchModal {
         summary,
       };
     } catch (err) {
-      this.videoError = err instanceof Error ? err.message : String(err);
+      this.videoError = {
+        kind: "text",
+        text: err instanceof Error ? err.message : String(err),
+      };
     } finally {
       URL.revokeObjectURL(objectUrl);
       if (this.nativeSeqRunId === runId) {
@@ -566,9 +675,11 @@ export class RealWorldBenchModal {
       );
 
       if (result.frames.length === 0) {
-        this.videoError =
-          this.bridge.getLastError() ??
-          "Native Pure-Rust ORT sequence tick returned no frames.";
+        this.videoError = {
+          kind: "text",
+          text:
+            this.bridge.getLastError() ?? getStudioStrings(this.locale).bench.nativeSeqEmpty,
+        };
         this.latestJob = null;
       } else {
         this.latestJob = {
@@ -584,7 +695,10 @@ export class RealWorldBenchModal {
         };
       }
     } catch (err) {
-      this.videoError = err instanceof Error ? err.message : String(err);
+      this.videoError = {
+        kind: "text",
+        text: err instanceof Error ? err.message : String(err),
+      };
     } finally {
       if (this.nativeSeqRunId === runId) {
         this.nativeSeqRunning = false;
@@ -603,12 +717,12 @@ export class RealWorldBenchModal {
       await this.bridge.probeHealth();
     }
     if (!this.bridge.isOnline()) {
-      this.videoError = getStudioStrings(this.locale).bench.bridgeRequired;
+      this.videoError = { kind: "bridge_required" };
       this.render();
       return;
     }
 
-    // Standalone `.exe` Tauri IPC path: zero Python, zero `:8765` HTTP bridge!
+    // Standalone `.exe` Tauri IPC path: zero Python, zero `:8765` HTTP bridge
     if (this.bridge.isNativeTauriIpc()) {
       if (!builtin && this.selectedFile) {
         await this.runLocalVideoFramesNative(this.selectedFile);
@@ -620,7 +734,7 @@ export class RealWorldBenchModal {
 
     // Browser dev mode (`:4174` + `:8765` HTTP bridge)
     if (!builtin && !this.selectedFile) {
-      this.videoError = getStudioStrings(this.locale).bench.dropVideoHint;
+      this.videoError = { kind: "text", text: getStudioStrings(this.locale).bench.dropVideoHint };
       this.render();
       return;
     }
@@ -641,7 +755,10 @@ export class RealWorldBenchModal {
             this.maxFrames,
           );
       if (!started || !started.job_id) {
-        this.videoError = "Failed to start video analysis job (check :8765 bridge).";
+        this.videoError = {
+          kind: "text",
+          text: getStudioStrings(this.locale).bench.startVideoFailed,
+        };
         this.render();
         return;
       }
@@ -659,7 +776,10 @@ export class RealWorldBenchModal {
       this.render();
       void this.pollLoop(started.job_id);
     } catch (err) {
-      this.videoError = err instanceof Error ? err.message : String(err);
+      this.videoError = {
+        kind: "text",
+        text: err instanceof Error ? err.message : String(err),
+      };
       this.render();
     }
   }
@@ -668,7 +788,7 @@ export class RealWorldBenchModal {
     try {
       const st = await this.bridge.pollVideoJob(jobId);
       if (!st) {
-        this.videoError = "Lost connection while polling video job.";
+        this.videoError = { kind: "text", text: getStudioStrings(this.locale).bench.pollLost };
         this.render();
         return;
       }
@@ -682,16 +802,20 @@ export class RealWorldBenchModal {
         this.render();
       }
     } catch (err) {
-      this.videoError = err instanceof Error ? err.message : String(err);
+      this.videoError = {
+        kind: "text",
+        text: err instanceof Error ? err.message : String(err),
+      };
       this.render();
     }
   }
 
   private updateVideoJobUi(st: VideoJobStatus): void {
-    const bar = this.backdropEl.querySelector<HTMLElement>("#bench-progress-fill");
-    const txt = this.backdropEl.querySelector<HTMLElement>("#bench-progress-text");
-    const prevImg = this.backdropEl.querySelector<HTMLImageElement>("#bench-live-preview");
-    if (bar) bar.style.width = `${Math.max(0, Math.min(100, st.progress_pct))}%`;
+    const bar = this.dialogEl.querySelector<HTMLElement>("#bench-progress-fill");
+    const txt = this.dialogEl.querySelector<HTMLElement>("#bench-progress-text");
+    const prevImg = this.dialogEl.querySelector<HTMLImageElement>("#bench-live-preview");
+    const frac = Math.max(0, Math.min(1, st.progress_pct / 100));
+    if (bar) bar.style.transform = `scaleX(${frac})`;
     if (txt) {
       txt.textContent = `${Math.round(st.progress_pct)}% (${st.frames_done}/${st.total_frames})`;
     }
@@ -713,9 +837,43 @@ export class RealWorldBenchModal {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `openxvs_v5_video_report_${this.latestJob.job_id}.json`;
+    a.download = `openxvs_video_report_${this.latestJob.job_id}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  private async triggerBuyerPackDownload(): Promise<void> {
+    this.hilError = null;
+    if (!this.bridge.isOnline()) {
+      await this.bridge.probeHealth();
+    }
+    if (!this.bridge.isOnline()) {
+      this.hilError = { kind: "bridge_required" };
+      this.render();
+      return;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const res = await fetch(this.bridge.getBuyerPackDownloadUrl(), { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!res.ok) {
+        this.hilError = { kind: "text", text: getStudioStrings(this.locale).bench.buyerPackOffline };
+        this.render();
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "openxvs_assurance_pack.zip";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      clearTimeout(timer);
+      this.hilError = { kind: "bridge_required" };
+      this.render();
+    }
   }
 
   private async triggerNativeEvalExport(): Promise<void> {
@@ -728,8 +886,12 @@ export class RealWorldBenchModal {
       }
       const rep = await this.bridge.exportNativeEvalReport();
       if (!rep) {
-        this.hilError =
-          this.bridge.getLastError() ?? "Failed to export standalone eval report via native IPC.";
+        this.hilError = {
+          kind: "text",
+          text:
+            this.bridge.getLastError() ??
+            getStudioStrings(this.locale).bench.nativeEvalExportFailed,
+        };
         return;
       }
       this.latestEvalExport = rep;
@@ -749,7 +911,7 @@ export class RealWorldBenchModal {
   private async startWebcam(): Promise<void> {
     this.camError = null;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      this.camError = getStudioStrings(this.locale).bench.camDenied;
+      this.camError = { kind: "text", text: getStudioStrings(this.locale).bench.camDenied };
       this.render();
       return;
     }
@@ -764,7 +926,7 @@ export class RealWorldBenchModal {
       this.camRunning = true;
       this.render();
 
-      const videoEl = this.backdropEl.querySelector<HTMLVideoElement>("#bench-webcam-video");
+      const videoEl = this.dialogEl.querySelector<HTMLVideoElement>("#bench-webcam-video");
       if (videoEl) {
         videoEl.srcObject = this.mediaStream;
         await videoEl.play();
@@ -777,7 +939,7 @@ export class RealWorldBenchModal {
       void this.runWebcamInferenceLoop();
     } catch {
       this.camRunning = false;
-      this.camError = getStudioStrings(this.locale).bench.camDenied;
+      this.camError = { kind: "text", text: getStudioStrings(this.locale).bench.camDenied };
       this.render();
     }
   }
@@ -794,8 +956,9 @@ export class RealWorldBenchModal {
 
   private async refreshHilStatus(): Promise<void> {
     this.hilError = null;
-    if (!this.bridge.isOnline()) {
-      await this.bridge.probeHealth();
+    // Never fire doomed HTTP requests while known offline in browser preview mode
+    if (!this.bridge.isOnline() && !this.bridge.isNativeTauriIpc()) {
+      return;
     }
     const st = await this.bridge.fetchHilStatus();
     if (st) {
@@ -804,8 +967,8 @@ export class RealWorldBenchModal {
       if (st.last_loopback && !this.hilLoopback) {
         this.hilLoopback = st.last_loopback;
       }
+      this.render();
     }
-    this.render();
   }
 
   private async applyHilConnection(): Promise<void> {
@@ -814,7 +977,7 @@ export class RealWorldBenchModal {
       await this.bridge.probeHealth();
     }
     if (!this.bridge.isOnline()) {
-      this.hilError = getStudioStrings(this.locale).bench.bridgeRequired;
+      this.hilError = { kind: "bridge_required" };
       this.render();
       return;
     }
@@ -826,9 +989,12 @@ export class RealWorldBenchModal {
           : { mode: "idle" as const };
     const st = await this.bridge.connectHilBridge(payload);
     if (!st) {
-      this.hilError =
-        this.bridge.getLastError() ??
-        "HIL actuation blocked (NON_FLIGHT_SIM_ONLY=1) or dev bridge (:8765) offline.";
+      this.hilError = {
+        kind: "text",
+        text:
+          this.bridge.getLastError() ??
+          getStudioStrings(this.locale).bench.hilActuationBlocked,
+      };
     } else {
       this.hilStatus = st;
     }
@@ -844,14 +1010,18 @@ export class RealWorldBenchModal {
         await this.bridge.probeHealth();
       }
       if (!this.bridge.isOnline()) {
-        this.hilError = getStudioStrings(this.locale).bench.bridgeRequired;
+        this.hilError = { kind: "bridge_required" };
         return;
       }
       const rep = await this.bridge.runHilLoopbackTest();
       if (!rep) {
-        this.hilError = this.bridge.isNativeTauriIpc()
-          ? "Native loopback self-test failed."
-          : "HIL loopback self-test failed on :8765.";
+        const b = getStudioStrings(this.locale).bench;
+        this.hilError = {
+          kind: "text",
+          text: this.bridge.isNativeTauriIpc()
+            ? b.hilLoopbackFailedNative
+            : b.hilLoopbackFailedBridge,
+        };
       } else {
         this.hilLoopback = rep;
         const st = await this.bridge.fetchHilStatus();
@@ -868,9 +1038,10 @@ export class RealWorldBenchModal {
     this.camLoopActive = true;
     try {
       while (this.camRunning && this.open && this.activeTab === "webcam") {
-        const videoEl = this.backdropEl.querySelector<HTMLVideoElement>("#bench-webcam-video");
-        const aiImg = this.backdropEl.querySelector<HTMLImageElement>("#bench-webcam-ai-img");
-        const statEl = this.backdropEl.querySelector<HTMLElement>("#bench-webcam-stats");
+        const videoEl = this.dialogEl.querySelector<HTMLVideoElement>("#bench-webcam-video");
+        const aiImg = this.dialogEl.querySelector<HTMLImageElement>("#bench-webcam-ai-img");
+        const aiEmpty = this.dialogEl.querySelector<HTMLElement>("#bench-webcam-ai-empty");
+        const statEl = this.dialogEl.querySelector<HTMLElement>("#bench-webcam-stats");
 
         if (videoEl && videoEl.readyState >= 2 && this.camCaptureCanvas) {
           const ctx = this.camCaptureCanvas.getContext("2d");
@@ -879,12 +1050,13 @@ export class RealWorldBenchModal {
             const blob = await new Promise<Blob | null>((resolve) =>
               this.camCaptureCanvas!.toBlob((b) => resolve(b), "image/jpeg", 0.82),
             );
-            if (blob && this.camRunning) {
+            if (blob && this.camRunning && this.bridge.isOnline()) {
               const res = await this.bridge.analyzeFrameFast(this.camChannel, blob);
               if (res && aiImg) {
                 if (res.imageDataUrl) {
                   aiImg.src = res.imageDataUrl;
                   aiImg.classList.remove("hidden");
+                  aiEmpty?.classList.add("hidden");
                 }
                 if (statEl) {
                   const lat = res.latencyMs !== null ? `${res.latencyMs.toFixed(1)} ms` : "—";
@@ -897,7 +1069,6 @@ export class RealWorldBenchModal {
             }
           }
         }
-        // Serialized ~4 FPS pacing so HTTP/IPC requests never pile up
         await new Promise((r) => setTimeout(r, 240));
       }
     } finally {
@@ -905,9 +1076,26 @@ export class RealWorldBenchModal {
     }
   }
 
+  private switchTab(next: BenchTabId, focusTab = false): void {
+    if (next !== "webcam") this.stopWebcam();
+    if (next !== "video") {
+      this.stopNativeSequence();
+      this.stopNativePlayback();
+    }
+    this.activeTab = next;
+    this.render();
+    if (focusTab) {
+      this.dialogEl.querySelector<HTMLButtonElement>(`[data-bench-tab="${next}"]`)?.focus();
+    }
+    if (next === "hil") {
+      void this.refreshHilStatus();
+    }
+  }
+
   render(): void {
     const s = getStudioStrings(this.locale).bench;
     const isNative = this.bridge.isNativeTauriIpc();
+    const isOnline = this.bridge.isOnline();
     const job = this.latestJob;
     const isRunning =
       this.nativeSeqRunning || (job !== null && (job.status === "queued" || job.status === "running"));
@@ -938,12 +1126,14 @@ export class RealWorldBenchModal {
           ? `<div class="bench-native-player">` +
             `<img id="bench-native-player-img" class="bench-preview-img${curNativeRec.imageDataUrl ? "" : " hidden"}" src="${esc(curNativeRec.imageDataUrl ?? "")}" alt="Pure-Rust ORT sequence frame" />` +
             `<div class="bench-native-player-controls">` +
-            `<button id="bench-native-play-btn" class="studio-btn" data-active="${this.nativePlaybackTimer !== null}">${esc(this.nativePlaybackTimer !== null ? s.pauseSeqBtn : s.playSeqBtn)}</button>` +
-            `<input id="bench-native-scrubber" type="range" min="0" max="${Math.max(0, this.nativeFrames.length - 1)}" step="1" value="${this.nativePlaybackIdx}" />` +
+            `<button type="button" id="bench-native-play-btn" class="studio-btn" data-active="${this.nativePlaybackTimer !== null}">${esc(this.nativePlaybackTimer !== null ? s.pauseSeqBtn : s.playSeqBtn)}</button>` +
+            `<input id="bench-native-scrubber" type="range" aria-label="Sequence Frame" min="0" max="${Math.max(0, this.nativeFrames.length - 1)}" step="1" value="${this.nativePlaybackIdx}" />` +
             `<span id="bench-native-frame-meta" class="studio-pill studio-pill-cyan">#${this.nativePlaybackIdx + 1}/${this.nativeFrames.length} · ${curNativeRec.latencyMs.toFixed(1)} ms · conf ${Math.round(curNativeRec.confidence * 100)}%</span>` +
             `</div>` +
             `</div>`
           : "";
+
+      const progScale = job ? Math.max(0, Math.min(1, job.progress_pct / 100)) : 0;
 
       bodyHtml =
         (isNative ? `<div class="bench-native-note">${esc(s.nativeVideoNote)}</div>` : "") +
@@ -959,20 +1149,20 @@ export class RealWorldBenchModal {
         `<input id="bench-video-file" type="file" accept="video/mp4,video/webm,video/quicktime" style="display:none" />` +
         `<div class="bench-drop-text">${esc(dropHint)}</div>` +
         `<div class="bench-action-row">` +
-        `<button id="bench-pick-btn" class="studio-btn">${esc(s.pickVideoBtn)}</button>` +
-        `<button id="bench-run-btn" class="studio-btn" data-active="true"${isRunning ? " disabled" : ""}>${esc(s.runVideoBtn)}</button>` +
-        `<button id="bench-builtin-btn" class="studio-btn"${isRunning ? " disabled" : ""}>${esc(builtinCfg.label)}</button>` +
+        `<button type="button" id="bench-pick-btn" class="studio-btn">${esc(s.pickVideoBtn)}</button>` +
+        `<button type="button" id="bench-run-btn" class="studio-btn" data-active="true"${isRunning ? " disabled" : ""}>${esc(s.runVideoBtn)}</button>` +
+        `<button type="button" id="bench-builtin-btn" class="studio-btn"${isRunning ? " disabled" : ""}>${esc(builtinCfg.label)}</button>` +
         (this.nativeSeqRunning
-          ? `<button id="bench-stop-seq-btn" class="studio-btn" data-tone="rose">${esc(s.stopSeqBtn)}</button>`
+          ? `<button type="button" id="bench-stop-seq-btn" class="studio-btn" data-tone="rose">${esc(s.stopSeqBtn)}</button>`
           : "") +
         `</div>` +
         `</div>` +
-        (this.videoError ? `<div class="bench-error">${esc(this.videoError)}</div>` : "") +
-        (job?.error ? `<div class="bench-error">${esc(job.error)}</div>` : "") +
+        renderBenchErrorHtml(this.locale, this.videoError) +
+        (job?.error ? `<div class="bench-error" role="alert">${esc(job.error)}</div>` : "") +
         (isRunning && job
           ? `<div class="bench-progress-wrap">` +
             `<div class="bench-progress-head"><span>${esc(isNative ? s.processingNative : s.processing)}</span><span id="bench-progress-text">${Math.round(job.progress_pct)}% (${job.frames_done}/${job.total_frames})</span></div>` +
-            `<div class="bench-progress-track"><div id="bench-progress-fill" class="bench-progress-fill" style="width:${job.progress_pct}%"></div></div>` +
+            `<div class="bench-progress-track"><div id="bench-progress-fill" class="bench-progress-fill" style="transform:scaleX(${progScale})"></div></div>` +
             `<img id="bench-live-preview" class="bench-preview-img${previewUrl ? "" : " hidden"}" src="${esc(previewUrl ?? "")}" alt="live preview" />` +
             `</div>`
           : "") +
@@ -984,32 +1174,57 @@ export class RealWorldBenchModal {
               : `<video class="bench-result-video" controls playsinline src="${esc(mp4Url)}"></video>`) +
             `<div class="bench-action-row">` +
             (!isNative && mp4Url
-              ? `<a class="studio-btn" data-active="true" href="${esc(mp4Url)}" download="openxvs_v5_${esc(job.channel)}_${esc(job.job_id)}.mp4">${esc(s.downloadMp4)}</a>`
+              ? `<a class="studio-btn" data-active="true" href="${esc(mp4Url)}" download="openxvs_${esc(job.channel)}_${esc(job.job_id)}.mp4">${esc(s.downloadMp4)}</a>`
               : "") +
-            `<button id="bench-json-btn" class="studio-btn" data-active="${isNative}">${esc(s.downloadJson)}</button>` +
+            `<button type="button" id="bench-json-btn" class="studio-btn" data-active="${isNative}">${esc(s.downloadJson)}</button>` +
             `</div>` +
             `</div>`
           : "");
     } else if (this.activeTab === "webcam") {
+      const camBadgeLabel = this.camRunning
+        ? s.camStatusLive
+        : isOnline
+          ? s.camStatusReady
+          : s.camStatusOffline;
+      const camBadgeClass = this.camRunning
+        ? "studio-pill studio-pill-emerald"
+        : isOnline
+          ? "studio-pill studio-pill-cyan"
+          : "studio-pill studio-pill-amber";
+      const aiEmptyText = isOnline ? s.camAiEmptyOnline : s.camAiEmptyOffline;
+
       bodyHtml =
         `<div class="bench-controls-row">` +
         `<label class="bench-field"><span>${esc(s.channelLabel)}</span>` +
         `<select id="bench-cam-ch" class="studio-select">${channelOptions(this.camChannel)}</select></label>` +
-        `<button id="bench-cam-toggle" class="studio-btn" data-active="${this.camRunning}">${esc(this.camRunning ? s.stopCamBtn : s.startCamBtn)}</button>` +
-        `<span id="bench-webcam-stats" class="studio-pill studio-pill-cyan">READY</span>` +
+        `<button type="button" id="bench-cam-toggle" class="studio-btn" data-active="${this.camRunning}">${esc(this.camRunning ? s.stopCamBtn : s.startCamBtn)}</button>` +
+        `<span id="bench-webcam-stats" class="${camBadgeClass}" data-bridge-online="${isOnline}">${esc(camBadgeLabel)}</span>` +
         `</div>` +
-        (this.camError ? `<div class="bench-error">${esc(this.camError)}</div>` : "") +
+        renderBenchErrorHtml(this.locale, this.camError) +
         `<div class="bench-cam-split">` +
-        `<div class="bench-cam-pane"><span>${esc(s.rawCamLabel)}</span><video id="bench-webcam-video" autoplay muted playsinline></video></div>` +
-        `<div class="bench-cam-pane"><span>${esc(s.aiCamLabel)}</span><img id="bench-webcam-ai-img" class="hidden" alt="OpenXVS AI output" /></div>` +
+        `<div class="bench-cam-pane">` +
+        `<span class="bench-cam-label">${esc(s.rawCamLabel)}</span>` +
+        `<div class="bench-cam-stage">` +
+        `<video id="bench-webcam-video" class="${this.camRunning ? "" : "hidden"}" autoplay muted playsinline></video>` +
+        `<div class="bench-cam-empty${this.camRunning ? " hidden" : ""}">${esc(s.camRawEmpty)}</div>` +
+        `</div>` +
+        `</div>` +
+        `<div class="bench-cam-pane">` +
+        `<span class="bench-cam-label">${esc(s.aiCamLabel)}</span>` +
+        `<div class="bench-cam-stage">` +
+        `<img id="bench-webcam-ai-img" class="hidden" alt="OpenXVS AI output" />` +
+        `<div id="bench-webcam-ai-empty" class="bench-cam-empty">${esc(aiEmptyText)}</div>` +
+        `</div>` +
+        `</div>` +
         `</div>`;
     } else {
       const hs = this.hilStatus;
-      const rxTx = hs ? `RX ${hs.rx_packets} · TX ${hs.tx_packets} (${hs.bound_host}:${hs.rx_port}/${hs.tx_port})` : "127.0.0.1 · IDLE";
+      const rxTx = hs
+        ? `RX ${hs.rx_packets} · TX ${hs.tx_packets} (${hs.bound_host}:${hs.rx_port}/${hs.tx_port})`
+        : s.hilStatusIdle;
       const nedTel = hs?.last_telemetry_ned
         ? `<div class="bench-ned-bar">NED: ${esc(JSON.stringify(hs.last_telemetry_ned))}</div>`
         : "";
-      const packUrl = this.bridge.getBuyerPackDownloadUrl();
       const checklistHtml = s.buyerPackChecklist
         .map((line) => `<li>${esc(line)}</li>`)
         .join("");
@@ -1023,84 +1238,102 @@ export class RealWorldBenchModal {
           `</div>`
         : "";
 
+      const hilHeaderBadge =
+        hs?.non_flight_sim_only || isNative ? s.hilBadgeSimOnly : s.hilBadgeGplFree;
+
       bodyHtml =
-        `<div class="bench-non-flight-notice">${esc(NON_FLIGHT_WATERMARK)}</div>` +
         `<div class="bench-hil-section">` +
-        `<div class="bench-hil-title-row"><h4>${esc(s.hilTitle)}</h4><span class="studio-pill studio-pill-emerald">${hs?.non_flight_sim_only || isNative ? "NON_FLIGHT_SIM_ONLY=1 · ZERO ACTUATION" : "GPL-FREE · ZERO PYMAVLINK"}</span></div>` +
+        `<div class="bench-hil-title-row"><h4>${esc(s.hilTitle)}</h4><span class="studio-pill studio-pill-emerald">${esc(hilHeaderBadge)}</span></div>` +
         (isNative ? `<div class="bench-native-note">${esc(s.nativeHilLockNotice)}</div>` : "") +
         `<div class="bench-controls-row">` +
         `<label class="bench-field"><span>${esc(s.hilModeLabel)}</span>` +
         `<select id="bench-hil-mode" class="studio-select">` +
-        `<option value="idle"${this.hilModeSelect === "idle" ? " selected" : ""}>Idle (Disconnected)</option>` +
-        `<option value="flightgear_udp"${this.hilModeSelect === "flightgear_udp" ? " selected" : ""}>FlightGear UDP (5500 / 5501)</option>` +
-        `<option value="mavlink2_udp"${this.hilModeSelect === "mavlink2_udp" ? " selected" : ""}>MAVLink2 UDP — ArduPlane/PX4 (14550 / 14540)</option>` +
+        `<option value="idle"${this.hilModeSelect === "idle" ? " selected" : ""}>${esc(s.hilModeIdle)}</option>` +
+        `<option value="flightgear_udp"${this.hilModeSelect === "flightgear_udp" ? " selected" : ""}>${esc(s.hilModeFlightGear)}</option>` +
+        `<option value="mavlink2_udp"${this.hilModeSelect === "mavlink2_udp" ? " selected" : ""}>${esc(s.hilModeMavlink2)}</option>` +
         `</select></label>` +
-        `<button id="bench-hil-apply" class="studio-btn">${esc(s.hilApplyBtn)}</button>` +
+        `<button type="button" id="bench-hil-apply" class="studio-btn">${esc(s.hilApplyBtn)}</button>` +
         `<span class="studio-pill studio-pill-cyan">${esc(rxTx)}</span>` +
         `</div>` +
         nedTel +
         `<div class="bench-action-row" style="justify-content:flex-start;">` +
-        `<button id="bench-hil-loopback" class="studio-btn" data-active="true"${this.hilRunning ? " disabled" : ""}>${esc(this.hilRunning ? s.hilRunning : s.hilLoopbackBtn)}</button>` +
+        `<button type="button" id="bench-hil-loopback" class="studio-btn" data-active="true"${this.hilRunning ? " disabled" : ""}>${esc(this.hilRunning ? s.hilRunning : s.hilLoopbackBtn)}</button>` +
         `</div>` +
-        (this.hilError ? `<div class="bench-error">${esc(this.hilError)}</div>` : "") +
+        renderBenchErrorHtml(this.locale, this.hilError) +
         (this.hilLoopback ? renderHilLoopbackCardsHtml(this.locale, this.hilLoopback) : "") +
         `</div>` +
         `<div class="bench-pack-section">` +
         `<div class="bench-hil-title-row">` +
         `<h4>${esc(isNative ? s.nativeEvalPackTitle : s.buyerPackTitle)}</h4>` +
         (isNative
-          ? `<button id="bench-native-eval-export" class="studio-btn" data-tone="emerald"${this.evalExporting ? " disabled" : ""}>${esc(this.evalExporting ? s.nativeEvalExporting : s.nativeEvalPackBtn)}</button>`
-          : `<a class="studio-btn" data-tone="emerald" href="${esc(packUrl)}" download="openxvs_v5_2_buyer_assurance_pack.zip">${esc(s.buyerPackBtn)}</a>`) +
+          ? `<button type="button" id="bench-native-eval-export" class="studio-btn" data-tone="emerald"${this.evalExporting ? " disabled" : ""}>${esc(this.evalExporting ? s.nativeEvalExporting : s.nativeEvalPackBtn)}</button>`
+          : `<button type="button" id="bench-buyer-pack-btn" class="studio-btn" data-tone="emerald" title="${esc(isOnline ? s.buyerPackBtn : s.buyerPackOffline)}">${esc(s.buyerPackBtn)}</button>`) +
         `</div>` +
         renderFormalAssuranceStripHtml(this.locale) +
         evalExportStatusHtml +
         `<ul class="bench-checklist">${checklistHtml}</ul>` +
+        `<details class="studio-specs-disclosure">` +
+        `<summary>${esc(s.specsSummary)}</summary>` +
+        `<div class="studio-nav-v5-spec">${esc(STUDIO_STACK_V5_SPEC)}</div>` +
+        `<div class="studio-nav-v5-spec">${esc(STUDIO_NAV_V5_SPEC)}</div>` +
+        `<div class="studio-nav-v5-spec">${esc(STUDIO_ASSURANCE_V52_SPEC)}</div>` +
+        `</details>` +
         `</div>`;
     }
 
-    this.backdropEl.innerHTML =
-      `<div class="bench-modal" role="dialog" aria-modal="true">` +
+    const tabLabel = (id: BenchTabId): string =>
+      id === "video" ? s.tabVideo : id === "webcam" ? s.tabWebcam : s.tabHil;
+
+    const tabsHtml = TAB_ORDER.map((id) => {
+      const selected = this.activeTab === id;
+      return (
+        `<button type="button" id="bench-tab-${id}" class="studio-btn" role="tab" ` +
+        `aria-selected="${selected}" aria-controls="bench-tabpanel" ` +
+        `tabindex="${selected ? "0" : "-1"}" data-bench-tab="${id}" data-active="${selected}">` +
+        `${esc(tabLabel(id))}</button>`
+      );
+    }).join("");
+
+    this.dialogEl.innerHTML =
+      `<div class="bench-modal">` +
       `<div class="bench-header">` +
-      `<div><h3>${esc(s.title)}</h3><p>${esc(s.subtitle)}</p></div>` +
-      `<button id="bench-close-btn" class="studio-btn">${esc(s.close)}</button>` +
+      `<div><h3 id="bench-dialog-title">${esc(s.title)}</h3><p>${esc(s.subtitle)}</p></div>` +
+      `<button type="button" id="bench-close-btn" class="studio-btn">${esc(s.close)}</button>` +
       `</div>` +
-      `<div class="bench-tabs">` +
-      `<button class="studio-btn" data-bench-tab="video" data-active="${this.activeTab === "video"}">${esc(s.tabVideo)}</button>` +
-      `<button class="studio-btn" data-bench-tab="webcam" data-active="${this.activeTab === "webcam"}">${esc(s.tabWebcam)}</button>` +
-      `<button class="studio-btn" data-bench-tab="hil" data-active="${this.activeTab === "hil"}">${esc(s.tabHil)}</button>` +
-      `</div>` +
-      `<div class="bench-body">${bodyHtml}</div>` +
+      `<div class="bench-tabs" role="tablist" aria-labelledby="bench-dialog-title">${tabsHtml}</div>` +
+      `<div id="bench-tabpanel" class="bench-body" role="tabpanel" aria-labelledby="bench-tab-${this.activeTab}">${bodyHtml}</div>` +
       `</div>`;
 
     this.wireEvents();
   }
 
   private wireEvents(): void {
-    this.backdropEl.querySelector<HTMLButtonElement>("#bench-close-btn")?.addEventListener("click", () => {
+    this.dialogEl.querySelector<HTMLButtonElement>("#bench-close-btn")?.addEventListener("click", () => {
       this.setOpen(false);
     });
 
-    this.backdropEl.querySelectorAll<HTMLButtonElement>("[data-bench-tab]").forEach((btn) => {
+    this.dialogEl.querySelectorAll<HTMLButtonElement>("[data-bench-tab]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const next = btn.dataset.benchTab as BenchTabId;
-        if (next !== "webcam") this.stopWebcam();
-        if (next !== "video") {
-          this.stopNativeSequence();
-          this.stopNativePlayback();
-        }
-        this.activeTab = next;
-        this.render();
-        if (next === "hil") {
-          void this.refreshHilStatus();
+        this.switchTab(next, true);
+      });
+      btn.addEventListener("keydown", (ev) => {
+        const idx = TAB_ORDER.indexOf(this.activeTab);
+        if (ev.key === "ArrowRight") {
+          ev.preventDefault();
+          this.switchTab(TAB_ORDER[(idx + 1) % TAB_ORDER.length], true);
+        } else if (ev.key === "ArrowLeft") {
+          ev.preventDefault();
+          this.switchTab(TAB_ORDER[(idx - 1 + TAB_ORDER.length) % TAB_ORDER.length], true);
         }
       });
     });
 
     if (this.activeTab === "video") {
-      const chSel = this.backdropEl.querySelector<HTMLSelectElement>("#bench-video-ch");
+      const chSel = this.dialogEl.querySelector<HTMLSelectElement>("#bench-video-ch");
       chSel?.addEventListener("change", () => {
         this.videoChannel = chSel.value as SensorChannelId;
-        const builtinBtn = this.backdropEl.querySelector<HTMLButtonElement>("#bench-builtin-btn");
+        const builtinBtn = this.dialogEl.querySelector<HTMLButtonElement>("#bench-builtin-btn");
         if (builtinBtn) {
           builtinBtn.textContent = getBuiltinVideoClipConfig(
             this.locale,
@@ -1109,21 +1342,21 @@ export class RealWorldBenchModal {
           ).label;
         }
       });
-      const fpsRange = this.backdropEl.querySelector<HTMLInputElement>("#bench-fps-range");
+      const fpsRange = this.dialogEl.querySelector<HTMLInputElement>("#bench-fps-range");
       fpsRange?.addEventListener("input", () => {
         this.sampleFps = Number(fpsRange.value);
-        const val = this.backdropEl.querySelector("#bench-fps-val");
+        const val = this.dialogEl.querySelector("#bench-fps-val");
         if (val) val.textContent = String(this.sampleFps);
       });
-      const framesRange = this.backdropEl.querySelector<HTMLInputElement>("#bench-frames-range");
+      const framesRange = this.dialogEl.querySelector<HTMLInputElement>("#bench-frames-range");
       framesRange?.addEventListener("input", () => {
         this.maxFrames = Number(framesRange.value);
-        const val = this.backdropEl.querySelector("#bench-frames-val");
+        const val = this.dialogEl.querySelector("#bench-frames-val");
         if (val) val.textContent = String(this.maxFrames);
       });
 
-      const fileInp = this.backdropEl.querySelector<HTMLInputElement>("#bench-video-file");
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-pick-btn")?.addEventListener("click", () => {
+      const fileInp = this.dialogEl.querySelector<HTMLInputElement>("#bench-video-file");
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-pick-btn")?.addEventListener("click", () => {
         fileInp?.click();
       });
       fileInp?.addEventListener("change", () => {
@@ -1135,7 +1368,7 @@ export class RealWorldBenchModal {
         }
       });
 
-      const drop = this.backdropEl.querySelector<HTMLElement>("#bench-video-drop");
+      const drop = this.dialogEl.querySelector<HTMLElement>("#bench-video-drop");
       drop?.addEventListener("dragover", (e) => e.preventDefault());
       drop?.addEventListener("drop", (e) => {
         e.preventDefault();
@@ -1147,19 +1380,19 @@ export class RealWorldBenchModal {
         }
       });
 
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-run-btn")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-run-btn")?.addEventListener("click", () => {
         void this.launchVideoJob(false);
       });
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-builtin-btn")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-builtin-btn")?.addEventListener("click", () => {
         void this.launchVideoJob(true);
       });
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-stop-seq-btn")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-stop-seq-btn")?.addEventListener("click", () => {
         this.stopNativeSequence();
       });
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-native-play-btn")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-native-play-btn")?.addEventListener("click", () => {
         this.toggleNativePlayback();
       });
-      const scrubber = this.backdropEl.querySelector<HTMLInputElement>("#bench-native-scrubber");
+      const scrubber = this.dialogEl.querySelector<HTMLInputElement>("#bench-native-scrubber");
       scrubber?.addEventListener("input", () => {
         this.stopNativePlayback();
         this.nativePlaybackIdx = Math.max(
@@ -1168,15 +1401,15 @@ export class RealWorldBenchModal {
         );
         this.syncNativePlayerFrame();
       });
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-json-btn")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-json-btn")?.addEventListener("click", () => {
         this.downloadJsonReport();
       });
     } else if (this.activeTab === "webcam") {
-      const camSel = this.backdropEl.querySelector<HTMLSelectElement>("#bench-cam-ch");
+      const camSel = this.dialogEl.querySelector<HTMLSelectElement>("#bench-cam-ch");
       camSel?.addEventListener("change", () => {
         this.camChannel = camSel.value as SensorChannelId;
       });
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-cam-toggle")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-cam-toggle")?.addEventListener("click", () => {
         if (this.camRunning) {
           this.stopWebcam();
           this.render();
@@ -1185,18 +1418,21 @@ export class RealWorldBenchModal {
         }
       });
     } else {
-      const modeSel = this.backdropEl.querySelector<HTMLSelectElement>("#bench-hil-mode");
+      const modeSel = this.dialogEl.querySelector<HTMLSelectElement>("#bench-hil-mode");
       modeSel?.addEventListener("change", () => {
         this.hilModeSelect = modeSel.value as HilMode;
       });
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-hil-apply")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-hil-apply")?.addEventListener("click", () => {
         void this.applyHilConnection();
       });
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-hil-loopback")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-hil-loopback")?.addEventListener("click", () => {
         void this.triggerHilLoopback();
       });
-      this.backdropEl.querySelector<HTMLButtonElement>("#bench-native-eval-export")?.addEventListener("click", () => {
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-native-eval-export")?.addEventListener("click", () => {
         void this.triggerNativeEvalExport();
+      });
+      this.dialogEl.querySelector<HTMLButtonElement>("#bench-buyer-pack-btn")?.addEventListener("click", () => {
+        void this.triggerBuyerPackDownload();
       });
     }
   }

@@ -18,7 +18,8 @@ import { KSFO_28L_ORIGIN } from "./ksfo_terrain_pack.ts";
 
 export type FlightControlMode = "autopilot" | "manual";
 export type ShieldReason = "NONE" | "SC3BF CBDR" | "TERRAIN FLOOR" | "FORCEDLAND GLIDE";
-export type LandingGrade = "NONE" | "KUSURSUZ" | "GÜVENLİ" | "SERT İNİŞ";
+export type BreachReason = "SC3BF COLLISION" | "TERRAIN FLOOR" | "ENGINE-OUT STALL";
+export type LandingGrade = "NONE" | "PERFECT" | "SAFE" | "HARD";
 
 export interface PilotInputState {
   readonly pitch: number; // [-1, +1] (+1 pull back / nose up)
@@ -53,7 +54,7 @@ export interface ManualStepResult {
   readonly shieldOverrideActive: boolean;
   readonly shieldReason: ShieldReason;
   readonly envelopeBreach: boolean;
-  readonly breachReason: string | null;
+  readonly breachReason: BreachReason | null;
   readonly touchdown: TouchdownReport;
   readonly yokePitch: number;
   readonly yokeRoll: number;
@@ -110,11 +111,11 @@ export function evaluateRunwayTouchdown(
   const sinkRateFpm = Math.max(0.0, -climbMps * MPS_TO_FPM);
   const absOff = Math.abs(crossM);
 
-  let grade: LandingGrade = "SERT İNİŞ";
+  let grade: LandingGrade = "HARD";
   if (onRunway && sinkRateFpm <= 240.0 && absOff <= 8.0) {
-    grade = "KUSURSUZ";
+    grade = "PERFECT";
   } else if (onRunway && sinkRateFpm <= 480.0 && absOff <= 22.0) {
-    grade = "GÜVENLİ";
+    grade = "SAFE";
   }
 
   return {
@@ -156,7 +157,7 @@ export function stepManualFlight6DoF(args: {
   let shieldOverrideActive = false;
   let shieldReason: ShieldReason = "NONE";
   let envelopeBreach = false;
-  let breachReason: string | null = null;
+  let breachReason: BreachReason | null = null;
 
   let cmdRollTarget = s.rollRad + yokeRoll * 1.15 * dt;
   let cmdPitchTarget = s.pitchRad + yokePitch * 0.65 * dt;
@@ -207,7 +208,7 @@ export function stepManualFlight6DoF(args: {
         yokePitch = 0.55;
       } else if (distM < R_SEP_M) {
         envelopeBreach = true;
-        breachReason = "SC3BF COLLISION BREACH (<152.4m)";
+        breachReason = "SC3BF COLLISION";
       }
     }
   }
@@ -232,7 +233,7 @@ export function stepManualFlight6DoF(args: {
       yokePitch = 0.78;
     } else if (aglM < 12.0) {
       envelopeBreach = true;
-      breachReason = "TERRAIN FLOOR BREACH";
+      breachReason = "TERRAIN FLOOR";
     }
   }
 
@@ -251,7 +252,7 @@ export function stepManualFlight6DoF(args: {
       yokePitch = -0.35;
     } else if (s.tasMps <= V_STALL_MPS + 0.5) {
       envelopeBreach = true;
-      breachReason = "ENGINE-OUT STALL BREACH";
+      breachReason = "ENGINE-OUT STALL";
     }
   }
 
@@ -315,6 +316,7 @@ export function stepManualFlight6DoF(args: {
 /** Browser keyboard + HTML5 Gamepad input aggregator (never hijacks inputs/modals). */
 export class PilotInputCapture {
   private readonly keys = new Set<string>();
+  private readonly abortCtrl = new AbortController();
   private enabled = true;
   private onToggleEngineOut?: () => void;
   private onResetApproach?: () => void;
@@ -327,16 +329,26 @@ export class PilotInputCapture {
     this.onResetApproach = callbacks?.onResetApproach;
 
     if (typeof window !== "undefined") {
-      window.addEventListener("keydown", this.handleKeyDown);
-      window.addEventListener("keyup", this.handleKeyUp);
-      window.addEventListener("blur", () => this.keys.clear());
+      const sig = this.abortCtrl.signal;
+      window.addEventListener("keydown", this.handleKeyDown, { signal: sig });
+      window.addEventListener("keyup", this.handleKeyUp, { signal: sig });
+      window.addEventListener("blur", this.handleBlur, { signal: sig });
     }
+  }
+
+  dispose(): void {
+    this.abortCtrl.abort();
+    this.keys.clear();
   }
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     if (!enabled) this.keys.clear();
   }
+
+  private readonly handleBlur = (): void => {
+    this.keys.clear();
+  };
 
   private isTypingTarget(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false;
@@ -347,6 +359,7 @@ export class PilotInputCapture {
   private readonly handleKeyDown = (ev: KeyboardEvent): void => {
     if (!this.enabled || this.isTypingTarget(ev.target)) return;
     const code = ev.code;
+    const hasModifier = ev.ctrlKey || ev.metaKey || ev.altKey;
     if (
       code === "KeyW" ||
       code === "KeyS" ||
@@ -363,10 +376,11 @@ export class PilotInputCapture {
       code === "ControlLeft" ||
       code === "ControlRight"
     ) {
+      if (hasModifier && code !== "ControlLeft" && code !== "ControlRight") return;
       this.keys.add(code);
-    } else if (code === "KeyF" && !ev.repeat) {
+    } else if (code === "KeyF" && !ev.repeat && !hasModifier) {
       this.onToggleEngineOut?.();
-    } else if (code === "KeyR" && !ev.repeat) {
+    } else if (code === "KeyR" && !ev.repeat && !hasModifier) {
       this.onResetApproach?.();
     }
   };

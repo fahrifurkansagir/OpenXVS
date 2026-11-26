@@ -100,6 +100,20 @@ class RunwaySpec:
 
 
 @dataclass(frozen=True)
+class NaipRunwayPatch:
+    """Georeferenced USDA NAIP ortho patch aligned to a runway's physical `(s, lat)` corridor."""
+
+    icao: str
+    image_rgb: np.ndarray  # [H, W, 3] float32 in [0, 1]
+    s_near_m: float
+    s_far_m: float
+    lat_half_m: float
+    meters_per_px: float
+    heading_deg: float
+    georeferenced: bool = True
+
+
+@dataclass(frozen=True)
 class XvsLandG4Config:
     """Configuration for production Colab L4/G4 & offline `--smoke-local` XVS-Land training."""
 
@@ -143,8 +157,10 @@ def load_conus_runways_from_csv(
     *,
     exclude_icaos: set[str] | frozenset[str],
     max_airports: int = 400,
+    min_length_ft: float = 2200.0,
+    min_width_ft: float = 50.0,
 ) -> list[RunwaySpec]:
-    """Parse real paved CONUS `K*` runways from `ourairports/runways.csv`, excluding LARD & KSFO."""
+    """Parse real paved CONUS `K*` runways from `ourairports/runways.csv`, excluding LARD, KSFO & KORS."""
     if not runways_csv.is_file():
         raise FileNotFoundError(f"OurAirports runways.csv not found: {runways_csv}")
 
@@ -156,7 +172,7 @@ def load_conus_runways_from_csv(
             ident = str(row["airport_ident"]).strip().upper()
             if not ident.startswith("K") or not ICAO_PATTERN.match(ident):
                 continue
-            if ident in exclude_icaos or ident == "KSFO":
+            if ident in exclude_icaos or ident in ("KSFO", "KORS"):
                 continue
             if str(row["closed"]).strip() == "1":
                 continue
@@ -168,7 +184,12 @@ def load_conus_runways_from_csv(
                 wid_ft = float(row["width_ft"])
             except (TypeError, ValueError):
                 continue
-            if not (math.isfinite(len_ft) and math.isfinite(wid_ft) and len_ft >= 4000.0 and wid_ft >= 75.0):
+            if not (
+                math.isfinite(len_ft)
+                and math.isfinite(wid_ft)
+                and len_ft >= float(min_length_ft)
+                and wid_ft >= float(min_width_ft)
+            ):
                 continue
             hdg_raw = str(row["le_heading_degT"]).strip()
             try:
@@ -224,13 +245,16 @@ def enforce_xvs_land_licenses_and_split(
         if isinstance(raw_doc, dict) and "airports" in raw_doc and isinstance(raw_doc["airports"], list):
             lard_icaos = {str(x).strip().upper() for x in raw_doc["airports"] if isinstance(x, str)}
 
-    heldout_icaos = ["KSFO", "KOAK", "KSJC"]
+    # Hold out Campaign 1 / KSFO / KORS FIRST (strict zero leakage before GA runway inclusion)
+    heldout_icaos = ["KSFO", "KOAK", "KSJC", "KORS"]
     excluded = set(lard_icaos) | set(heldout_icaos)
     max_ap = 64 if cfg.smoke_local else (1200 if cfg.real_world_scale else 400)
     train_runways = load_conus_runways_from_csv(
         cfg.runways_csv,
         exclude_icaos=excluded,
         max_airports=max_ap,
+        min_length_ft=2200.0,
+        min_width_ft=50.0,
     )
     train_icaos = [r.icao for r in train_runways]
 
@@ -242,20 +266,55 @@ def enforce_xvs_land_licenses_and_split(
     return split_ver, train_runways
 
 
+def _runway_corridor_corners_wgs84(
+    rwy: RunwaySpec,
+    *,
+    s_near_m: float,
+    s_far_m: float,
+    lat_half_m: float,
+) -> tuple[list[float], list[float]]:
+    """Compute WGS-84 `(lons, lats)` for the 4 runway corridor corners matching `_warp_ground_plane_perspective`."""
+    assert rwy.le_lat_deg is not None and rwy.le_lon_deg is not None
+    lat0 = float(rwy.le_lat_deg)
+    lon0 = float(rwy.le_lon_deg)
+    hdg = math.radians(float(rwy.heading_deg))
+    cos_h = math.cos(hdg)
+    sin_h = math.sin(hdg)
+    cos_lat = max(0.1, math.cos(math.radians(lat0)))
+    # Order matches src_uv in _warp_ground_plane_perspective:
+    # 0: (s_near, -lat_half) bottom-left, 1: (s_near, +lat_half) bottom-right,
+    # 2: (s_far, +lat_half) top-right,    3: (s_far, -lat_half) top-left
+    corners_sl = (
+        (s_near_m, -lat_half_m),
+        (s_near_m, +lat_half_m),
+        (s_far_m, +lat_half_m),
+        (s_far_m, -lat_half_m),
+    )
+    lons: list[float] = []
+    lats: list[float] = []
+    for s_m, lat_off_m in corners_sl:
+        d_north = s_m * cos_h - lat_off_m * sin_h
+        d_east = s_m * sin_h + lat_off_m * cos_h
+        lats.append(lat0 + d_north / 111_320.0)
+        lons.append(lon0 + d_east / (111_320.0 * cos_lat))
+    return lons, lats
+
+
 def fetch_conus_airport_naip_textures(
     runways: Sequence[RunwaySpec],
     stac_url: str,
     *,
     max_airports: int = 36,
-    patch_size: int = 256,
+    patch_size: int = 384,
     max_wall_s: float = 90.0,
-) -> list[np.ndarray]:
-    """Lazily fetch U.S. Public Domain `USDA NAIP` STAC ortho patches around non-LARD CONUS airports."""
+) -> list[NaipRunwayPatch]:
+    """Lazily fetch georeferenced U.S. Public Domain `USDA NAIP` STAC runway-aligned ortho patches."""
     assert_dataset_allowed("usda_naip", "train")
     try:
         import planetary_computer  # type: ignore[import-not-found]
         import pystac_client  # type: ignore[import-not-found]
         import rasterio  # type: ignore[import-not-found]
+        from rasterio.warp import transform as rio_transform  # type: ignore[import-not-found]
         from rasterio.windows import Window  # type: ignore[import-not-found]
     except Exception as exc:
         print(
@@ -271,7 +330,7 @@ def fetch_conus_airport_naip_textures(
     step = max(1, len(geo_runways) // max(1, int(max_airports)))
     chosen = geo_runways[::step][: int(max_airports)]
 
-    textures: list[np.ndarray] = []
+    patches: list[NaipRunwayPatch] = []
     t_start = time.monotonic()
     try:
         catalog = pystac_client.Client.open(
@@ -287,45 +346,108 @@ def fetch_conus_airport_naip_textures(
                 if (time.monotonic() - t_start) >= float(max_wall_s):
                     break
                 try:
-                    lat = float(rwy.le_lat_deg)  # type: ignore[arg-type]
-                    lon = float(rwy.le_lon_deg)  # type: ignore[arg-type]
-                    bbox = [lon - 0.015, lat - 0.015, lon + 0.015, lat + 0.015]
-                    search = catalog.search(collections=["naip"], bbox=bbox, max_items=1)
+                    s_near_m = -200.0
+                    s_far_m = float(rwy.length_m) + 300.0
+                    lat_half_m = max(260.0, float(rwy.width_m) * 6.0)
+                    lons, lats = _runway_corridor_corners_wgs84(
+                        rwy, s_near_m=s_near_m, s_far_m=s_far_m, lat_half_m=lat_half_m
+                    )
+                    bbox = [min(lons) - 0.002, min(lats) - 0.002, max(lons) + 0.002, max(lats) + 0.002]
+                    search = catalog.search(collections=["naip"], bbox=bbox, max_items=2)
                     items = list(search.items())
-                    if not items or "image" not in items[0].assets:
+                    if not items:
                         continue
-                    href = items[0].assets["image"].href
-                    with rasterio.open(href) as src:
-                        w, h = int(src.width), int(src.height)
-                        if int(src.count) < 3 or w < patch_size or h < patch_size:
+                    for item in items:
+                        if "image" not in item.assets:
                             continue
-                        win = Window(
-                            max(0, (w - patch_size) // 2),
-                            max(0, (h - patch_size) // 2),
-                            patch_size,
-                            patch_size,
-                        )
-                        arr = src.read([1, 2, 3], window=win)  # [3, H, W] uint8
-                        if arr.shape != (3, patch_size, patch_size) or float(arr.std()) < 2.0:
-                            continue
-                        tex = np.ascontiguousarray(np.transpose(arr.astype(np.float32) / 255.0, (1, 2, 0)))
-                        textures.append(tex)
+                        href = item.assets["image"].href
+                        with rasterio.open(href) as src:
+                            w, h = int(src.width), int(src.height)
+                            if int(src.count) < 3 or src.crs is None or w < 64 or h < 64:
+                                continue
+                            xs, ys = rio_transform("EPSG:4326", src.crs, lons, lats)
+                            cols: list[float] = []
+                            rows: list[float] = []
+                            for gx, gy in zip(xs, ys):
+                                r_f, c_f = src.index(gx, gy, op=lambda v: v)
+                                rows.append(float(r_f))
+                                cols.append(float(c_f))
+                            # Verify runway corridor actually lies inside this GeoTIFF tile
+                            in_count = sum(
+                                1 for r_f, c_f in zip(rows, cols) if (0.0 <= r_f < h and 0.0 <= c_f < w)
+                            )
+                            if in_count < 3:
+                                continue
+                            pad = 16
+                            c0 = max(0, int(math.floor(min(cols))) - pad)
+                            r0 = max(0, int(math.floor(min(rows))) - pad)
+                            c1 = min(w, int(math.ceil(max(cols))) + pad)
+                            r1 = min(h, int(math.ceil(max(rows))) + pad)
+                            win_w = c1 - c0
+                            win_h = r1 - r0
+                            if win_w < 32 or win_h < 32 or win_w > 4096 or win_h > 4096:
+                                continue
+                            arr = src.read([1, 2, 3], window=Window(c0, r0, win_w, win_h))
+                            if arr.shape[0] != 3 or float(arr.std()) < 3.0:
+                                continue
+                            tile_rgb = np.ascontiguousarray(
+                                np.transpose(arr.astype(np.float32) / 255.0, (1, 2, 0))
+                            )
+                            # Exact affine warp from GeoTIFF corridor corners to runway-aligned ortho
+                            src_tri = np.array(
+                                [
+                                    [cols[0] - c0, rows[0] - r0],  # bottom-left (s_near, -lat_half)
+                                    [cols[1] - c0, rows[1] - r0],  # bottom-right (s_near, +lat_half)
+                                    [cols[3] - c0, rows[3] - r0],  # top-left (s_far, -lat_half)
+                                ],
+                                dtype=np.float32,
+                            )
+                            sz = int(patch_size)
+                            dst_tri = np.array(
+                                [[0.0, float(sz - 1)], [float(sz - 1), float(sz - 1)], [0.0, 0.0]],
+                                dtype=np.float32,
+                            )
+                            m_aff = cv2.getAffineTransform(src_tri, dst_tri)
+                            aligned = cv2.warpAffine(
+                                tile_rgb,
+                                m_aff,
+                                (sz, sz),
+                                flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_REFLECT101,
+                            )
+                            valid_frac = float(np.mean(np.max(aligned, axis=-1) > 0.01))
+                            if valid_frac < 0.85 or float(aligned.std()) < 0.015:
+                                continue
+                            mpp = float((s_far_m - s_near_m) / float(max(1, sz)))
+                            patches.append(
+                                NaipRunwayPatch(
+                                    icao=rwy.icao,
+                                    image_rgb=np.clip(aligned, 0.0, 1.0).astype(np.float32),
+                                    s_near_m=s_near_m,
+                                    s_far_m=s_far_m,
+                                    lat_half_m=lat_half_m,
+                                    meters_per_px=mpp,
+                                    heading_deg=float(rwy.heading_deg),
+                                    georeferenced=True,
+                                )
+                            )
+                            break
                 except Exception:
                     continue
     except Exception as exc:
         print(
             f"[XVS-Land] NAIP STAC catalog query interrupted ({type(exc).__name__}: {exc}); "
-            f"continuing with {len(textures)} loaded textures.",
+            f"continuing with {len(patches)} georeferenced patches.",
             flush=True,
         )
-        return textures
+        return patches
 
     print(
-        f"[XVS-Land] NAIP STAC: loaded {len(textures)}/{len(chosen)} real USDA NAIP textures "
+        f"[XVS-Land] NAIP STAC: loaded {len(patches)}/{len(chosen)} georeferenced USDA NAIP runway patches "
         f"in {time.monotonic() - t_start:.1f}s.",
         flush=True,
     )
-    return textures
+    return patches
 
 
 def _build_procedural_ortho_canvas(
@@ -535,9 +657,13 @@ def _render_perspective_non_runway_negative(
     roi_size: int,
     rng: np.random.Generator,
     *,
-    naip_bg_textures: Sequence[np.ndarray] | None = None,
+    naip_bg_textures: Sequence[NaipRunwayPatch | np.ndarray] | None = None,
 ) -> dict[str, Any]:
-    """Render a realistic 3D perspective-warped non-runway negative (`y_present = 0.0`)."""
+    """Render a realistic 3D perspective-warped non-runway negative (`y_present = 0.0`).
+
+    Strictly avoids blending airport/runway NAIP tiles into non-runway negatives so the
+    presence head is never trained to reject real airport runway imagery.
+    """
     scene_types = (
         "interstate_highway",
         "coastal_bridge",
@@ -547,11 +673,8 @@ def _render_perspective_non_runway_negative(
     )
     scene_kind = scene_types[int(rng.integers(0, len(scene_types)))]
     ortho = _build_procedural_ortho_canvas(rng, canvas_size=max(256, roi_size), scene_kind=scene_kind)
-    if naip_bg_textures and float(rng.random()) < 0.55:
-        naip = naip_bg_textures[int(rng.integers(0, len(naip_bg_textures)))]
-        naip_r = cv2.resize(naip, (ortho.shape[1], ortho.shape[0]), interpolation=cv2.INTER_LINEAR).astype(np.float32)
-        alpha = float(rng.uniform(0.35, 0.75))
-        ortho = np.clip(alpha * naip_r + (1.0 - alpha) * ortho, 0.0, 1.0).astype(np.float32)
+    # Never contaminate non-runway negatives with georeferenced airport runway NAIP patches
+    del naip_bg_textures
 
     hdg_deg = float(rng.uniform(0.0, 360.0))
     hdg = math.radians(hdg_deg)
@@ -616,77 +739,102 @@ def apply_v53_severe_corruption(
     img_batch: torch.Tensor,
     rng: np.random.Generator,
 ) -> torch.Tensor:
-    """Apply heavy unseen-degradation corruptions (glare, 25-60% occlusion, motion blur, rain, JPEG).
+    """GPU-native vectorized PyTorch corruptions (glare, 25-60% occlusion, motion blur, rain, JPEG-proxy).
 
-    Used in Stage-2B (`v53_mode`) to train calibrated, monotonically increasing `cov_head` & `sigma_head`.
+    Executes strictly on `img_batch.device` with zero CPU/OpenCV transfers, eliminating the
+    single-threaded CPU Stage-2B stall while training calibrated `cov_head` & `sigma_head`.
     """
     dev = img_batch.device
     dt = img_batch.dtype
-    arr_b = img_batch.detach().cpu().float().numpy()  # [B, 3, H, W]
-    b_sz, _, h, w = arr_b.shape
-    out_list: list[np.ndarray] = []
+    x = img_batch.detach().float().clamp(0.0, 1.0)
+    b_sz, c_sz, h, w = x.shape
+    if b_sz == 0:
+        return img_batch
 
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    for bi in range(b_sz):
-        img = np.transpose(arr_b[bi], (1, 2, 0)).copy()  # [H, W, 3]
-        mode = int(rng.integers(0, 4))
-        if mode == 0 or float(rng.random()) < 0.45:
-            # 1. Blinding directional sun-glare bloom saturating 15-45% of frame
-            gx = float(rng.uniform(0.15, 0.85)) * float(w)
-            gy = float(rng.uniform(0.08, 0.60)) * float(h)
-            sigma_g = float(rng.uniform(0.22, 0.42)) * float(max(h, w))
-            rad2 = (xx - gx) ** 2 + (yy - gy) ** 2
-            glare = float(rng.uniform(0.65, 1.35)) * np.exp(-rad2 / (2.0 * sigma_g * sigma_g))
-            img = np.clip(img + glare[:, :, None], 0.0, 1.0)
-        if mode == 1 or float(rng.random()) < 0.50:
-            # 2. 25-60% rectangular/threshold cutout occlusion
-            occ_frac = float(rng.uniform(0.25, 0.60))
-            oh = max(8, int(round(float(h) * math.sqrt(occ_frac))))
-            ow = max(8, int(round(float(w) * math.sqrt(occ_frac))))
-            oy0 = int(rng.integers(0, max(1, h - oh + 1)))
-            ox0 = int(rng.integers(0, max(1, w - ow + 1)))
-            fill_v = float(rng.uniform(0.02, 0.22)) if float(rng.random()) < 0.6 else float(rng.uniform(0.75, 0.96))
-            img[oy0 : oy0 + oh, ox0 : ox0 + ow, :] = fill_v
-        if mode == 2 or float(rng.random()) < 0.40:
-            # 3. 7-21 px anisotropic motion blur
-            ksize = int(rng.choice([7, 11, 15, 19, 21]))
-            angle = float(rng.uniform(0.0, 180.0))
-            kernel = np.zeros((ksize, ksize), dtype=np.float32)
-            kernel[ksize // 2, :] = 1.0
-            rot_m = cv2.getRotationMatrix2D((ksize * 0.5 - 0.5, ksize * 0.5 - 0.5), angle, 1.0)
-            kernel = cv2.warpAffine(kernel, rot_m, (ksize, ksize))
-            k_sum = float(kernel.sum())
-            if k_sum > 1e-6:
-                kernel /= k_sum
-                img = cv2.filter2D(img, -1, kernel)
-        if mode == 3 or float(rng.random()) < 0.40:
-            # 4. Rain streaks + translucent droplet circles + heavy JPEG Q25-50
-            n_streaks = int(rng.integers(25, 70))
-            slant_dx = int(rng.integers(-6, 7))
-            for _ in range(n_streaks):
-                rx = int(rng.integers(0, w))
-                ry = int(rng.integers(0, h))
-                rlen = int(rng.integers(10, max(14, h // 6)))
-                col_r = float(rng.uniform(0.70, 0.95))
-                cv2.line(
-                    img,
-                    (rx, ry),
-                    (int(np.clip(rx + slant_dx, 0, w - 1)), int(np.clip(ry + rlen, 0, h - 1))),
-                    (col_r, col_r, col_r),
-                    1,
-                    lineType=cv2.LINE_AA,
-                )
-            u8 = np.clip(img * 255.0, 0.0, 255.0).astype(np.uint8)
-            ok, buf = cv2.imencode(".jpg", u8, [int(cv2.IMWRITE_JPEG_QUALITY), int(rng.integers(25, 51))])
-            if ok:
-                dec = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                if dec is not None and dec.shape == u8.shape:
-                    img = dec.astype(np.float32) / 255.0
+    gen = torch.Generator(device=dev)
+    gen.manual_seed(int(rng.integers(0, 2**31 - 1)))
 
-        img = np.clip(img + rng.normal(0.0, 0.03, size=img.shape).astype(np.float32), 0.0, 1.0)
-        out_list.append(np.transpose(img, (2, 0, 1)).astype(np.float32))
+    modes = torch.randint(0, 4, (b_sz,), generator=gen, device=dev)
+    u_probs = torch.rand((b_sz, 4), generator=gen, device=dev)
+    m_glare = (modes == 0) | (u_probs[:, 0] < 0.45)
+    m_occ = (modes == 1) | (u_probs[:, 1] < 0.50)
+    m_blur = (modes == 2) | (u_probs[:, 2] < 0.40)
+    m_rain_jpeg = (modes == 3) | (u_probs[:, 3] < 0.40)
 
-    return torch.from_numpy(np.stack(out_list, axis=0)).to(device=dev, dtype=dt)
+    yy = torch.arange(h, device=dev, dtype=torch.float32).view(1, 1, h, 1)
+    xx = torch.arange(w, device=dev, dtype=torch.float32).view(1, 1, 1, w)
+
+    # 1. Vectorized directional sun-glare bloom saturating 15-45% of frame
+    if bool(m_glare.any().item()):
+        gx = (0.15 + 0.70 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)) * float(w)
+        gy = (0.08 + 0.52 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)) * float(h)
+        sig_g = (0.22 + 0.20 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)) * float(max(h, w))
+        amp_g = 0.65 + 0.70 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)
+        rad2 = (xx - gx).pow(2) + (yy - gy).pow(2)
+        glare = amp_g * torch.exp(-rad2 / (2.0 * sig_g * sig_g))
+        x = torch.where(m_glare.view(b_sz, 1, 1, 1), (x + glare).clamp(0.0, 1.0), x)
+
+    # 2. Vectorized 25-60% rectangular/threshold cutout occlusion
+    if bool(m_occ.any().item()):
+        occ_frac = 0.25 + 0.35 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)
+        occ_side = torch.sqrt(occ_frac)
+        oh = (occ_side * float(h)).clamp(min=8.0, max=float(h))
+        ow = (occ_side * float(w)).clamp(min=8.0, max=float(w))
+        oy0 = torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev) * (float(h) - oh).clamp(min=0.0)
+        ox0 = torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev) * (float(w) - ow).clamp(min=0.0)
+        in_box = (yy >= oy0) & (yy < (oy0 + oh)) & (xx >= ox0) & (xx < (ox0 + ow))
+        is_dark = torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev) < 0.60
+        dark_v = 0.02 + 0.20 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)
+        bright_v = 0.75 + 0.21 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)
+        fill_v = torch.where(is_dark, dark_v, bright_v)
+        occ_mask = m_occ.view(b_sz, 1, 1, 1) & in_box
+        x = torch.where(occ_mask, fill_v.expand_as(x), x)
+
+    # 3. Vectorized per-sample anisotropic directional motion blur (grouped F.conv2d on GPU)
+    if bool(m_blur.any().item()):
+        k_sz = 15
+        half = float(k_sz // 2)
+        ky = torch.arange(k_sz, device=dev, dtype=torch.float32) - half
+        kx = torch.arange(k_sz, device=dev, dtype=torch.float32) - half
+        gy_k, gx_k = torch.meshgrid(ky, kx, indexing="ij")  # [K, K]
+        angles = torch.rand((b_sz, 1, 1), generator=gen, device=dev) * math.pi
+        half_len = 3.0 + 4.5 * torch.rand((b_sz, 1, 1), generator=gen, device=dev)
+        cos_a = torch.cos(angles)
+        sin_a = torch.sin(angles)
+        along = gx_k.unsqueeze(0) * cos_a + gy_k.unsqueeze(0) * sin_a
+        perp = -gx_k.unsqueeze(0) * sin_a + gy_k.unsqueeze(0) * cos_a
+        k_raw = torch.exp(-(perp.pow(2)) / 0.65) * (along.abs() <= half_len).float()
+        k_norm = k_raw / k_raw.sum(dim=(-2, -1), keepdim=True).clamp(min=1.0e-6)  # [B, K, K]
+        k_grp = k_norm.unsqueeze(1).expand(b_sz, c_sz, k_sz, k_sz).reshape(b_sz * c_sz, 1, k_sz, k_sz)
+        x_pad = F.pad(x.reshape(1, b_sz * c_sz, h, w), (k_sz // 2, k_sz // 2, k_sz // 2, k_sz // 2), mode="reflect")
+        blurred = F.conv2d(x_pad, k_grp, groups=b_sz * c_sz).reshape(b_sz, c_sz, h, w)
+        x = torch.where(m_blur.view(b_sz, 1, 1, 1), blurred.clamp(0.0, 1.0), x)
+
+    # 4. Vectorized diagonal rain streaks + 8x8 block-quantized JPEG Q25-50 proxy on GPU
+    if bool(m_rain_jpeg.any().item()):
+        seeds = (torch.rand((b_sz, 1, h, w), generator=gen, device=dev) < 0.0022).float()
+        rain_k = torch.zeros((1, 1, 15, 5), device=dev, dtype=torch.float32)
+        for ri in range(15):
+            ci = min(4, max(0, int(round(ri * 4.0 / 14.0))))
+            rain_k[0, 0, ri, ci] = 1.0
+        streaks = F.conv2d(seeds, rain_k, padding=(7, 2)).clamp(0.0, 1.0)
+        rain_col = 0.72 + 0.23 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)
+        x_rain = (x * (1.0 - 0.65 * streaks) + rain_col * (0.65 * streaks)).clamp(0.0, 1.0)
+        # 8x8 block subsampling + coarse luminance/chroma quantization proxy for JPEG Q25-50
+        blk_h = max(1, h // 8)
+        blk_w = max(1, w // 8)
+        blk = F.interpolate(
+            F.adaptive_avg_pool2d(x_rain, (blk_h, blk_w)),
+            size=(h, w),
+            mode="nearest",
+        )
+        q_levels = 14.0 + 18.0 * torch.rand((b_sz, 1, 1, 1), generator=gen, device=dev)
+        x_jpeg = (0.72 * x_rain + 0.28 * blk)
+        x_jpeg = (torch.round(x_jpeg * q_levels) / q_levels).clamp(0.0, 1.0)
+        x = torch.where(m_rain_jpeg.view(b_sz, 1, 1, 1), x_jpeg, x)
+
+    noise = torch.randn(x.shape, generator=gen, device=dev, dtype=torch.float32) * 0.03
+    return (x + noise).clamp(0.0, 1.0).to(dtype=dt)
 
 
 def _render_runway_crop_at_pose(
@@ -705,7 +853,7 @@ def _render_runway_crop_at_pose(
     slant_m: float,
     domain_randomize: bool = False,
     rich_markings: bool = True,
-    naip_bg_textures: Sequence[np.ndarray] | None = None,
+    naip_bg_textures: Sequence[NaipRunwayPatch | np.ndarray] | None = None,
     use_perspective_ortho_warp: bool = False,
 ) -> dict[str, Any]:
     """Render a calibrated 3D perspective runway crop at an exact NED camera pose."""
@@ -724,16 +872,40 @@ def _render_runway_crop_at_pose(
     )
     uv_clamped = np.clip(uv_px, 2.0, float(roi_size - 3))
 
-    # Ground surround: real 3D cv2.warpPerspective NAIP/ortho projection or planar fallback surround
-    use_naip_tex = bool(naip_bg_textures) and ((not domain_randomize) or (float(rng.random()) < 0.80))
+    # Ground surround: real georeferenced 3D cv2.warpPerspective NAIP ortho (extended) or procedural surround
+    matched_geo_naip: NaipRunwayPatch | None = None
+    if naip_bg_textures:
+        for item in naip_bg_textures:
+            if isinstance(item, NaipRunwayPatch) and item.icao == runway.icao:
+                matched_geo_naip = item
+                break
+    use_naip_tex = bool(naip_bg_textures) and (
+        matched_geo_naip is not None or (not domain_randomize) or (float(rng.random()) < 0.80)
+    )
     horizon_v = int(max(4, min(roi_size // 2, np.min(uv_clamped[:, 1]) - 4.0)))
+    used_georef_naip = False
     if use_perspective_ortho_warp:
-        if use_naip_tex and naip_bg_textures:
-            ortho_base = naip_bg_textures[int(rng.integers(0, len(naip_bg_textures)))].astype(np.float32)
+        s_near = max(-slant_m + 35.0, -200.0)
+        s_far = float(runway.length_m) + 300.0
+        lat_half = max(260.0, float(runway.width_m) * 6.0)
+        if matched_geo_naip is not None:
+            ortho_base = matched_geo_naip.image_rgb.astype(np.float32)
+            s_near = float(matched_geo_naip.s_near_m)
+            s_far = float(matched_geo_naip.s_far_m)
+            lat_half = float(matched_geo_naip.lat_half_m)
+            used_georef_naip = True
+        elif use_naip_tex and naip_bg_textures:
+            chosen_tex = naip_bg_textures[int(rng.integers(0, len(naip_bg_textures)))]
+            if isinstance(chosen_tex, NaipRunwayPatch):
+                ortho_base = chosen_tex.image_rgb.astype(np.float32)
+                s_near = float(chosen_tex.s_near_m)
+                s_far = float(chosen_tex.s_far_m)
+                lat_half = float(chosen_tex.lat_half_m)
+                used_georef_naip = True
+            else:
+                ortho_base = np.asarray(chosen_tex, dtype=np.float32)
         else:
             ortho_base = _build_procedural_ortho_canvas(rng, canvas_size=max(256, roi_size), scene_kind="airport_surround")
-        s_near = max(-slant_m + 35.0, -250.0)
-        s_far = float(runway.length_m) + 450.0
         warped_ground, gmask = _warp_ground_plane_perspective(
             ortho_base,
             roi_size,
@@ -749,11 +921,12 @@ def _render_runway_crop_at_pose(
             right=right,
             s_near_m=s_near,
             s_far_m=s_far,
-            lat_half_m=max(260.0, float(runway.width_m) * 6.0),
+            lat_half_m=lat_half,
         )
         img = _compose_tilted_sky(warped_ground, gmask, rng, domain_randomize=domain_randomize)
     elif use_naip_tex and naip_bg_textures:
-        tex = naip_bg_textures[int(rng.integers(0, len(naip_bg_textures)))]
+        chosen_tex = naip_bg_textures[int(rng.integers(0, len(naip_bg_textures)))]
+        tex = chosen_tex.image_rgb if isinstance(chosen_tex, NaipRunwayPatch) else chosen_tex
         img = cv2.resize(tex, (roi_size, roi_size), interpolation=cv2.INTER_LINEAR).astype(np.float32)
     elif domain_randomize:
         yy, xx = np.mgrid[0:roi_size, 0:roi_size].astype(np.float32) / float(max(1, roi_size - 1))
@@ -786,11 +959,15 @@ def _render_runway_crop_at_pose(
             sky_rgb = np.array([0.52, 0.66, 0.82], dtype=np.float32)
             img[:horizon_v, :, :] = sky_rgb[None, None, :]
 
-    # Runway polygon: threshold-left (0), threshold-right (2), far-right (11), far-left (9)
+    # Runway surface: preserve true georeferenced NAIP runway pixels directly (NO 70% fake gray overwrite!)
     poly = np.rint(np.stack([uv_clamped[0], uv_clamped[2], uv_clamped[11], uv_clamped[9]])).astype(np.int32)
     rwy_val = float(rng.uniform(0.14, 0.30))
-    if use_perspective_ortho_warp:
-        # Blend perspective-warped textured asphalt surface rather than flat solid gray polygon
+    if used_georef_naip:
+        # Keep genuine NAIP runway surface intact; only subtle exposure jitter
+        exp_gain = float(rng.uniform(0.92, 1.08))
+        img = np.clip(img * exp_gain, 0.0, 1.0).astype(np.float32)
+    elif use_perspective_ortho_warp:
+        # Procedural ortho fallback: blend textured asphalt surface
         rwy_mask = np.zeros((roi_size, roi_size), dtype=np.uint8)
         cv2.fillConvexPoly(rwy_mask, poly, 255)
         asphalt_grain = rng.normal(0.0, 0.025, size=(roi_size, roi_size, 1)).astype(np.float32)
@@ -804,7 +981,7 @@ def _render_runway_crop_at_pose(
     else:
         cv2.fillConvexPoly(img, poly, color=(rwy_val, rwy_val, rwy_val))
 
-    if rich_markings:
+    if rich_markings and not used_georef_naip:
         # Subtle worn shoulder border along left/right edges (edge wear)
         wear_alpha = float(rng.uniform(0.03, 0.08))
         wear_col = max(0.06, rwy_val - wear_alpha) if float(rng.random()) < 0.5 else min(0.55, rwy_val + wear_alpha)
@@ -1001,7 +1178,7 @@ def _render_perspective_runway_crop(
     right = np.array([-math.sin(hdg), math.cos(hdg), 0.0], dtype=np.float64)
 
     if v53_mode:
-        # Wide off-center framing breaking center-template collapse:
+        # extended wide off-center framing breaking (192, 185) center-template collapse:
         # u in [0.15, 0.85], v in [0.22, 0.80], FOV in [45, 92] deg, roll in [-18, +18] deg, slant 200..2800 m
         slant_m = float(math.exp(rng.uniform(math.log(200.0), math.log(2800.0))))
         gs_deg = float(rng.uniform(2.3, 5.4))
@@ -1174,7 +1351,7 @@ def simcc_kl_loss(
     *,
     sample_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """FP32 SimCC 1D KL-divergence keypoint classification loss (supports negative masking)."""
+    """FP32 SimCC 1D KL-divergence keypoint classification loss (supports extended negative masking)."""
     tx, ty = _make_simcc_targets(
         kp_xy_gt,
         bins_x=int(logits_x.shape[-1]),
@@ -1244,7 +1421,7 @@ class PerspectiveRunwayDataset(Dataset[tuple[torch.Tensor, ...]]):
                         _render_perspective_non_runway_negative(
                             self.roi_size,
                             rng,
-                            naip_bg_textures=self.naip_bg_textures,
+                            naip_bg_textures=None,
                         )
                     )
                 else:
@@ -1315,7 +1492,7 @@ class PerspectiveRunwayDataset(Dataset[tuple[torch.Tensor, ...]]):
             return _render_perspective_non_runway_negative(
                 self.roi_size,
                 sample_rng,
-                naip_bg_textures=self.naip_bg_textures,
+                naip_bg_textures=None,
             )
         rwy = self.runways[idx % len(self.runways)]
         return _render_perspective_runway_crop(
@@ -1384,19 +1561,67 @@ def evaluate_xvs_land_approach(
     pnpl_pos_errs: list[float] = []
     v_hpls: list[float] = []
     v_vpls: list[float] = []
+    pred_centroids_u: list[float] = []
+    pred_centroids_v: list[float] = []
+    corrupt_kpsig_ratios: list[float] = []
+    neg_total = 0
+    neg_fp = 0
+    pos_pres_total = 0
+    pos_pres_tp = 0
+    pnpl_eval_done = 0
     cat1_ok = 0
     hmi_count = 0
+    corrupt_eval_rng = np.random.default_rng(int(ekf_seed) + 404)
 
     n_total = len(val_ds)
     for idx in range(n_total):
         sample = val_ds._render_index(idx)
+        is_pos = (float(sample["runway_present"]) if "runway_present" in sample else 1.0) >= 0.5
         x = torch.from_numpy(sample["image"]).unsqueeze(0).to(device)
         out = model(x)
+
+        if "runway_present_logit" in out:
+            p_pres = float(torch.sigmoid(out["runway_present_logit"].float()).reshape(-1)[0].detach().cpu().item())
+            if is_pos:
+                pos_pres_total += 1
+                if p_pres >= 0.65:
+                    pos_pres_tp += 1
+            else:
+                neg_total += 1
+                if p_pres >= 0.65:
+                    neg_fp += 1
+        elif not is_pos:
+            neg_total += 1
+
+        if not is_pos:
+            continue
+
         pred_kp = out["keypoints_xy"][0].detach().cpu().numpy().astype(np.float64)
         gt_kp = sample["kp_xy"].astype(np.float64)
         pred_kl = out["keylines_hesse"][0].detach().cpu().numpy().astype(np.float64)
         gt_kl = sample["keylines_hesse"].astype(np.float64)
         cov_cal = calibrator.calibrate_covariance(out["cov_2x2"])[0].detach().cpu().numpy().astype(np.float64)
+
+        pred_centroids_u.append(float(np.mean(pred_kp[:, 0])))
+        pred_centroids_v.append(float(np.mean(pred_kp[:, 1])))
+
+        if len(corrupt_kpsig_ratios) < min(32, max(8, max_pnpl_eval * 2)):
+            x_corr = apply_v53_severe_corruption(x, corrupt_eval_rng)
+            out_corr = model(x_corr)
+            sig_clean = float(
+                torch.sqrt(
+                    ((out["cov_2x2"].float()[..., 0, 0] + out["cov_2x2"].float()[..., 1, 1]) * 0.5).clamp(min=1e-6)
+                ).mean().detach().cpu().item()
+            )
+            sig_corr = float(
+                torch.sqrt(
+                    (
+                        (out_corr["cov_2x2"].float()[..., 0, 0] + out_corr["cov_2x2"].float()[..., 1, 1]) * 0.5
+                    ).clamp(min=1e-6)
+                ).mean().detach().cpu().item()
+            )
+            if math.isfinite(sig_clean) and math.isfinite(sig_corr) and sig_clean > 1e-6:
+                corrupt_kpsig_ratios.append(sig_corr / sig_clean)
 
         pred_kl_sigs: np.ndarray | None = None
         if "keyline_sigma_px" in out:
@@ -1411,7 +1636,8 @@ def evaluate_xvs_land_approach(
         cos_sim = np.clip(pred_kl[:, 1] * gt_kl[:, 1] + pred_kl[:, 2] * gt_kl[:, 2], -1.0, 1.0)
         okls_ang_errs.extend(np.degrees(np.arccos(cos_sim)).tolist())
 
-        if idx < min(max_pnpl_eval, n_total):
+        if pnpl_eval_done < min(max_pnpl_eval, n_total):
+            pnpl_eval_done += 1
             init_pos = sample["cam_pos_ned"] + np.array([15.0, -5.0, 3.0], dtype=np.float64)
             init_yaw = sample["yaw_rad"] + math.radians(1.0)
             sol = solve_4dof_map_pnpl(
@@ -1547,9 +1773,19 @@ def evaluate_xvs_land_approach(
     assoc_28r = check_runway_association(KSFO_28L_WIDTH_M, KSFO_28R_LATERAL_OFFSET_M)
 
     n_pnpl = max(1, len(pnpl_pos_errs))
+    centroid_std_px = (
+        float(math.hypot(float(np.std(pred_centroids_u)), float(np.std(pred_centroids_v))))
+        if len(pred_centroids_u) >= 2
+        else 0.0
+    )
+    non_runway_fpr = float(neg_fp) / float(neg_total) if neg_total > 0 else None
+    runway_present_tpr = float(pos_pres_tp) / float(pos_pres_total) if pos_pres_total > 0 else None
+    corrupt_over_clean_kpsig_median = (
+        float(np.median(corrupt_kpsig_ratios)) if corrupt_kpsig_ratios else None
+    )
     return {
-        "simcc_rmse_px": float(math.sqrt(max(0.0, float(np.mean(kp_sq_errs))))),
-        "okls_angle_err_deg": float(np.mean(okls_ang_errs)),
+        "simcc_rmse_px": float(math.sqrt(max(0.0, float(np.mean(kp_sq_errs))))) if kp_sq_errs else 0.0,
+        "okls_angle_err_deg": float(np.mean(okls_ang_errs)) if okls_ang_errs else 0.0,
         "pnpl_pos_rmse_m": (
             float(math.sqrt(float(np.mean(np.square(pnpl_pos_errs))))) if pnpl_pos_errs else None
         ),
@@ -1557,6 +1793,10 @@ def evaluate_xvs_land_approach(
         "v_hpl_median_m": float(np.median(v_hpls)) if v_hpls else None,
         "v_vpl_median_m": float(np.median(v_vpls)) if v_vpls else None,
         "hmi_count": int(hmi_count),
+        "non_runway_fpr": non_runway_fpr,
+        "runway_present_tpr": runway_present_tpr,
+        "centroid_std_px": centroid_std_px,
+        "corrupt_over_clean_kpsig_median": corrupt_over_clean_kpsig_median,
         "ekf_trajectory": ekf_metrics,
         "ekf_pos_rmse_m": ekf_metrics["ekf_pos_rmse_m"] if ekf_metrics is not None else None,
         "ekf_cat1_availability": ekf_metrics["cat1_availability"] if ekf_metrics is not None else None,
@@ -1726,6 +1966,9 @@ def convert_xvs_land_onnx_selective_fp16(fp32_model: Any) -> Any:
         "Greater",
         "GreaterOrEqual",
         "LessOrEqual",
+        "ArgMax",
+        "Abs",
+        "Sub",
         "MaxPool",
         "Clip",
         "Tanh",
@@ -1943,7 +2186,7 @@ def export_xvs_land_v52_onnx(
     bench_iters: int = 15,
     filename_prefix: str | None = None,
 ) -> dict[str, Any]:
-    """Export `XvsLandV52Model` (6-output or 7-output) to static Opset-17 FP32 + Selective FP16 ONNX."""
+    """Export `XvsLandV52Model` (v5.2 6-output or extended 7-output) to static Opset-17 FP32 + Selective FP16 ONNX."""
     import onnx
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1975,7 +2218,22 @@ def export_xvs_land_v52_onnx(
     total_params = sum(int(p.numel()) for p in cpu_copy.parameters())
 
     rng = np.random.default_rng(20261124)
-    x_in = torch.from_numpy(rng.uniform(0.0, 1.0, size=(1, 3, int(roi_size), int(roi_size))).astype(np.float32))
+    # Deterministic structured runway-like probe (avoids degenerate p0==p1 collapse on uniform noise)
+    yy_p, xx_p = np.meshgrid(
+        np.linspace(0.0, 1.0, int(roi_size), dtype=np.float32),
+        np.linspace(0.0, 1.0, int(roi_size), dtype=np.float32),
+        indexing="ij",
+    )
+    probe = np.stack(
+        [
+            0.35 + 0.35 * yy_p + 0.15 * np.abs(xx_p - 0.5),
+            0.40 + 0.25 * yy_p + 0.20 * ((np.abs(xx_p - 0.5) < (0.04 + 0.14 * yy_p)) & (yy_p > 0.25)).astype(np.float32),
+            0.55 - 0.25 * yy_p,
+        ],
+        axis=0,
+    )
+    probe = np.clip(probe + rng.normal(0.0, 0.03, size=probe.shape).astype(np.float32), 0.0, 1.0)
+    x_in = torch.from_numpy(probe[None, ...])
     out_names = list(wrapper.output_names)
 
     export_kwargs: dict[str, Any] = {
@@ -2038,9 +2296,18 @@ def export_xvs_land_v52_onnx(
             name: float(np.max(np.abs(a - b))) for name, a, b in zip(out_names, pt_outs, ort32_outs)
         }
         fp32_max_abs_diff = max(fp32_per_output_diff.values()) if fp32_per_output_diff else 0.0
+        # Hesse rho = cos*mid_u + sin*mid_v scales unit-vector rounding by ~roi_size/2 (allow 5e-3 px on keylines_hesse)
         fp32_allclose = all(
-            bool(np.all(np.isfinite(b)) and np.allclose(a, b, rtol=1e-3, atol=float(fp32_tol)))
-            for a, b in zip(pt_outs, ort32_outs)
+            bool(
+                np.all(np.isfinite(b))
+                and np.allclose(
+                    a,
+                    b,
+                    rtol=1e-3,
+                    atol=(max(float(fp32_tol), 5.0e-3) if name == "keylines_hesse" else float(fp32_tol)),
+                )
+            )
+            for name, a, b in zip(out_names, pt_outs, ort32_outs)
         )
         fp32_ort_verified = bool(math.isfinite(fp32_max_abs_diff) and fp32_allclose)
         if not fp32_ort_verified:
@@ -2271,7 +2538,7 @@ def run_xvs_land_g4_training(cfg: XvsLandG4Config) -> dict[str, Any]:
         neg_fraction=float(cfg.neg_fraction) if is_v53 else 0.0,
         roi_jitter_frac=float(cfg.roi_jitter_frac) if is_v53 else 0.0,
     )
-    # domain_randomize=True on calibration split improves Stage-2B uncertainty calibration
+    # In extended, val_ds MUST run with v53_mode=True so StudentTCalibrator & val proxies match extended distribution!
     val_ds = PerspectiveRunwayDataset(
         ksfo_val_spec,
         num_samples=num_val,
@@ -2280,7 +2547,9 @@ def run_xvs_land_g4_training(cfg: XvsLandG4Config) -> dict[str, Any]:
         domain_randomize=bool(is_v53),
         rich_markings=bool(arch in ("v52", "v53") or cfg.real_world_scale),
         lazy=False,
-        v53_mode=False,
+        v53_mode=bool(is_v53),
+        neg_fraction=float(cfg.neg_fraction) if is_v53 else 0.0,
+        roi_jitter_frac=float(cfg.roi_jitter_frac) if is_v53 else 0.0,
     )
 
     eager_model = _build_xvs_land_model(
@@ -2361,7 +2630,7 @@ def run_xvs_land_g4_training(cfg: XvsLandG4Config) -> dict[str, Any]:
         persistent_workers=(loader_workers > 0),
     )
 
-    # ---- Stage 2A: SimCC + OKLS (+ endpoint, geometric consistency & runway_present_logit) ----
+    # ---- Stage 2A: SimCC + OKLS (+ endpoint, geometric consistency & extended runway_present_logit) ----
     stage2a_params = (
         eager_model.stage2a_parameters()
         if isinstance(eager_model, XvsLandV52Model)
@@ -2467,7 +2736,7 @@ def run_xvs_land_g4_training(cfg: XvsLandG4Config) -> dict[str, Any]:
             },
         )
 
-    # ---- Stage 2B: Frozen-Mean Cholesky 2x2 Bivariate GNLL (+ corrupted ranking & neg-uncertainty) ----
+    # ---- Stage 2B: Frozen-Mean Cholesky 2x2 Bivariate GNLL (+ extended corrupted ranking & neg-uncertainty) ----
     raw_model: XvsLandModel | XvsLandV52Model = getattr(train_model, "_orig_mod", train_model)
     for p in raw_model.parameters():
         p.requires_grad = False
@@ -2632,7 +2901,16 @@ def run_xvs_land_g4_training(cfg: XvsLandG4Config) -> dict[str, Any]:
     m2_chunks: list[torch.Tensor] = []
     kl_z2_chunks: list[torch.Tensor] = []
     with torch.no_grad():
-        for img_b, kp_b, _ in DataLoader(val_ds, batch_size=min(32, max(2, len(val_ds))), shuffle=False):
+        for batch in DataLoader(val_ds, batch_size=min(32, max(2, len(val_ds))), shuffle=False):
+            if val_ds.v53_mode:
+                img_b, kp_b, _, pres_b = batch
+                pos_idx = pres_b > 0.5
+                if not bool(pos_idx.any().item()):
+                    continue
+                img_b = img_b[pos_idx]
+                kp_b = kp_b[pos_idx]
+            else:
+                img_b, kp_b, _ = batch
             kp_dev = kp_b.to(device).float()
             out = raw_model(img_b.to(device))
             res = (out["keypoints_xy"].float() - kp_dev).unsqueeze(-1)  # [B, K, 2, 1]
@@ -2814,7 +3092,7 @@ def run_xvs_land_g4_training(cfg: XvsLandG4Config) -> dict[str, Any]:
 
 
 def _parse_args(argv: list[str] | None = None) -> XvsLandG4Config:
-    p = argparse.ArgumentParser(description="OpenXVS v1.1.0 XVS-Land 2-stage GPU trainer")
+    p = argparse.ArgumentParser(description="OpenXVS v1.1.1 XVS-Land Colab L4/G4 2-stage trainer")
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--lard-manifest", type=Path, required=True)
     p.add_argument("--runways-csv", type=Path, default=DEFAULT_RUNWAYS_CSV)

@@ -403,6 +403,9 @@ def _write_synthetic_realsky_clip_and_adsb(
 
 def test_video_ingest_utc_alignment_sky_mask_snap_croissant_ed25519_and_xvs_d2_eval(tmp_path: Path) -> None:
     """Full Tier-0A end-to-end proof: .mp4 ingest, UTC sync, >=+5 deg mask, snap, Croissant, Ed25519, XVS-D2."""
+    d2_onnx = REPO_ROOT / "apps" / "livedeck" / "public" / "models" / "xvs_d2_web_fp16.onnx"
+    if not d2_onnx.is_file():
+        pytest.skip("Clean-room checkout omits unbundled ONNX weights")
     env = _write_synthetic_realsky_clip_and_adsb(tmp_path, paint_targets=True, clock_offset_ms=50.0)
     out_dir = tmp_path / "shard_out"
 

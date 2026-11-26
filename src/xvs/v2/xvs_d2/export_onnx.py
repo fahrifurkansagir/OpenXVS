@@ -407,6 +407,7 @@ def export_xvs_d2_web_onnx(
     return {
         "opset": 17,
         "input_hw": [h, w],
+        "h_prev_shape": [1, int(model.spec.c_gru), h // 4, w // 4],
         "fp32_onnx_path": str(fp32_path),
         "fp32_onnx_bytes": fp32_bytes,
         "fp32_onnx_sha256": _file_sha256(fp32_path),

@@ -1,12 +1,13 @@
 /**
- * OpenXVS Studio v5.0 Core 3D PBR + Physical Atmosphere + 3D Cockpit Engine (`Three.js`).
+ * OpenXVS Studio Core 3D PBR + Physical Atmosphere + 3D Cockpit Engine (`Three.js`).
  *
  * - Default Mode: `photoreal` (`Gerçek Dünya / Photorealistic`, Golden Hour Daylight 16.5h)
  *   with 1-click switch to `obsidian` (`Taktik Opsidyen`).
  * - Physical Preetham/Rayleigh+Mie sky dome + 3D Volumetric Cumulus Cloud Deck (`atmosphere_world.ts`).
- * - Throttled live `PMREMGenerator` IBL updates on sun-angle or mode changes (>= 60 FPS!).
- * - Restrained daylight bloom (`threshold: 0.92, strength: 0.24` in Photoreal vs `0.78 / 0.55` in Obsidian).
- * - Interactive 3D Cockpit Interior (`cockpit_rig.ts`) mounted inside ownship ONLY for Camera `4` (`Kokpit`).
+ * - Throttled live `PMREMGenerator` IBL updates with full `WebGLRenderTarget` disposal (zero FBO leaks).
+ * - Accurate post-RenderPass scene `drawCalls` telemetry + smooth `camera.setViewOffset` framing
+ *   when the right sensor drawer is open in external cameras.
+ * - Deterministic `dispose()` lifecycle with `AbortController` teardown.
  */
 
 import * as THREE from "three";
@@ -43,12 +44,12 @@ export interface StudioEngineStats {
   readonly drawCalls: number;
 }
 
-/** Generates a dynamic PMREM environment map matched to the live solar atmosphere state. */
+/** Generates a dynamic PMREM render target matched to the live solar atmosphere state. */
 function buildAtmospherePmrem(
   pmrem: THREE.PMREMGenerator,
   lighting: AtmosphereLightingState,
   mode: VisualWorldMode,
-): THREE.Texture {
+): THREE.WebGLRenderTarget {
   const envScene = new THREE.Scene();
   const skyGeo = new THREE.SphereGeometry(50, 20, 14);
   const skyMat = new THREE.ShaderMaterial({
@@ -90,7 +91,7 @@ function buildAtmospherePmrem(
   const rt = pmrem.fromScene(envScene, 0.02);
   skyGeo.dispose();
   skyMat.dispose();
-  return rt.texture;
+  return rt;
 }
 
 export class StudioEngine {
@@ -107,14 +108,22 @@ export class StudioEngine {
   readonly intruder: IntruderHeliRig;
   readonly manifolds: SafetyManifoldsRig;
 
+  private readonly abortCtrl = new AbortController();
   private readonly pmrem: THREE.PMREMGenerator;
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly sunLight: THREE.DirectionalLight;
   private readonly rimLight: THREE.DirectionalLight;
   private readonly sceneFog: THREE.FogExp2;
-  private envTex: THREE.Texture | null = null;
+  private envRenderTarget: THREE.WebGLRenderTarget | null = null;
   private lastIblSunElev = -999;
   private lastIblMode: VisualWorldMode | null = null;
+  private lastSceneDrawCalls = 0;
+
+  private viewportW = 1280;
+  private viewportH = 800;
+  private targetDrawerOffsetPx = 0;
+  private currentDrawerOffsetPx = 0;
+  private appliedViewOffsetPx = 0;
 
   private visualMode: VisualWorldMode = "photoreal";
   private cameraPreset: StudioCameraPreset = "chase";
@@ -122,6 +131,7 @@ export class StudioEngine {
   private userDragging = false;
   private lastOwnPos = new THREE.Vector3();
   private initializedCam = false;
+  private disposed = false;
 
   // Scratch vectors
   private readonly desiredCamPos = new THREE.Vector3();
@@ -135,13 +145,15 @@ export class StudioEngine {
   constructor(canvas: HTMLCanvasElement) {
     const width = Math.max(320, canvas.clientWidth || window.innerWidth);
     const height = Math.max(240, canvas.clientHeight || window.innerHeight);
+    this.viewportW = width;
+    this.viewportH = height;
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       antialias: true,
       powerPreference: "high-performance",
-      preserveDrawingBuffer: true,
     });
+    this.renderer.info.autoReset = false;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.setSize(width, height, false);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -203,9 +215,16 @@ export class StudioEngine {
     this.manifolds = createSafetyManifoldsRig();
     this.scene.add(this.manifolds.group);
 
-    // Post-Processing: RenderPass -> Restrained Daylight / Crisp Obsidian UnrealBloomPass -> OutputPass
+    // Post-Processing: RenderPass (captures true scene drawCalls) -> UnrealBloomPass -> OutputPass
     this.composer = new EffectComposer(this.renderer);
-    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    const renderPass = new RenderPass(this.scene, this.camera);
+    const origRenderPass = renderPass.render.bind(renderPass);
+    renderPass.render = (renderer, writeBuffer, readBuffer, deltaTime, maskActive) => {
+      renderer.info.reset();
+      origRenderPass(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
+      this.lastSceneDrawCalls = renderer.info.render.calls;
+    };
+    this.composer.addPass(renderPass);
     this.bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.24, 0.38, 0.92);
     this.composer.addPass(this.bloomPass);
     this.composer.addPass(new OutputPass());
@@ -224,15 +243,61 @@ export class StudioEngine {
       this.userOrbitOffset.subVectors(this.camera.position, this.controls.target);
     });
 
-    window.addEventListener("resize", () => this.resize());
+    window.addEventListener("resize", () => this.resize(), {
+      signal: this.abortCtrl.signal,
+    });
+  }
+
+  /** Sets horizontal drawer width in px so external cameras smoothly center ownship in the unobstructed viewport. */
+  setDrawerOffsetPx(widthPx: number, immediate = false): void {
+    this.targetDrawerOffsetPx = Math.max(0, Math.min(420, widthPx));
+    if (immediate) {
+      this.currentDrawerOffsetPx = this.targetDrawerOffsetPx;
+      this.applyCameraProjectionOffset();
+    }
+  }
+
+  private applyCameraProjectionOffset(): void {
+    const desiredPx =
+      this.cameraPreset === "cockpit" ? 0 : Math.round(this.currentDrawerOffsetPx * 0.5);
+    if (desiredPx === this.appliedViewOffsetPx) return;
+    this.appliedViewOffsetPx = desiredPx;
+    if (desiredPx <= 1) {
+      this.camera.clearViewOffset();
+    } else {
+      // Positive offsetX shifts the frustum right, placing the 3D subject cleanly centered left of the drawer
+      this.camera.setViewOffset(
+        this.viewportW,
+        this.viewportH,
+        desiredPx,
+        0,
+        this.viewportW,
+        this.viewportH,
+      );
+    }
   }
 
   resize(): void {
+    if (this.disposed) return;
     const canvas = this.renderer.domElement;
     const width = Math.max(320, canvas.clientWidth || window.innerWidth);
     const height = Math.max(240, canvas.clientHeight || window.innerHeight);
+    this.viewportW = width;
+    this.viewportH = height;
     this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
+    if (this.appliedViewOffsetPx > 1 && this.cameraPreset !== "cockpit") {
+      this.camera.setViewOffset(
+        width,
+        height,
+        this.appliedViewOffsetPx,
+        0,
+        width,
+        height,
+      );
+    } else {
+      this.camera.clearViewOffset();
+      this.camera.updateProjectionMatrix();
+    }
     this.renderer.setSize(width, height, false);
     this.composer.setSize(width, height);
     this.bloomPass.setSize(width, height);
@@ -255,10 +320,10 @@ export class StudioEngine {
       this.bloomPass.radius = 0.38;
       this.renderer.toneMappingExposure = 1.08;
     } else {
-      this.bloomPass.threshold = 0.78;
-      this.bloomPass.strength = 0.55;
-      this.bloomPass.radius = 0.42;
-      this.renderer.toneMappingExposure = 1.15;
+      this.bloomPass.threshold = 0.84;
+      this.bloomPass.strength = 0.40;
+      this.bloomPass.radius = 0.38;
+      this.renderer.toneMappingExposure = 1.14;
     }
   }
 
@@ -272,7 +337,9 @@ export class StudioEngine {
     this.cockpit.setVisible(preset === "cockpit");
     if (snapImmediate) {
       this.initializedCam = false;
+      this.currentDrawerOffsetPx = preset === "cockpit" ? 0 : this.targetDrawerOffsetPx;
     }
+    this.applyCameraProjectionOffset();
   }
 
   getCameraPreset(): StudioCameraPreset {
@@ -291,11 +358,13 @@ export class StudioEngine {
       cameraPreset: this.cameraPreset,
       visualMode: this.visualMode,
       sensorDomeVisible: this.manifolds.isSensorDomeVisible(),
-      drawCalls: this.renderer.info.render.calls,
+      drawCalls: this.lastSceneDrawCalls,
     };
   }
 
   renderFrame(snap: StudioSimSnapshot, dtS: number): void {
+    if (this.disposed) return;
+
     // 1. Update Ownship & Intruder 3D Pose (Local -Z forward -> rotation.y = -headingRad)
     this.ownship.group.position.set(snap.ownship.pos.x, snap.ownship.pos.y, snap.ownship.pos.z);
     this.ownship.group.rotation.set(
@@ -324,7 +393,7 @@ export class StudioEngine {
       this.intruder.update(dtS, snap.simTimeS);
     }
 
-    // 2. Update Physical Atmosphere & Lighting + Throttled PMREM IBL
+    // 2. Update Physical Atmosphere & Lighting + Throttled PMREM IBL (disposes full RenderTarget!)
     const lighting = this.atmosphere.update(
       snap.simTimeS,
       dtS,
@@ -356,16 +425,26 @@ export class StudioEngine {
     ) {
       this.lastIblMode = this.visualMode;
       this.lastIblSunElev = lighting.sunElevationDeg;
-      const nextEnv = buildAtmospherePmrem(this.pmrem, lighting, this.visualMode);
-      this.scene.environment = nextEnv;
-      this.envTex?.dispose();
-      this.envTex = nextEnv;
+      const nextRt = buildAtmospherePmrem(this.pmrem, lighting, this.visualMode);
+      this.scene.environment = nextRt.texture;
+      this.envRenderTarget?.dispose();
+      this.envRenderTarget = nextRt;
     }
 
     // 3. Update Luminous 3D Safety Manifolds
     this.manifolds.update(snap, snap.simTimeS);
 
-    // 4. Update Cinematic Camera Rig
+    // 4. Smoothly update projection offset for open right drawer in external cameras
+    const desiredOffset = isCockpit ? 0 : this.targetDrawerOffsetPx;
+    if (Math.abs(this.currentDrawerOffsetPx - desiredOffset) > 0.5) {
+      this.currentDrawerOffsetPx +=
+        (desiredOffset - this.currentDrawerOffsetPx) * Math.min(1.0, dtS * 9.0);
+    } else {
+      this.currentDrawerOffsetPx = desiredOffset;
+    }
+    this.applyCameraProjectionOffset();
+
+    // 5. Update Cinematic Camera Rig
     const ownPos = this.ownship.group.position;
     this.fwdVec.set(Math.sin(snap.ownship.headingRad), 0, -Math.cos(snap.ownship.headingRad)).normalize();
     this.rightVec.crossVectors(this.fwdVec, this.upVec).normalize();
@@ -433,10 +512,51 @@ export class StudioEngine {
       this.camera.up.set(0, 1, 0);
     }
 
-    // 5. Update KSFO World (water waves, terrain lighting, ALSF-2 running strobes, ATC radar + beacon)
+    // 6. Update KSFO World (water waves, terrain lighting, instanced ALSF-2 strobes, ATC radar + beacon)
     this.world.update(snap.simTimeS, lighting, snap.fogDensity);
 
-    // 6. Render full PBR + restrained Bloom + ACES Filmic OutputPass
+    // 7. Render full PBR + restrained Bloom + ACES Filmic OutputPass
     this.composer.render();
+  }
+
+  /** Deterministic teardown releasing all WebGL buffers, textures, render targets, and listeners. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.abortCtrl.abort();
+    this.controls.dispose();
+    this.composer.dispose();
+    this.bloomPass.dispose();
+    this.envRenderTarget?.dispose();
+    this.envRenderTarget = null;
+    this.pmrem.dispose();
+
+    const disposedGeos = new Set<THREE.BufferGeometry>();
+    const disposedMats = new Set<THREE.Material>();
+    const disposedTexs = new Set<THREE.Texture>();
+    this.scene.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.geometry && !disposedGeos.has(mesh.geometry)) {
+        disposedGeos.add(mesh.geometry);
+        mesh.geometry.dispose();
+      }
+      const mats = Array.isArray(mesh.material)
+        ? mesh.material
+        : mesh.material
+          ? [mesh.material]
+          : [];
+      for (const m of mats) {
+        if (!m || disposedMats.has(m)) continue;
+        disposedMats.add(m);
+        for (const val of Object.values(m as unknown as Record<string, unknown>)) {
+          if (val instanceof THREE.Texture && !disposedTexs.has(val)) {
+            disposedTexs.add(val);
+            val.dispose();
+          }
+        }
+        m.dispose();
+      }
+    });
+    this.renderer.dispose();
   }
 }

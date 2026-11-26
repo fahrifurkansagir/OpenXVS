@@ -1,6 +1,6 @@
-# OpenXVS Known Limitations & Engineering Boundaries (`v1.1.0`)
+# OpenXVS Known Limitations & Engineering Boundaries (`v1.1.1`)
 
-**Non-Flight Research & Simulation Scope:** OpenXVS `v1.1.0` is an offline verification, perception research, and software-in-the-loop (SIL) engineering suite (`NON_FLIGHT_SIM_ONLY=1`, `ACTUATOR_AUTHORITY=false`). It is **not certified** by the FAA, EASA, or any civil aviation authority and must never be coupled to live flight-control actuators.
+**Non-Flight Research & Simulation Scope:** OpenXVS `v1.1.1` is an offline verification, perception research, and software-in-the-loop (SIL) engineering suite (`NON_FLIGHT_SIM_ONLY=1`, `ACTUATOR_AUTHORITY=false`). It is **not certified** by the FAA, EASA, or any civil aviation authority and must never be coupled to live flight-control actuators.
 
 This document records current perception boundaries and physical hardware domains that remain unverified on desktop and SIL hosts.
 
@@ -40,5 +40,5 @@ Desktop simulation, recorded footage, QEMU ISA emulation, and UDP `ArduPlane 4.7
 ## 3. Scope, Export & Distribution Boundaries
 
 - **Strictly Civil & Dual-Use Scope:** OpenXVS is restricted to civil aviation safety, passive detect-and-avoid, degraded visual environment awareness, and GNSS-resilient navigation.
-- **Navigation Source Boundary:** Hybrid database-referenced navigation Python source is excluded from this clean-room snapshot under applicable export-control guardrails (`EXPORTS.md`).
+- **Navigation Source Boundary:** Hybrid database-referenced navigation Python source is excluded from this clean-room snapshot under applicable export-control guardrails ([`docs/legal/EXPORTS.md`](legal/EXPORTS.md)).
 - **Third-Party Runtime Licensing:** Standard NVIDIA TensorRT SDK licenses prohibit use in life-critical flight control; OpenXVS therefore isolates all safety-critical arbitration inside bare-metal `#![no_std]` Rust crates with zero GPU/TensorRT dependency.

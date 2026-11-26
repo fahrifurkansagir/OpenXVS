@@ -25,15 +25,19 @@ from dataclasses import dataclass, field
 import gc
 import json
 import math
+import os
 from pathlib import Path
 import random
 from typing import Any, Mapping, Sequence
+import urllib.request
+import zipfile
 
 import cv2
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
 
 from xvs.detection.aot_s3_ingest import (
     AOT_HTTPS_BASE,
@@ -77,16 +81,29 @@ __all__ = [
     "AotFrameAnnotation",
     "AotGroundtruthParseResult",
     "AotS3EncounterDataset",
+    "LazyD2ClipDataset",
     "SyntheticG3aClipDataset",
     "XvsD2G4TrainConfig",
     "affine_gmc_warp",
+    "download_external_clutter_datasets",
     "load_external_clutter_negative_clips",
+    "materialize_clip_tensor",
     "parse_aot_groundtruth_csv",
     "phase_correlate_gmc_warp",
     "build_dual_interval_clip_tensor",
     "evaluate_xvs_d2",
     "run_xvs_d2_g4_training",
 ]
+
+FUJII_BIRD_MIRROR_URLS: tuple[str, ...] = (
+    "https://github.com/FumiyaFujii/DistantBirdDataset/archive/refs/heads/main.zip",
+    "https://github.com/FumiyaFujii/DistantBirdDataset/archive/refs/heads/master.zip",
+)
+DET_FLY_MIRROR_URLS: tuple[str, ...] = (
+    "https://github.com/bn-b/Det-Fly/archive/refs/heads/main.zip",
+    "https://github.com/bn-b/Det-Fly/archive/refs/heads/master.zip",
+    "https://github.com/dronedetectionbench/Det-Fly/archive/refs/heads/main.zip",
+)
 
 
 @dataclass(frozen=True)
@@ -414,6 +431,92 @@ def build_dual_interval_clip_tensor(
     return torch.stack(steps, dim=0)
 
 
+def _safe_extract_zip_clutter(zip_path: Path, dest_dir: Path) -> None:
+    """Safely extract zip archive with strict Zip-Slip path traversal protection."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest_dir.resolve()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            member_name = info.filename.replace("\\", "/")
+            if member_name.startswith("/") or (len(member_name) >= 2 and member_name[1] == ":"):
+                raise ValueError(f"Zip-Slip blocked (absolute path): {info.filename!r}")
+            parts = [p for p in member_name.split("/") if p not in ("", ".")]
+            if any(p == ".." for p in parts):
+                raise ValueError(f"Zip-Slip blocked (traversal): {info.filename!r}")
+            target_path = (dest_resolved / Path(*parts)).resolve() if parts else dest_resolved
+            try:
+                target_path.relative_to(dest_resolved)
+            except ValueError as exc:
+                raise ValueError(f"Zip-Slip blocked (outside destination): {info.filename!r}") from exc
+        zf.extractall(dest_resolved)
+
+
+def _count_images_under(root: Path) -> int:
+    if not root.is_dir():
+        return 0
+    exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    return sum(1 for p in root.rglob("*") if p.is_file() and p.suffix.lower() in exts)
+
+
+def download_external_clutter_datasets(
+    cache_dir: Path | str,
+    *,
+    allow_fallback: bool = False,
+    timeout_s: float = 60.0,
+) -> dict[str, Any]:
+    """Download MIT-licensed `fujii_distant_bird` & `det_fly` clutter datasets into `cache_dir`."""
+    assert_dataset_allowed("fujii_distant_bird", "train")
+    assert_dataset_allowed("det_fly", "train")
+
+    root = Path(cache_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    specs = (
+        ("fujii_distant_bird", root / "fujii_distant_bird", FUJII_BIRD_MIRROR_URLS),
+        ("det_fly", root / "det_fly", DET_FLY_MIRROR_URLS),
+    )
+    report: dict[str, Any] = {"cache_dir": str(root), "datasets": {}}
+    for ds_id, ds_dir, urls in specs:
+        existing = _count_images_under(ds_dir)
+        if existing > 0:
+            report["datasets"][ds_id] = {"dir": str(ds_dir), "images": existing, "status": "cached"}
+            continue
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        last_err = "no mirror attempted"
+        downloaded = False
+        for url in urls:
+            zpath = root / f"{ds_id}.zip"
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "OpenXVS-Trainer/1.1"})
+                with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp, zpath.open("wb") as fout:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        fout.write(chunk)
+                if zipfile.is_zipfile(zpath):
+                    _safe_extract_zip_clutter(zpath, ds_dir)
+                    zpath.unlink(missing_ok=True)
+                    downloaded = True
+                    break
+            except Exception as exc:
+                last_err = f"{type(exc).__name__}: {exc}"
+                zpath.unlink(missing_ok=True)
+                continue
+        n_imgs = _count_images_under(ds_dir)
+        status = "downloaded" if (downloaded and n_imgs > 0) else f"unavailable ({last_err})"
+        report["datasets"][ds_id] = {"dir": str(ds_dir), "images": n_imgs, "status": status}
+        print(f"[XVS-D2 Clutter] {ds_id}: images={n_imgs} status={status} dir={ds_dir}", flush=True)
+
+    total_imgs = sum(int(v["images"]) for v in report["datasets"].values())
+    report["total_images"] = total_imgs
+    if total_imgs == 0 and not allow_fallback:
+        raise RuntimeError(
+            f"Fail-closed: downloaded/discovered 0 real external bird/drone clutter images under {root} "
+            f"(report={report['datasets']}). Pass allow_fallback=True to permit AOT/G3a-only fallback."
+        )
+    return report
+
+
 def load_external_clutter_negative_clips(
     clutter_dirs: Sequence[Path | str],
     *,
@@ -423,8 +526,9 @@ def load_external_clutter_negative_clips(
     max_clips: int = 500,
     use_affine_gmc: bool = True,
     seed: int = 20261121,
+    lazy: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """Load real MIT-licensed clutter images (`fujii_distant_bird` / `det_fly`) as hard-negative clips (`has_target=False`)."""
+    """Load real MIT-licensed clutter images (`fujii_distant_bird` / `det_fly`) as lazy hard-negative clips."""
     assert_dataset_allowed(dataset_id, "train")
     img_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
     paths: list[Path] = []
@@ -441,46 +545,334 @@ def load_external_clutter_negative_clips(
     rng = np.random.default_rng(int(seed))
     ch, cw = int(crop_hw[0]), int(crop_hw[1])
     t_len = int(clip_len)
-    n_raw = t_len + 5
+    use_lazy = bool(ch * cw > 128 * 128) if lazy is None else bool(lazy)
     clips: list[dict[str, Any]] = []
 
     step = max(1, len(paths) // max(1, int(max_clips)))
     for idx, img_p in enumerate(paths[::step][: int(max_clips)]):
-        im = cv2.imread(str(img_p), cv2.IMREAD_GRAYSCALE)
+        pan_vx = float(rng.uniform(-1.5, 1.5))
+        pan_vy = float(rng.uniform(-0.8, 0.8))
+        crop_seed = int(rng.integers(0, 2**31 - 1))
+        desc: dict[str, Any] = {
+            "key": f"{dataset_id}_neg_{idx:05d}_{img_p.stem}",
+            "lazy_kind": "clutter_image",
+            "image_path": str(img_p),
+            "crop_hw": [ch, cw],
+            "clip_len": t_len,
+            "pan_vx": pan_vx,
+            "pan_vy": pan_vy,
+            "crop_seed": crop_seed,
+            "use_affine_gmc": bool(use_affine_gmc),
+            "boxes_per_step": [None for _ in range(t_len)],
+            "has_target": False,
+            "horizon": "above",
+            "source_domain": str(dataset_id),
+        }
+        if not use_lazy:
+            desc["x_clip"] = materialize_clip_tensor(desc)
+        clips.append(desc)
+    return clips
+
+
+def _render_g3a_clip_spec(
+    *,
+    height: int,
+    width: int,
+    clip_len: int,
+    seed: int,
+    has_target: bool,
+    above_horizon: bool,
+    clip_idx: int,
+    use_affine_gmc: bool,
+    v53_mode: bool,
+    boxes_only: bool = False,
+) -> tuple[torch.Tensor | None, list[dict[str, Any] | None]]:
+    """Deterministically generate G3a clip tensor (or just `boxes_per_step` metadata with zero pixel RAM)."""
+    rng = np.random.default_rng(int(seed) + int(clip_idx) * 10_007 + (0 if has_target else 5_000_011))
+    h, w = int(height), int(width)
+    t_len = int(clip_len)
+    n_raw = t_len + 5
+    horizon_y = int(h * rng.uniform(0.42, 0.58))
+
+    cloud_phase = float(rng.uniform(0.0, 6.28)) if (v53_mode and not has_target) else 0.0
+    pan_vx = float(rng.uniform(-0.8, 0.8))
+    pan_vy = float(rng.uniform(-0.4, 0.4))
+    roll_step_deg = float(rng.uniform(-0.35, 0.35)) if v53_mode else 0.0
+
+    if has_target:
+        margin = max(6.0, min(float(h), float(w)) * 0.14)
+        cx0 = float(rng.uniform(margin, float(w) - margin))
+        if above_horizon:
+            y_hi = max(margin + 2.0, float(horizon_y) - 4.0)
+            cy0 = float(rng.uniform(margin, y_hi))
+        else:
+            y_lo = min(float(h) - margin - 2.0, float(horizon_y) + 4.0)
+            cy0 = float(rng.uniform(y_lo, float(h) - margin))
+        tvx = float(rng.uniform(-0.9, 0.9))
+        tvy = float(rng.uniform(-0.5, 0.5))
+        if v53_mode and (clip_idx % 2 == 0):
+            bw = float(rng.uniform(5.0, 13.0))
+            bh = float(rng.uniform(5.0, 12.0))
+        else:
+            bw = float(rng.uniform(4.0, 11.0))
+            bh = float(rng.uniform(4.0, 10.0))
+        is_circle = (clip_idx % 5 == 0)
+        if is_circle:
+            bw, bh = 6.0, 6.0
+    else:
+        cx0, cy0, tvx, tvy, bw, bh, is_circle = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False
+
+    neg_distractor = bool(v53_mode and (not has_target) and (clip_idx % 2 == 0))
+    d_cx0 = float(rng.uniform(8.0, max(9.0, float(w) - 8.0))) if neg_distractor else 0.0
+    d_cy0 = float(rng.uniform(6.0, max(7.0, float(horizon_y) - 3.0))) if neg_distractor else 0.0
+    d_vx = float(rng.uniform(-1.8, 1.8)) if neg_distractor else 0.0
+    d_vy = float(rng.uniform(-0.8, 0.8)) if neg_distractor else 0.0
+
+    boxes_per_step: list[dict[str, Any] | None] = []
+    if boxes_only:
+        for k in range(n_raw - t_len, n_raw):
+            if has_target:
+                cx = float(np.clip(cx0 + tvx * k, 3.0, float(w) - 4.0))
+                cy = float(np.clip(cy0 + tvy * k, 3.0, float(h) - 4.0))
+                boxes_per_step.append(
+                    {
+                        "cx": cx,
+                        "cy": cy,
+                        "w": bw,
+                        "h": bh,
+                        "m_box": 0.0 if is_circle else 1.0,
+                        "is_circle_approx": is_circle,
+                    }
+                )
+            else:
+                boxes_per_step.append(None)
+        return None, boxes_per_step
+
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    sky_grad = 185.0 - 35.0 * (yy / float(max(h, 1)))
+    ground_tex = 92.0 + 18.0 * np.sin(xx * 0.14) * np.cos(yy * 0.11)
+    if v53_mode and not has_target:
+        cloud_bank = 26.0 * np.sin(xx * 0.08 + cloud_phase) * np.cos(yy * 0.12)
+        sky_grad = np.clip(sky_grad + cloud_bank, 30.0, 248.0)
+        ground_tex = np.clip(
+            ground_tex + 24.0 * np.sign(np.sin(xx * 0.25)) * (yy > float(horizon_y)),
+            15.0,
+            235.0,
+        )
+    base_bg = np.where(yy < float(horizon_y), sky_grad, ground_tex).astype(np.float32)
+
+    raw_frames: list[np.ndarray] = []
+    for k in range(n_raw):
+        if abs(roll_step_deg) > 1e-4:
+            shift_mat = cv2.getRotationMatrix2D((0.5 * w, 0.5 * h), roll_step_deg * k, 1.0).astype(np.float32)
+            shift_mat[0, 2] += pan_vx * k
+            shift_mat[1, 2] += pan_vy * k
+        else:
+            shift_mat = np.array([[1.0, 0.0, pan_vx * k], [0.0, 1.0, pan_vy * k]], dtype=np.float32)
+        bg = cv2.warpAffine(
+            base_bg,
+            shift_mat,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT101,
+        )
+        noise = rng.normal(0.0, 2.2, size=(h, w)).astype(np.float32)
+        frame = bg + noise
+        if neg_distractor:
+            dcx = float(np.clip(d_cx0 + d_vx * k, 3.0, float(w) - 4.0))
+            dcy = float(np.clip(d_cy0 + d_vy * k + 1.5 * math.sin(1.4 * k), 3.0, float(h) - 4.0))
+            d_blob = np.exp(-((xx - dcx) ** 2 + (yy - dcy) ** 2) / (2.0 * 1.4 * 1.4))
+            pol = -38.0 if (clip_idx % 4 == 0) else 48.0
+            frame = frame + (pol * d_blob).astype(np.float32)
+        box_meta: dict[str, Any] | None = None
+        if has_target:
+            cx = float(np.clip(cx0 + tvx * k, 3.0, float(w) - 4.0))
+            cy = float(np.clip(cy0 + tvy * k, 3.0, float(h) - 4.0))
+            sigma = max(1.1, 0.25 * math.sqrt(bw * bh))
+            blob = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma * sigma))
+            polarity = -46.0 if above_horizon else 44.0
+            frame = frame + (polarity * blob).astype(np.float32)
+            box_meta = {
+                "cx": cx,
+                "cy": cy,
+                "w": bw,
+                "h": bh,
+                "m_box": 0.0 if is_circle else 1.0,
+                "is_circle_approx": is_circle,
+            }
+        raw_frames.append(np.clip(frame, 0.0, 255.0).astype(np.float32))
+        if k >= n_raw - t_len:
+            boxes_per_step.append(box_meta)
+
+    x_clip = build_dual_interval_clip_tensor(
+        raw_frames, clip_len=t_len, use_affine_gmc=use_affine_gmc
+    )
+    return x_clip, boxes_per_step
+
+
+def materialize_clip_tensor(clip: Mapping[str, Any]) -> torch.Tensor:
+    """Materialize `[T, 6, H, W]` FP32 clip tensor lazily from disk uint8 PNGs or deterministic G3a spec.
+
+    Eliminates eager RAM retention of `[T, 6, 640, 640]` float32 tensors (`156-194 GiB` OOM) by loading
+    uint8 frames from disk and applying `affine_gmc_warp` / `phase_correlate_gmc_warp` on the fly.
+    """
+    if "x_clip" in clip and clip["x_clip"] is not None:
+        return clip["x_clip"].to(dtype=torch.float32)
+
+    kind = str(clip["lazy_kind"]) if "lazy_kind" in clip else ""
+    use_aff = bool(clip["use_affine_gmc"]) if "use_affine_gmc" in clip else False
+    clip_len = int(clip["clip_len"]) if "clip_len" in clip else 5
+
+    if kind == "aot_crop":
+        ch, cw = int(clip["crop_hw"][0]), int(clip["crop_hw"][1])
+        y0, x0 = int(clip["crop_origin"][0]), int(clip["crop_origin"][1])
+        cropped_imgs: list[np.ndarray] = []
+        for p_str in clip["frame_paths"]:
+            im = cv2.imread(str(p_str), cv2.IMREAD_GRAYSCALE)
+            if im is None:
+                raise RuntimeError(f"Failed to decode AOT grayscale PNG: {p_str}")
+            h_img, w_img = im.shape[:2]
+            if ch >= h_img and cw >= w_img:
+                patch = cv2.resize(im, (cw, ch), interpolation=cv2.INTER_AREA).astype(np.float32)
+            else:
+                cy0 = max(0, min(y0, h_img - ch))
+                cx0 = max(0, min(x0, w_img - cw))
+                patch = im[cy0 : cy0 + ch, cx0 : cx0 + cw].astype(np.float32)
+            cropped_imgs.append(patch)
+        return build_dual_interval_clip_tensor(cropped_imgs, clip_len=clip_len, use_affine_gmc=use_aff)
+
+    if kind == "aot_full":
+        fh, fw = int(clip["full_hw"][0]), int(clip["full_hw"][1])
+        native_imgs: list[np.ndarray] = []
+        for p_str in clip["frame_paths"]:
+            im = cv2.imread(str(p_str), cv2.IMREAD_GRAYSCALE)
+            if im is None:
+                raise RuntimeError(f"Failed to decode cached native AOT PNG: {p_str}")
+            h_img, w_img = im.shape[:2]
+            if h_img == fh and w_img == fw:
+                frame_f = im.astype(np.float32)
+            else:
+                interp = cv2.INTER_AREA if (fh <= h_img and fw <= w_img) else cv2.INTER_LINEAR
+                frame_f = cv2.resize(im, (fw, fh), interpolation=interp).astype(np.float32)
+            native_imgs.append(frame_f)
+        return build_dual_interval_clip_tensor(native_imgs, clip_len=clip_len, use_affine_gmc=use_aff)
+
+    if kind == "clutter_image":
+        ch, cw = int(clip["crop_hw"][0]), int(clip["crop_hw"][1])
+        im = cv2.imread(str(clip["image_path"]), cv2.IMREAD_GRAYSCALE)
         if im is None:
-            continue
+            raise RuntimeError(f"Failed to decode clutter image: {clip['image_path']}")
         ih, iw = im.shape[:2]
         if ih < ch or iw < cw:
             im = cv2.resize(im, (max(cw + 16, iw), max(ch + 16, ih)), interpolation=cv2.INTER_LINEAR)
             ih, iw = im.shape[:2]
-        base_y = int(rng.integers(0, max(1, ih - ch)))
-        base_x = int(rng.integers(0, max(1, iw - cw)))
-        pan_vx = float(rng.uniform(-1.5, 1.5))
-        pan_vy = float(rng.uniform(-0.8, 0.8))
+        loc_rng = np.random.default_rng(int(clip["crop_seed"]))
+        base_y = int(loc_rng.integers(0, max(1, ih - ch)))
+        base_x = int(loc_rng.integers(0, max(1, iw - cw)))
+        pan_vx = float(clip["pan_vx"])
+        pan_vy = float(clip["pan_vy"])
+        n_raw = clip_len + 5
         raw_frames: list[np.ndarray] = []
         for k in range(n_raw):
             x0 = max(0, min(iw - cw, int(round(base_x + pan_vx * k))))
             y0 = max(0, min(ih - ch, int(round(base_y + pan_vy * k))))
-            patch = im[y0 : y0 + ch, x0 : x0 + cw].astype(np.float32)
-            raw_frames.append(patch)
-        x_clip = build_dual_interval_clip_tensor(
-            raw_frames, clip_len=t_len, use_affine_gmc=use_affine_gmc
+            raw_frames.append(im[y0 : y0 + ch, x0 : x0 + cw].astype(np.float32))
+        return build_dual_interval_clip_tensor(raw_frames, clip_len=clip_len, use_affine_gmc=use_aff)
+
+    if kind == "g3a_synth":
+        x_clip, _ = _render_g3a_clip_spec(
+            height=int(clip["height"]),
+            width=int(clip["width"]),
+            clip_len=clip_len,
+            seed=int(clip["g3a_seed"]),
+            has_target=bool(clip["has_target"]),
+            above_horizon=(str(clip.get("horizon", "above")) == "above"),
+            clip_idx=int(clip["clip_idx"]),
+            use_affine_gmc=use_aff,
+            v53_mode=bool(clip.get("v53_mode", False)),
+            boxes_only=False,
         )
-        clips.append(
-            {
-                "key": f"{dataset_id}_neg_{idx:05d}_{img_p.stem}",
-                "x_clip": x_clip,
-                "boxes_per_step": [None for _ in range(t_len)],
-                "has_target": False,
-                "horizon": "above",
-                "source_domain": str(dataset_id),
+        assert x_clip is not None
+        return x_clip
+
+    raise KeyError(f"Clip record missing 'x_clip' and unknown 'lazy_kind={kind!r}': {clip.get('key', '')!r}")
+
+
+class LazyD2ClipDataset(Dataset[tuple[torch.Tensor, dict[str, Any]]]):
+    """Lazy disk-backed PyTorch `Dataset` for `XVS-D2` clips (zero eager RAM retention).
+
+    `DataLoader` workers load uint8 frames from disk and apply `affine_gmc_warp` on the fly,
+    keeping Colab host RAM strictly `< 16 GiB` even at `640x640` with thousands of clips.
+    """
+
+    def __init__(
+        self,
+        clip_records: Sequence[Mapping[str, Any]],
+        *,
+        target_hw: tuple[int, int],
+    ) -> None:
+        self.clip_records: list[dict[str, Any]] = [dict(c) for c in clip_records]
+        self.target_hw = (int(target_hw[0]), int(target_hw[1]))
+
+    def __len__(self) -> int:
+        return len(self.clip_records)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, dict[str, Any]]:
+        clip = self.clip_records[idx]
+        x_c = materialize_clip_tensor(clip)
+        th, tw = self.target_hw
+        _, _, ch, cw = x_c.shape
+        if ch != th or cw != tw:
+            x_c = F.interpolate(x_c, size=(th, tw), mode="bilinear", align_corners=False)
+            sx = float(tw) / float(cw)
+            sy = float(th) / float(ch)
+            new_steps: list[dict[str, Any] | None] = []
+            for b in clip["boxes_per_step"]:
+                if b is None:
+                    new_steps.append(None)
+                else:
+                    new_steps.append(
+                        {
+                            "cx": float(b["cx"]) * sx,
+                            "cy": float(b["cy"]) * sy,
+                            "w": max(1.0, float(b["w"]) * sx),
+                            "h": max(1.0, float(b["h"]) * sy),
+                            "m_box": float(b["m_box"]),
+                            "is_circle_approx": bool(b["is_circle_approx"]),
+                        }
+                    )
+            meta = {
+                "key": clip.get("key", ""),
+                "boxes_per_step": new_steps,
+                "has_target": bool(clip.get("has_target", False)),
+                "horizon": str(clip.get("horizon", "unknown")),
+                "source_domain": str(clip.get("source_domain", "")),
             }
-        )
-    return clips
+            return x_c, meta
+        meta = {
+            "key": clip.get("key", ""),
+            "boxes_per_step": clip["boxes_per_step"],
+            "has_target": bool(clip.get("has_target", False)),
+            "horizon": str(clip.get("horizon", "unknown")),
+            "source_domain": str(clip.get("source_domain", "")),
+        }
+        return x_c, meta
+
+
+def _collate_lazy_clip_batch(
+    items: list[tuple[torch.Tensor, dict[str, Any]]],
+) -> tuple[torch.Tensor, list[dict[str, Any]]]:
+    xs = [it[0] for it in items]
+    metas = [it[1] for it in items]
+    return torch.stack(xs, dim=0), metas
 
 
 class SyntheticG3aClipDataset:
-    """Deterministic OpenXVS G3a synthetic clip generator (`30%` mix + `--smoke-local` CPU mode)."""
+    """Deterministic OpenXVS G3a synthetic clip generator (`30%` mix + `--smoke-local` CPU mode).
+
+    Uses lazy on-the-fly rendering when `height * width > 128 * 128` (`lazy=True`) so large
+    `640x640` / `2048x2448` synthetic pools use zero host RAM.
+    """
 
     def __init__(
         self,
@@ -493,6 +885,7 @@ class SyntheticG3aClipDataset:
         seed: int = 20261121,
         use_affine_gmc: bool = False,
         v53_mode: bool = False,
+        lazy: bool | None = None,
     ) -> None:
         self.height = int(height)
         self.width = int(width)
@@ -500,138 +893,57 @@ class SyntheticG3aClipDataset:
         self.seed = int(seed)
         self.use_affine_gmc = bool(use_affine_gmc)
         self.v53_mode = bool(v53_mode)
+        self.lazy = bool(self.height * self.width > 128 * 128) if lazy is None else bool(lazy)
         self.positive_clips: list[dict[str, Any]] = []
         self.negative_clips: list[dict[str, Any]] = []
         self._build(int(num_pos), int(num_neg))
 
-    def _render_clip(
+    def _build_descriptor(
         self,
-        rng: np.random.Generator,
         *,
         has_target: bool,
         above_horizon: bool,
         clip_idx: int,
     ) -> dict[str, Any]:
-        h, w = self.height, self.width
-        t_len = self.clip_len
-        n_raw = t_len + 5
-        horizon_y = int(h * rng.uniform(0.42, 0.58))
-
-        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-        sky_grad = 185.0 - 35.0 * (yy / float(max(h, 1)))
-        ground_tex = 92.0 + 18.0 * np.sin(xx * 0.14) * np.cos(yy * 0.11)
-        if self.v53_mode and not has_target:
-            # Hard-clutter negative textures: cloud edges, sun glint, urban skyline spires
-            cloud_bank = 26.0 * np.sin(xx * 0.08 + float(rng.uniform(0, 6.28))) * np.cos(yy * 0.12)
-            sky_grad = np.clip(sky_grad + cloud_bank, 30.0, 248.0)
-            ground_tex = np.clip(
-                ground_tex + 24.0 * np.sign(np.sin(xx * 0.25)) * (yy > float(horizon_y)),
-                15.0,
-                235.0,
-            )
-        base_bg = np.where(yy < float(horizon_y), sky_grad, ground_tex).astype(np.float32)
-
-        pan_vx = float(rng.uniform(-0.8, 0.8))
-        pan_vy = float(rng.uniform(-0.4, 0.4))
-        roll_step_deg = float(rng.uniform(-0.35, 0.35)) if self.v53_mode else 0.0
-
-        if has_target:
-            margin = max(6.0, min(float(h), float(w)) * 0.14)
-            cx0 = float(rng.uniform(margin, float(w) - margin))
-            if above_horizon:
-                y_hi = max(margin + 2.0, float(horizon_y) - 4.0)
-                cy0 = float(rng.uniform(margin, y_hi))
-            else:
-                y_lo = min(float(h) - margin - 2.0, float(horizon_y) + 4.0)
-                cy0 = float(rng.uniform(y_lo, float(h) - margin))
-            tvx = float(rng.uniform(-0.9, 0.9))
-            tvy = float(rng.uniform(-0.5, 0.5))
-            if self.v53_mode and (clip_idx % 2 == 0):
-                # 50% <= 14 px distant small-target oversampling (5..13 px)
-                bw = float(rng.uniform(5.0, 13.0))
-                bh = float(rng.uniform(5.0, 12.0))
-            else:
-                bw = float(rng.uniform(4.0, 11.0))
-                bh = float(rng.uniform(4.0, 10.0))
-            is_circle = (clip_idx % 5 == 0)
-            if is_circle:
-                bw, bh = 6.0, 6.0
-        else:
-            cx0, cy0, tvx, tvy, bw, bh, is_circle = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False
-
-        # Optional moving bird/glint distractor on negative frames (strictly labeled 0!)
-        neg_distractor = bool(self.v53_mode and (not has_target) and (clip_idx % 2 == 0))
-        d_cx0 = float(rng.uniform(8.0, max(9.0, float(w) - 8.0))) if neg_distractor else 0.0
-        d_cy0 = float(rng.uniform(6.0, max(7.0, float(horizon_y) - 3.0))) if neg_distractor else 0.0
-        d_vx = float(rng.uniform(-1.8, 1.8)) if neg_distractor else 0.0
-        d_vy = float(rng.uniform(-0.8, 0.8)) if neg_distractor else 0.0
-
-        raw_frames: list[np.ndarray] = []
-        boxes_per_step: list[dict[str, Any] | None] = []
-        for k in range(n_raw):
-            if abs(roll_step_deg) > 1e-4:
-                shift_mat = cv2.getRotationMatrix2D((0.5 * w, 0.5 * h), roll_step_deg * k, 1.0).astype(np.float32)
-                shift_mat[0, 2] += pan_vx * k
-                shift_mat[1, 2] += pan_vy * k
-            else:
-                shift_mat = np.array([[1.0, 0.0, pan_vx * k], [0.0, 1.0, pan_vy * k]], dtype=np.float32)
-            bg = cv2.warpAffine(
-                base_bg,
-                shift_mat,
-                (w, h),
-                flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_REFLECT101,
-            )
-            noise = rng.normal(0.0, 2.2, size=(h, w)).astype(np.float32)
-            frame = bg + noise
-            if neg_distractor:
-                # Flapping bird / specular glint distractor with zero aircraft GT
-                dcx = float(np.clip(d_cx0 + d_vx * k, 3.0, float(w) - 4.0))
-                dcy = float(np.clip(d_cy0 + d_vy * k + 1.5 * math.sin(1.4 * k), 3.0, float(h) - 4.0))
-                d_blob = np.exp(-((xx - dcx) ** 2 + (yy - dcy) ** 2) / (2.0 * 1.4 * 1.4))
-                pol = -38.0 if (clip_idx % 4 == 0) else 48.0
-                frame = frame + (pol * d_blob).astype(np.float32)
-            box_meta: dict[str, Any] | None = None
-            if has_target:
-                cx = float(np.clip(cx0 + tvx * k, 3.0, float(w) - 4.0))
-                cy = float(np.clip(cy0 + tvy * k, 3.0, float(h) - 4.0))
-                sigma = max(1.1, 0.25 * math.sqrt(bw * bh))
-                blob = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma * sigma))
-                polarity = -46.0 if above_horizon else 44.0
-                frame = frame + (polarity * blob).astype(np.float32)
-                box_meta = {
-                    "cx": cx,
-                    "cy": cy,
-                    "w": bw,
-                    "h": bh,
-                    "m_box": 0.0 if is_circle else 1.0,
-                    "is_circle_approx": is_circle,
-                }
-            raw_frames.append(np.clip(frame, 0.0, 255.0).astype(np.float32))
-            if k >= n_raw - t_len:
-                boxes_per_step.append(box_meta)
-
-        x_clip = build_dual_interval_clip_tensor(
-            raw_frames, clip_len=t_len, use_affine_gmc=self.use_affine_gmc
+        x_clip, boxes_per_step = _render_g3a_clip_spec(
+            height=self.height,
+            width=self.width,
+            clip_len=self.clip_len,
+            seed=self.seed,
+            has_target=has_target,
+            above_horizon=above_horizon,
+            clip_idx=clip_idx,
+            use_affine_gmc=self.use_affine_gmc,
+            v53_mode=self.v53_mode,
+            boxes_only=self.lazy,
         )
-        return {
+        rec: dict[str, Any] = {
             "key": f"g3a_{'pos' if has_target else 'neg'}_{clip_idx:05d}",
-            "x_clip": x_clip,
+            "lazy_kind": "g3a_synth",
+            "g3a_seed": self.seed,
+            "height": self.height,
+            "width": self.width,
+            "clip_len": self.clip_len,
+            "clip_idx": int(clip_idx),
+            "use_affine_gmc": self.use_affine_gmc,
+            "v53_mode": self.v53_mode,
             "boxes_per_step": boxes_per_step,
             "has_target": has_target,
             "horizon": "above" if above_horizon else "below",
             "source_domain": "g3a",
         }
+        if x_clip is not None:
+            rec["x_clip"] = x_clip
+        return rec
 
     def _build(self, num_pos: int, num_neg: int) -> None:
-        rng = np.random.default_rng(self.seed)
         for i in range(num_pos):
             self.positive_clips.append(
-                self._render_clip(rng, has_target=True, above_horizon=(i % 2 == 0), clip_idx=i)
+                self._build_descriptor(has_target=True, above_horizon=(i % 2 == 0), clip_idx=i)
             )
         for j in range(num_neg):
             self.negative_clips.append(
-                self._render_clip(rng, has_target=False, above_horizon=(j % 2 == 0), clip_idx=j)
+                self._build_descriptor(has_target=False, above_horizon=(j % 2 == 0), clip_idx=j)
             )
 
 
@@ -678,6 +990,7 @@ class AotS3EncounterDataset:
         self.split_flights: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
         self.train_pos_clips: list[dict[str, Any]] = []
         self.train_pos_win_records: list[dict[str, Any]] = []
+        self.train_neg_win_records: list[dict[str, Any]] = []
         self.train_neg_clips: list[dict[str, Any]] = []
         self.val_clips: list[dict[str, Any]] = []
 
@@ -686,8 +999,13 @@ class AotS3EncounterDataset:
         full_hw: tuple[int, int] = (AOT_IMG_HEIGHT, AOT_IMG_WIDTH),
         *,
         max_clips: int | None = None,
+        lazy: bool = False,
     ) -> list[dict[str, Any]]:
-        """Build genuine native-resolution Stage-3 clips directly from cached AOT PNGs (ZERO crop upsampling, `D16-G4-M5`)."""
+        """Build genuine native-resolution Stage-3 positive clips from cached AOT PNGs (ZERO crop upsampling).
+
+        Pass `lazy=True` in G4 training to avoid eager RAM allocation of full-frame float32 tensors;
+        default `lazy=False` materializes `x_clip` for backward-compatible callers and unit tests.
+        """
         fh, fw = int(full_hw[0]), int(full_hw[1])
         records = self.train_pos_win_records if max_clips is None else self.train_pos_win_records[: int(max_clips)]
         full_clips: list[dict[str, Any]] = []
@@ -696,21 +1014,17 @@ class AotS3EncounterDataset:
             win_anns: list[AotFrameAnnotation] = rec["anns"]
             native_imgs: list[np.ndarray] = []
             boxes_step: list[dict[str, Any] | None] = []
-            for idx_w, (p, ann) in enumerate(zip(paths, win_anns)):
-                im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-                if im is None:
-                    raise RuntimeError(f"Failed to decode cached native AOT PNG: {p}")
-                h_img, w_img = im.shape[:2]
-                if h_img == fh and w_img == fw:
-                    frame_f = im.astype(np.float32)
-                    sx, sy = 1.0, 1.0
-                else:
-                    interp = cv2.INTER_AREA if (fh <= h_img and fw <= w_img) else cv2.INTER_LINEAR
-                    frame_f = cv2.resize(im, (fw, fh), interpolation=interp).astype(np.float32)
+            if lazy:
+                # Inspect first frame dimensions lazily (exact scaling even for non-2448x2048 caches)
+                first_im = cv2.imread(str(paths[0]), cv2.IMREAD_GRAYSCALE) if paths else None
+                if first_im is not None:
+                    h_img, w_img = first_im.shape[:2]
                     sx = float(fw) / float(w_img)
                     sy = float(fh) / float(h_img)
-                native_imgs.append(frame_f)
-                if idx_w >= len(win_anns) - self.clip_len:
+                else:
+                    sx = float(fw) / float(AOT_IMG_WIDTH)
+                    sy = float(fh) / float(AOT_IMG_HEIGHT)
+                for ann in win_anns[-self.clip_len :]:
                     primary = ann.boxes[0] if ann.boxes else None
                     if primary is None:
                         boxes_step.append(None)
@@ -725,20 +1039,99 @@ class AotS3EncounterDataset:
                                 "is_circle_approx": primary.is_circle_approx,
                             }
                         )
-            x_clip = build_dual_interval_clip_tensor(native_imgs, clip_len=self.clip_len)
-            full_clips.append(
+                full_clips.append(
+                    {
+                        "key": f"aot_full_{win_anns[-1].flight_id}_{win_anns[-1].frame_idx}",
+                        "lazy_kind": "aot_full",
+                        "frame_paths": [str(p) for p in paths],
+                        "full_hw": [fh, fw],
+                        "clip_len": self.clip_len,
+                        "use_affine_gmc": self.use_affine_gmc,
+                        "boxes_per_step": boxes_step,
+                        "has_target": True,
+                        "horizon": win_anns[-1].horizon,
+                        "source_domain": "aot",
+                        "capture_day": win_anns[-1].capture_day,
+                        "native_hw": [fh, fw],
+                    }
+                )
+            else:
+                for idx_w, (p, ann) in enumerate(zip(paths, win_anns)):
+                    im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                    if im is None:
+                        raise RuntimeError(f"Failed to decode cached native AOT PNG: {p}")
+                    h_img, w_img = im.shape[:2]
+                    if h_img == fh and w_img == fw:
+                        frame_f = im.astype(np.float32)
+                        sx, sy = 1.0, 1.0
+                    else:
+                        interp = cv2.INTER_AREA if (fh <= h_img and fw <= w_img) else cv2.INTER_LINEAR
+                        frame_f = cv2.resize(im, (fw, fh), interpolation=interp).astype(np.float32)
+                        sx = float(fw) / float(w_img)
+                        sy = float(fh) / float(h_img)
+                    native_imgs.append(frame_f)
+                    if idx_w >= len(win_anns) - self.clip_len:
+                        primary = ann.boxes[0] if ann.boxes else None
+                        if primary is None:
+                            boxes_step.append(None)
+                        else:
+                            boxes_step.append(
+                                {
+                                    "cx": primary.cx * sx,
+                                    "cy": primary.cy * sy,
+                                    "w": max(1.0, primary.width * sx),
+                                    "h": max(1.0, primary.height * sy),
+                                    "m_box": primary.m_box,
+                                    "is_circle_approx": primary.is_circle_approx,
+                                }
+                            )
+                x_clip = build_dual_interval_clip_tensor(
+                    native_imgs, clip_len=self.clip_len, use_affine_gmc=self.use_affine_gmc
+                )
+                full_clips.append(
+                    {
+                        "key": f"aot_full_{win_anns[-1].flight_id}_{win_anns[-1].frame_idx}",
+                        "x_clip": x_clip,
+                        "boxes_per_step": boxes_step,
+                        "has_target": True,
+                        "horizon": win_anns[-1].horizon,
+                        "source_domain": "aot",
+                        "capture_day": win_anns[-1].capture_day,
+                        "native_hw": [fh, fw],
+                    }
+                )
+        return full_clips
+
+    def build_native_full_frame_neg_clips(
+        self,
+        full_hw: tuple[int, int] = (AOT_IMG_HEIGHT, AOT_IMG_WIDTH),
+        *,
+        max_clips: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Build lazy disk-backed native-resolution Stage-3 negative clips to prevent HNM unlearning."""
+        fh, fw = int(full_hw[0]), int(full_hw[1])
+        records = self.train_neg_win_records[: max(0, int(max_clips))]
+        neg_clips: list[dict[str, Any]] = []
+        for rec in records:
+            paths: list[Path] = rec["paths"]
+            win_anns: list[AotFrameAnnotation] = rec["anns"]
+            neg_clips.append(
                 {
-                    "key": f"aot_full_{win_anns[-1].flight_id}_{win_anns[-1].frame_idx}",
-                    "x_clip": x_clip,
-                    "boxes_per_step": boxes_step,
-                    "has_target": True,
+                    "key": f"aot_full_neg_{win_anns[-1].flight_id}_{win_anns[-1].frame_idx}",
+                    "lazy_kind": "aot_full",
+                    "frame_paths": [str(p) for p in paths],
+                    "full_hw": [fh, fw],
+                    "clip_len": self.clip_len,
+                    "use_affine_gmc": self.use_affine_gmc,
+                    "boxes_per_step": [None for _ in range(self.clip_len)],
+                    "has_target": False,
                     "horizon": win_anns[-1].horizon,
                     "source_domain": "aot",
                     "capture_day": win_anns[-1].capture_day,
                     "native_hw": [fh, fw],
                 }
             )
-        return full_clips
+        return neg_clips
 
     def _download_key(self, s3_key: str) -> Path:
         dest = self.cache_dir / s3_key
@@ -793,23 +1186,35 @@ class AotS3EncounterDataset:
         }
 
     def prepare_from_s3(self) -> dict[str, Any]:
-        """Download selected AOT metadata + encounter/negative PNGs and construct split clips."""
+        """Download selected AOT metadata + bounded PNGs and build lazy disk-backed split descriptors."""
         rng = random.Random(self.seed)
         all_flight_records: list[dict[str, Any]] = []
         pos_by_flight: dict[str, list[AotFrameAnnotation]] = {}
         neg_by_flight: dict[str, list[AotFrameAnnotation]] = {}
 
-        for part in self.parts:
+        # Enforce GLOBAL max_flights cap across ALL parts (never 3x per-part multiplication!)
+        remaining_flights = max(1, int(self.max_flights))
+        total_selected_flights = 0
+        for part_idx, part in enumerate(self.parts):
+            if remaining_flights <= 0:
+                break
+            parts_left = max(1, len(self.parts) - part_idx)
+            part_quota = max(1, (remaining_flights + parts_left - 1) // parts_left)
             enc_key = f"{part}/ImageSets/valid_encounters_maxRange700_maxGap3_minEncLen30.csv"
             gt_key = f"{part}/ImageSets/groundtruth.csv"
-            print(f"[XVS-D2 AOT] Downloading {part} ImageSets (valid_encounters + groundtruth.csv)...", flush=True)
+            print(
+                f"[XVS-D2 AOT] Downloading {part} ImageSets (global quota={part_quota}, rem={remaining_flights})...",
+                flush=True,
+            )
             enc_csv = self._download_key(enc_key)
             gt_csv = self._download_key(gt_key)
 
             encounters = parse_valid_encounters_csv(enc_csv)
             flight_ids = sorted({str(e["flight_id"]) for e in encounters})
             rng.shuffle(flight_ids)
-            selected_flights = set(flight_ids[: self.max_flights])
+            selected_flights = set(flight_ids[: min(part_quota, remaining_flights)])
+            remaining_flights -= len(selected_flights)
+            total_selected_flights += len(selected_flights)
 
             parsed = parse_aot_groundtruth_csv(
                 gt_csv,
@@ -821,7 +1226,7 @@ class AotS3EncounterDataset:
             self.parse_stats["circle_approx_boxes"] += parsed.circle_approx_boxes
             self.parse_stats["total_rows_read"] += parsed.total_rows_read
             print(
-                f"[XVS-D2 AOT] Parsed {part}: {len(selected_flights)} flights, "
+                f"[XVS-D2 AOT] Parsed {part}: {len(selected_flights)} flights (global total={total_selected_flights}/{self.max_flights}), "
                 f"{len(parsed.positive_frames)} pos frames, {len(parsed.negative_frames)} neg frames "
                 f"(clipped={parsed.clipped_border_boxes}, dropped={parsed.dropped_degenerate_boxes})",
                 flush=True,
@@ -842,7 +1247,8 @@ class AotS3EncounterDataset:
             for rec in recs:
                 flight_to_split[str(rec["flight_id"])] = split_name
 
-        # Plan all positive & negative clip windows first, then bulk-prefetch unique PNGs via direct HTTPS
+        # Plan positive & disk-budgeted negative clip windows (reuse up to 4 distinct 640x640 spatial
+        # tiles per full-res 2448x2048 negative sequence to cut PNG disk/download 4x!)
         pos_plan: list[tuple[str, str, list[AotFrameAnnotation]]] = []
         for fid, frames in sorted(pos_by_flight.items()):
             split_name = flight_to_split[fid] if fid in flight_to_split else "train"
@@ -859,34 +1265,36 @@ class AotS3EncounterDataset:
                 pos_plan.append((fid, split_name, win_anns))
                 built += 1
 
-        neg_plan: list[tuple[str, str, list[AotFrameAnnotation]]] = []
+        crops_per_neg_win = 4 if (self.max_neg_clips >= 64 and self.crop_hw[0] <= 1024 and self.crop_hw[1] <= 1224) else 1
+        max_neg_windows = max(1, (self.max_neg_clips + crops_per_neg_win - 1) // crops_per_neg_win)
+        neg_win_plan: list[tuple[str, str, list[AotFrameAnnotation]]] = []
         n_neg_flights = max(1, len(neg_by_flight))
-        max_neg_per_flight = max(1, (self.max_neg_clips + n_neg_flights - 1) // n_neg_flights)
+        max_neg_win_per_flight = max(1, (max_neg_windows + n_neg_flights - 1) // n_neg_flights)
         win_len_neg = self.clip_len + 5
         for fid, frames in sorted(neg_by_flight.items()):
-            if len(neg_plan) >= self.max_neg_clips:
+            if len(neg_win_plan) >= max_neg_windows:
                 break
             split_name = flight_to_split[fid] if fid in flight_to_split else "train"
             frames_sorted = sorted(frames, key=lambda a: a.frame_idx)
             if len(frames_sorted) < self.clip_len:
                 continue
-            if max_neg_per_flight <= 1 or len(frames_sorted) <= win_len_neg:
+            if max_neg_win_per_flight <= 1 or len(frames_sorted) <= win_len_neg:
                 win_anns = frames_sorted[:win_len_neg]
-                neg_plan.append((fid, split_name, win_anns))
+                neg_win_plan.append((fid, split_name, win_anns))
             else:
-                stride_neg = max(self.clip_len, (len(frames_sorted) - win_len_neg) // max(1, max_neg_per_flight))
+                stride_neg = max(self.clip_len, (len(frames_sorted) - win_len_neg) // max(1, max_neg_win_per_flight))
                 taken = 0
                 for s_i in range(0, len(frames_sorted) - self.clip_len + 1, stride_neg):
-                    if taken >= max_neg_per_flight or len(neg_plan) >= self.max_neg_clips:
+                    if taken >= max_neg_win_per_flight or len(neg_win_plan) >= max_neg_windows:
                         break
                     win_anns = frames_sorted[s_i : s_i + win_len_neg]
-                    neg_plan.append((fid, split_name, win_anns))
+                    neg_win_plan.append((fid, split_name, win_anns))
                     taken += 1
 
         unique_keys = sorted(
             {
                 f"{a.part}/Images/{a.flight_id}/{a.img_name}"
-                for _fid, _sp, anns in (pos_plan + neg_plan)
+                for _fid, _sp, anns in (pos_plan + neg_win_plan)
                 for a in anns
             }
         )
@@ -896,7 +1304,7 @@ class AotS3EncounterDataset:
         if total_pngs > 0:
             print(
                 f"[XVS-D2 AOT] Bulk-prefetching {total_pngs} unique PNGs via direct HTTPS "
-                f"(workers={prefetch_workers}, prefer_aws_cli=False)...",
+                f"(workers={prefetch_workers}, crops_per_neg_win={crops_per_neg_win}, lazy_ram=True)...",
                 flush=True,
             )
             report_step = max(1, total_pngs // 10)
@@ -914,37 +1322,42 @@ class AotS3EncounterDataset:
                             flush=True,
                         )
 
-        def _load_cached_clip_frames(anns: list[AotFrameAnnotation]) -> tuple[list[np.ndarray], list[Path]]:
-            paths = [key_to_path[f"{a.part}/Images/{a.flight_id}/{a.img_name}"] for a in anns]
-            imgs: list[np.ndarray] = []
-            for p in paths:
-                im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-                if im is None:
-                    raise RuntimeError(f"Failed to decode AOT grayscale PNG: {p}")
-                imgs.append(im)
-            return imgs, paths
-
-        # Build positive encounter clips from already-cached PNGs
+        ch, cw = self.crop_hw
+        # Build LAZY positive encounter descriptors (ZERO eager float32 tensors in RAM!)
         for fid, split_name, win_anns in pos_plan:
-            imgs, win_paths = _load_cached_clip_frames(win_anns)
+            win_paths = [key_to_path[f"{a.part}/Images/{a.flight_id}/{a.img_name}"] for a in win_anns]
             anchor_box = win_anns[-1].boxes[0]
-            ch, cw = self.crop_hw
-            y0 = int(anchor_box.cy - 0.5 * ch)
-            x0 = int(anchor_box.cx - 0.5 * cw)
-            cropped_imgs: list[np.ndarray] = []
+            y0 = max(0, min(AOT_IMG_HEIGHT - ch, int(anchor_box.cy - 0.5 * ch)))
+            x0 = max(0, min(AOT_IMG_WIDTH - cw, int(anchor_box.cx - 0.5 * cw)))
             boxes_step: list[dict[str, Any] | None] = []
-            for idx_w, (im, ann) in enumerate(zip(imgs, win_anns)):
+            for ann in win_anns[-self.clip_len :]:
                 primary = ann.boxes[0] if ann.boxes else None
-                patch, bmeta = self._crop_frame_and_box(im, primary, (y0, x0))
-                cropped_imgs.append(patch)
-                if idx_w >= len(win_anns) - self.clip_len:
-                    boxes_step.append(bmeta)
-            x_clip = build_dual_interval_clip_tensor(
-                cropped_imgs, clip_len=self.clip_len, use_affine_gmc=self.use_affine_gmc
-            )
-            clip_obj = {
+                if primary is None:
+                    boxes_step.append(None)
+                else:
+                    rel_cx = primary.cx - float(x0)
+                    rel_cy = primary.cy - float(y0)
+                    if 0.0 <= rel_cx < float(cw) and 0.0 <= rel_cy < float(ch):
+                        boxes_step.append(
+                            {
+                                "cx": rel_cx,
+                                "cy": rel_cy,
+                                "w": primary.width,
+                                "h": primary.height,
+                                "m_box": primary.m_box,
+                                "is_circle_approx": primary.is_circle_approx,
+                            }
+                        )
+                    else:
+                        boxes_step.append(None)
+            clip_obj: dict[str, Any] = {
                 "key": f"aot_pos_{fid}_{win_anns[-1].frame_idx}",
-                "x_clip": x_clip,
+                "lazy_kind": "aot_crop",
+                "frame_paths": [str(p) for p in win_paths],
+                "crop_origin": [y0, x0],
+                "crop_hw": [ch, cw],
+                "clip_len": self.clip_len,
+                "use_affine_gmc": self.use_affine_gmc,
                 "boxes_per_step": boxes_step,
                 "has_target": True,
                 "horizon": win_anns[-1].horizon,
@@ -957,39 +1370,49 @@ class AotS3EncounterDataset:
             else:
                 self.val_clips.append(clip_obj)
 
-        # Build target-free negative clips for HNM + FPI evaluation
-        for fid, split_name, win_anns in neg_plan:
-            imgs, _neg_paths = _load_cached_clip_frames(win_anns)
-            y0 = rng.randint(0, max(0, AOT_IMG_HEIGHT - self.crop_hw[0]))
-            x0 = rng.randint(0, max(0, AOT_IMG_WIDTH - self.crop_hw[1]))
-            cropped_imgs = [self._crop_frame_and_box(im, None, (y0, x0))[0] for im in imgs]
-            x_clip = build_dual_interval_clip_tensor(
-                cropped_imgs, clip_len=self.clip_len, use_affine_gmc=self.use_affine_gmc
-            )
-            clip_obj = {
-                "key": f"aot_neg_{fid}_{win_anns[-1].frame_idx}",
-                "x_clip": x_clip,
-                "boxes_per_step": [None for _ in range(self.clip_len)],
-                "has_target": False,
-                "horizon": win_anns[-1].horizon,
-                "source_domain": "aot",
-                "capture_day": win_anns[-1].capture_day,
-            }
+        # Build LAZY target-free negative descriptors (multi-crop spatial tiles per prefetched window)
+        neg_built = 0
+        for fid, split_name, win_anns in neg_win_plan:
+            neg_paths = [key_to_path[f"{a.part}/Images/{a.flight_id}/{a.img_name}"] for a in win_anns]
             if split_name == "train":
-                self.train_neg_clips.append(clip_obj)
-            else:
-                self.val_clips.append(clip_obj)
+                self.train_neg_win_records.append({"paths": neg_paths, "anns": win_anns})
+            for crop_i in range(crops_per_neg_win):
+                if neg_built >= self.max_neg_clips:
+                    break
+                y0 = rng.randint(0, max(0, AOT_IMG_HEIGHT - ch))
+                x0 = rng.randint(0, max(0, AOT_IMG_WIDTH - cw))
+                clip_obj = {
+                    "key": f"aot_neg_{fid}_{win_anns[-1].frame_idx}_c{crop_i}",
+                    "lazy_kind": "aot_crop",
+                    "frame_paths": [str(p) for p in neg_paths],
+                    "crop_origin": [y0, x0],
+                    "crop_hw": [ch, cw],
+                    "clip_len": self.clip_len,
+                    "use_affine_gmc": self.use_affine_gmc,
+                    "boxes_per_step": [None for _ in range(self.clip_len)],
+                    "has_target": False,
+                    "horizon": win_anns[-1].horizon,
+                    "source_domain": "aot",
+                    "capture_day": win_anns[-1].capture_day,
+                }
+                if split_name == "train":
+                    self.train_neg_clips.append(clip_obj)
+                else:
+                    self.val_clips.append(clip_obj)
+                neg_built += 1
 
         print(
-            f"[XVS-D2] Built {len(self.train_pos_clips)} train_pos, {len(self.train_neg_clips)} train_neg, "
-            f"{len(self.val_clips)} val AOT clips",
+            f"[XVS-D2] Indexed {len(self.train_pos_clips)} train_pos, {len(self.train_neg_clips)} train_neg, "
+            f"{len(self.val_clips)} val lazy AOT clips (0 float32 clips held in RAM; global flights={total_selected_flights})",
             flush=True,
         )
         return {
             "train_pos_clips": len(self.train_pos_clips),
             "train_neg_clips": len(self.train_neg_clips),
             "val_clips": len(self.val_clips),
+            "global_flights_selected": total_selected_flights,
             "unique_pngs_prefetched": total_pngs,
+            "lazy_disk_backed": True,
             "parse_stats": dict(self.parse_stats),
             "split_flight_counts": {k: len(v) for k, v in self.split_flights.items()},
         }
@@ -1028,6 +1451,10 @@ class XvsD2G4TrainConfig:
     hnm_refresh_every_epochs: int = 5
     fujii_bird_dirs: tuple[Path, ...] = ()
     det_fly_dirs: tuple[Path, ...] = ()
+    download_external_clutter: bool = False
+    require_external_clutter: bool = False
+    allow_external_clutter_fallback: bool = False
+    onnx_export_hw: tuple[int, int] | None = None
 
 
 def _build_step_targets(
@@ -1135,12 +1562,12 @@ def _resize_clip_batch(
     target_hw: tuple[int, int],
     device: torch.device,
 ) -> tuple[torch.Tensor, list[dict[str, Any]]]:
-    """Stack clips to `[B, T, 6, H, W]`, resizing spatial dims and scaling GT boxes if needed."""
+    """Materialize & stack clips to `[B, T, 6, H, W]`, resizing spatial dims and scaling GT boxes if needed."""
     th, tw = int(target_hw[0]), int(target_hw[1])
     xs: list[torch.Tensor] = []
     scaled_clips: list[dict[str, Any]] = []
     for clip in batch_clips:
-        x_c = clip["x_clip"].to(dtype=torch.float32)
+        x_c = materialize_clip_tensor(clip)
         _, _, ch, cw = x_c.shape
         if ch != th or cw != tw:
             x_resized = F.interpolate(x_c, size=(th, tw), mode="bilinear", align_corners=False)
@@ -1166,14 +1593,14 @@ def _resize_clip_batch(
         else:
             xs.append(x_c)
             scaled_clips.append(dict(clip))
-    return torch.stack(xs, dim=0).to(device=device), scaled_clips
+    return torch.stack(xs, dim=0).to(device=device, non_blocking=(device.type == "cuda")), scaled_clips
 
 
-def _train_one_clip_batch(
+def _train_one_clip_batch_tensors(
     model_fn: nn.Module,
-    batch_clips: Sequence[Mapping[str, Any]],
+    x_seq: torch.Tensor,
+    scaled_clips: Sequence[Mapping[str, Any]],
     *,
-    target_hw: tuple[int, int],
     device: torch.device,
     use_bf16: bool,
     teacher_model: XvsD2Model | None = None,
@@ -1181,8 +1608,8 @@ def _train_one_clip_batch(
     fp2_adapter: nn.Module | None = None,
     lambda_kd: float = 0.0,
 ) -> torch.Tensor:
-    """Execute unrolled ConvGRU forward in `bf16` (NO `GradScaler`!) with strictly FP32 loss."""
-    x_seq, scaled_clips = _resize_clip_batch(batch_clips, target_hw, device)
+    """Execute unrolled ConvGRU forward on pre-materialized `[B, T, 6, H, W]` in `bf16` with FP32 loss."""
+    x_seq = x_seq.to(device=device, non_blocking=(device.type == "cuda"))
     _, t_len, _, h_sz, w_sz = x_seq.shape
     dev_type = "cuda" if device.type == "cuda" else "cpu"
 
@@ -1238,6 +1665,58 @@ def _train_one_clip_batch(
         total_loss = total_loss + loss_dict["total"]
 
     return total_loss / float(max(1, t_len))
+
+
+def _train_one_clip_batch(
+    model_fn: nn.Module,
+    batch_clips: Sequence[Mapping[str, Any]],
+    *,
+    target_hw: tuple[int, int],
+    device: torch.device,
+    use_bf16: bool,
+    teacher_model: XvsD2Model | None = None,
+    cscwd_adapters: nn.ModuleDict | None = None,
+    fp2_adapter: nn.Module | None = None,
+    lambda_kd: float = 0.0,
+) -> torch.Tensor:
+    """Materialize clips and execute unrolled ConvGRU forward in `bf16` with strictly FP32 loss."""
+    x_seq, scaled_clips = _resize_clip_batch(batch_clips, target_hw, device)
+    return _train_one_clip_batch_tensors(
+        model_fn,
+        x_seq,
+        scaled_clips,
+        device=device,
+        use_bf16=use_bf16,
+        teacher_model=teacher_model,
+        cscwd_adapters=cscwd_adapters,
+        fp2_adapter=fp2_adapter,
+        lambda_kd=lambda_kd,
+    )
+
+
+def _make_epoch_dataloader(
+    flat_clips: Sequence[Mapping[str, Any]],
+    *,
+    batch_size: int,
+    target_hw: tuple[int, int],
+    device: torch.device,
+    smoke_local: bool,
+) -> DataLoader[tuple[torch.Tensor, list[dict[str, Any]]]]:
+    """Build a worker-backed lazy `DataLoader` that reads uint8 PNGs & runs GMC on the fly."""
+    n_workers = 0
+    if device.type == "cuda" and (not smoke_local) and os.name != "nt":
+        n_workers = min(8, max(2, (os.cpu_count() or 4) // 4))
+    ds = LazyD2ClipDataset(flat_clips, target_hw=target_hw)
+    kwargs: dict[str, Any] = {
+        "batch_size": max(1, int(batch_size)),
+        "shuffle": False,
+        "num_workers": n_workers,
+        "pin_memory": (device.type == "cuda"),
+        "collate_fn": _collate_lazy_clip_batch,
+    }
+    if n_workers > 0:
+        kwargs["prefetch_factor"] = 2
+    return DataLoader(ds, **kwargs)
 
 
 def _probe_batch_eager(
@@ -1331,26 +1810,34 @@ def _mine_hard_negatives(
     device: torch.device,
     use_bf16: bool,
     top_k: int,
+    smoke_local: bool = False,
 ) -> list[dict[str, Any]]:
-    """Score target-free negative clips and select highest false-positive score clips for Stage 2 HNM."""
+    """Score lazy target-free negative clips via DataLoader workers and select highest FP-score clips."""
     if not neg_clips:
         return []
     was_training = model.training
     model.eval()
     dev_type = "cuda" if device.type == "cuda" else "cpu"
     scored: list[tuple[float, dict[str, Any]]] = []
-    for clip in neg_clips:
-        x_seq, _ = _resize_clip_batch([clip], target_hw, device)
+    batch_sz = 1 if smoke_local else min(16, max(1, len(neg_clips)))
+    loader = _make_epoch_dataloader(
+        neg_clips, batch_size=batch_sz, target_hw=target_hw, device=device, smoke_local=smoke_local
+    )
+    offset = 0
+    for x_seq, _metas in loader:
+        x_dev = x_seq.to(device=device, non_blocking=(device.type == "cuda"))
+        b_cur = int(x_dev.shape[0])
         h_prev: torch.Tensor | None = None
-        max_prob = 0.0
-        for t in range(x_seq.shape[1]):
+        max_probs = torch.zeros((b_cur,), dtype=torch.float32, device=device)
+        for t in range(x_dev.shape[1]):
             with torch.amp.autocast(device_type=dev_type, dtype=torch.bfloat16, enabled=use_bf16):
-                out = model(x_seq[:, t], h_prev, return_pyramid=False)
+                out = model(x_dev[:, t], h_prev, return_pyramid=False)
             h_prev = out["h_next"]
-            prob = float(torch.sigmoid(out["hm_logits"].to(dtype=torch.float32)).max().item())
-            if prob > max_prob:
-                max_prob = prob
-        scored.append((max_prob, dict(clip)))
+            step_max = torch.sigmoid(out["hm_logits"].to(dtype=torch.float32)).amax(dim=(1, 2, 3))
+            max_probs = torch.maximum(max_probs, step_max)
+        for bi, prob_val in enumerate(max_probs.detach().cpu().tolist()):
+            scored.append((float(prob_val), dict(neg_clips[offset + bi])))
+        offset += b_cur
     if was_training:
         model.train()
     scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -1365,8 +1852,9 @@ def evaluate_xvs_d2(
     target_hw: tuple[int, int],
     device: torch.device,
     match_radius_px: float = 12.0,
+    op_score_thr: float = 0.50,
 ) -> dict[str, Any]:
-    """Compute real `Pd@FPI={0.1, 0.5, 1.0}`, `AP50`, `centroid_rmse_px`, and `above/below_horizon_pd`."""
+    """Compute real `Pd@FPI={0.1, 0.5, 1.0}`, `AP50`, operational `>= op_score_thr` `above/below_horizon_pd`, `centroid_rmse_px` & `clutter_raw_frame_fpr`."""
     raw = getattr(model, "_orig_mod", model)
     was_training = raw.training
     raw.eval()
@@ -1376,6 +1864,8 @@ def evaluate_xvs_d2(
     neg_det_scores: list[float] = []
     num_pos = 0
     num_neg = 0
+    neg_frames_with_fp = 0
+    op_thr = float(op_score_thr)
 
     for clip in eval_clips:
         x_seq, scaled = _resize_clip_batch([clip], target_hw, device)
@@ -1400,6 +1890,8 @@ def evaluate_xvs_d2(
 
         if gt_box is None:
             num_neg += 1
+            if any(float(d["score"]) >= op_thr for d in dets):
+                neg_frames_with_fp += 1
             for d in dets:
                 s = float(d["score"])
                 neg_det_scores.append(s)
@@ -1462,7 +1954,8 @@ def evaluate_xvs_d2(
     for i in range(1, len(recalls)):
         ap50 += (recalls[i] - recalls[i - 1]) * precisions[i]
 
-    matched_errs = [err for sc_val, _, err in pos_best_scores if sc_val >= 0.0 and math.isfinite(err)]
+    # Operational threshold (>= 0.50) prevents score_thr=1e-4 from inflating Pd to 1.00!
+    matched_errs = [err for sc_val, _, err in pos_best_scores if sc_val >= op_thr and math.isfinite(err)]
     centroid_rmse_px = (
         math.sqrt(sum(e * e for e in matched_errs) / float(len(matched_errs))) if matched_errs else 0.0
     )
@@ -1470,10 +1963,13 @@ def evaluate_xvs_d2(
     above_pos = [sc_val for sc_val, hz, _ in pos_best_scores if hz == "above"]
     below_pos = [sc_val for sc_val, hz, _ in pos_best_scores if hz == "below"]
     above_pd = (
-        float(sum(1 for s in above_pos if s >= 0.0)) / float(len(above_pos)) if above_pos else 0.0
+        float(sum(1 for s in above_pos if s >= op_thr)) / float(len(above_pos)) if above_pos else 0.0
     )
     below_pd = (
-        float(sum(1 for s in below_pos if s >= 0.0)) / float(len(below_pos)) if below_pos else 0.0
+        float(sum(1 for s in below_pos if s >= op_thr)) / float(len(below_pos)) if below_pos else 0.0
+    )
+    clutter_raw_frame_fpr = (
+        float(neg_frames_with_fp) / float(num_neg) if num_neg > 0 else 0.0
     )
 
     return {
@@ -1484,6 +1980,8 @@ def evaluate_xvs_d2(
         "centroid_rmse_px": float(centroid_rmse_px),
         "above_horizon_pd": float(above_pd),
         "below_horizon_pd": float(below_pd),
+        "clutter_raw_frame_fpr": float(clutter_raw_frame_fpr),
+        "op_score_thr": float(op_thr),
         "num_eval_clips": int(len(eval_clips)),
         "num_pos_clips": int(num_pos),
         "num_neg_clips": int(num_neg),
@@ -1514,7 +2012,7 @@ def _sample_pos_batch_with_small_oversample(
     small_prob: float,
     rng: random.Random,
 ) -> list[dict[str, Any]]:
-    """Sample positive clips with `small_prob` (e.g., `0.50`) dedicated to `<= 14 px` distant targets."""
+    """Sample positive clips with `small_prob` (`0.50` in extended) dedicated to `<= 14 px` distant targets."""
     bs = max(1, int(batch_size))
     if float(small_prob) <= 0.0 or not small_pos_clips:
         return list(mixer.sample_batch(bs))
@@ -1537,7 +2035,7 @@ def _sample_stage4_batch(
     small_prob: float = 0.0,
     rng: random.Random | None = None,
 ) -> list[dict[str, Any]]:
-    """Sample a Stage-4 distillation batch mixing hard-negative clutter clips (`0.15` base / `0.40` extended).
+    """Sample a Stage-4 distillation batch mixing hard-negative clutter clips (`0.15` v5.2 / `0.40` extended).
 
     Ensures student models suppress ground/sky/bird clutter just like the Stage-2 HNM Teacher:
     - When `batch_size >= 4` and `neg_clips` is non-empty, includes at least 1 negative
@@ -1672,30 +2170,72 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
         dataset_summary = aot_ds.prepare_from_s3()
         aot_pos_clips = aot_ds.train_pos_clips
         aot_neg_clips = list(aot_ds.train_neg_clips)
-        if cfg.fujii_bird_dirs:
-            fujii_negs = load_external_clutter_negative_clips(
-                cfg.fujii_bird_dirs,
+
+        fujii_dirs = list(cfg.fujii_bird_dirs)
+        detfly_dirs = list(cfg.det_fly_dirs)
+        if cfg.download_external_clutter and not cfg.smoke_local:
+            dl_rep = download_external_clutter_datasets(
+                cache_dir / "external_clutter",
+                allow_fallback=bool(cfg.allow_external_clutter_fallback or not cfg.require_external_clutter),
+            )
+            dataset_summary["external_clutter_download"] = dl_rep
+            fujii_p = Path(str(dl_rep["datasets"]["fujii_distant_bird"]["dir"]))
+            detfly_p = Path(str(dl_rep["datasets"]["det_fly"]["dir"]))
+            if fujii_p not in fujii_dirs:
+                fujii_dirs.append(fujii_p)
+            if detfly_p not in detfly_dirs:
+                detfly_dirs.append(detfly_p)
+
+        fujii_negs = (
+            load_external_clutter_negative_clips(
+                fujii_dirs,
                 dataset_id="fujii_distant_bird",
                 crop_hw=crop_hw,
                 clip_len=clip_len,
                 max_clips=500,
                 use_affine_gmc=eff_use_affine_gmc,
                 seed=cfg.seed + 101,
+                lazy=True,
             )
-            aot_neg_clips.extend(fujii_negs)
-            dataset_summary["fujii_distant_bird_neg_clips"] = len(fujii_negs)
-        if cfg.det_fly_dirs:
-            detfly_negs = load_external_clutter_negative_clips(
-                cfg.det_fly_dirs,
+            if fujii_dirs
+            else []
+        )
+        detfly_negs = (
+            load_external_clutter_negative_clips(
+                detfly_dirs,
                 dataset_id="det_fly",
                 crop_hw=crop_hw,
                 clip_len=clip_len,
                 max_clips=300,
                 use_affine_gmc=eff_use_affine_gmc,
                 seed=cfg.seed + 202,
+                lazy=True,
             )
-            aot_neg_clips.extend(detfly_negs)
-            dataset_summary["det_fly_neg_clips"] = len(detfly_negs)
+            if detfly_dirs
+            else []
+        )
+        aot_neg_clips.extend(fujii_negs)
+        aot_neg_clips.extend(detfly_negs)
+        dataset_summary["fujii_distant_bird_neg_clips"] = len(fujii_negs)
+        dataset_summary["det_fly_neg_clips"] = len(detfly_negs)
+        print(
+            f"[XVS-D2 Clutter] Real external hard-negative clips discovered: "
+            f"fujii_distant_bird={len(fujii_negs)}, det_fly={len(detfly_negs)} "
+            f"(dirs: fujii={[str(p) for p in fujii_dirs]}, det_fly={[str(p) for p in detfly_dirs]})",
+            flush=True,
+        )
+        if (len(fujii_negs) + len(detfly_negs)) == 0:
+            if cfg.require_external_clutter and not cfg.allow_external_clutter_fallback:
+                raise RuntimeError(
+                    "Fail-closed: require_external_clutter=True but 0 real fujii_distant_bird / det_fly "
+                    "clips were discovered. Provide valid directories or set allow_external_clutter_fallback=True."
+                )
+            if is_v53:
+                print(
+                    "[XVS-D2 Clutter WARNING] 0 real fujii_distant_bird/det_fly clips loaded — "
+                    "explicit fallback active (using AOT + G3a hard negatives only).",
+                    flush=True,
+                )
 
         g3a_train = SyntheticG3aClipDataset(
             num_pos=max(12, len(aot_pos_clips) // 2),
@@ -1706,6 +2246,7 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
             seed=cfg.seed + 31,
             use_affine_gmc=eff_use_affine_gmc,
             v53_mode=is_v53,
+            lazy=True,
         )
         g3a_pos_clips = g3a_train.positive_clips
         if is_v53:
@@ -1776,10 +2317,19 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
     max_ff_aot = max(1, int(cfg.max_full_frame_clips))
     max_ff_g3a = max(1, max_ff_aot // 2)
 
+    neg_by_key: dict[str, dict[str, Any]] = {str(c["key"]): c for c in aot_neg_clips if "key" in c}
+
+    def _restore_hard_negs_from_ckpt(ckpt_obj: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+        if ckpt_obj is None or "hard_neg_keys" not in ckpt_obj:
+            return []
+        restored = [neg_by_key[str(k)] for k in ckpt_obj["hard_neg_keys"] if str(k) in neg_by_key]
+        return restored
+
     if teacher_done:
         raw_teacher = build_xvs_d2("teacher", prior_bias=CROP_PRIOR_BIAS).to(device)
         if prev_teacher is not None and "model_state_dict" in prev_teacher:
             raw_teacher.load_state_dict(prev_teacher["model_state_dict"], strict=True)
+            hard_negs = _restore_hard_negs_from_ckpt(prev_teacher) or _restore_hard_negs_from_ckpt(prev_s2)
             if not (ckpts_dir / "xvs_d2_teacher.pt").is_file():
                 ckpt_mgr.save(
                     "xvs_d2_teacher",
@@ -1787,26 +2337,39 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
                         "stage": "stage3_fullframe",
                         "tier": "teacher",
                         "artifact_tag": artifact_tag,
+                        "hard_neg_keys": [str(c["key"]) for c in hard_negs if "key" in c],
                         "model_state_dict": {k: v.detach().cpu() for k, v in raw_teacher.state_dict().items()},
                     },
                 )
         else:
             assert prev_s3 is not None
             raw_teacher.load_state_dict(prev_s3["model_state_dict"], strict=True)
+            hard_negs = _restore_hard_negs_from_ckpt(prev_s3) or _restore_hard_negs_from_ckpt(prev_s2)
             ckpt_mgr.save(
                 "xvs_d2_teacher",
                 {
                     "stage": "stage3_fullframe",
                     "tier": "teacher",
                     "artifact_tag": artifact_tag,
+                    "hard_neg_keys": [str(c["key"]) for c in hard_negs if "key" in c],
                     "model_state_dict": {k: v.detach().cpu() for k, v in raw_teacher.state_dict().items()},
                 },
+            )
+        if is_v53 and not hard_negs and aot_neg_clips:
+            hard_negs = _mine_hard_negatives(
+                raw_teacher,
+                aot_neg_clips,
+                target_hw=crop_hw,
+                device=device,
+                use_bf16=use_bf16,
+                top_k=max(2, len(aot_neg_clips) // 2),
+                smoke_local=cfg.smoke_local,
             )
         resumed_s1_epoch = resumed_s1_epoch if prev_s1 is not None else ep_s1
         resumed_s2_epoch = resumed_s2_epoch if prev_s2 is not None else ep_s2
         resumed_s3_epoch = resumed_s3_epoch if prev_s3 is not None else ep_s3
         print(
-            "[XVS-D2] Found completed teacher checkpoint -> skipping Stages 1-3 cleanly!",
+            f"[XVS-D2] Found completed teacher checkpoint -> skipping Stages 1-3 cleanly! (hard_negs={len(hard_negs)})",
             flush=True,
         )
     else:
@@ -1837,19 +2400,26 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
         for epoch in range(resumed_s1_epoch, ep_s1):
             teacher_exec.train()
             ep_loss = 0.0
+            ep_clips_s1: list[dict[str, Any]] = []
             for _ in range(steps_per_ep):
-                batch = _sample_pos_batch_with_small_oversample(
-                    mixer,
-                    small_pos_clips,
-                    batch_size=bs_s1,
-                    small_prob=eff_small_prob,
-                    rng=sample_rng,
+                ep_clips_s1.extend(
+                    _sample_pos_batch_with_small_oversample(
+                        mixer,
+                        small_pos_clips,
+                        batch_size=bs_s1,
+                        small_prob=eff_small_prob,
+                        rng=sample_rng,
+                    )
                 )
+            s1_loader = _make_epoch_dataloader(
+                ep_clips_s1, batch_size=bs_s1, target_hw=crop_hw, device=device, smoke_local=cfg.smoke_local
+            )
+            for x_seq_b, metas_b in s1_loader:
                 teacher_opt.zero_grad(set_to_none=True)
-                loss = _train_one_clip_batch(
+                loss = _train_one_clip_batch_tensors(
                     teacher_exec,
-                    batch,
-                    target_hw=crop_hw,
+                    x_seq_b,
+                    metas_b,
                     device=device,
                     use_bf16=use_bf16,
                 )
@@ -1883,8 +2453,9 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
             raw_teacher.load_state_dict(prev_s2["model_state_dict"], strict=True)
             if "optimizer_state_dict" in prev_s2:
                 teacher_opt.load_state_dict(prev_s2["optimizer_state_dict"])
+            hard_negs = _restore_hard_negs_from_ckpt(prev_s2)
 
-        if resumed_s2_epoch < ep_s2:
+        if resumed_s2_epoch < ep_s2 and not hard_negs:
             hard_negs = _mine_hard_negatives(
                 raw_teacher,
                 aot_neg_clips,
@@ -1892,6 +2463,7 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
                 device=device,
                 use_bf16=use_bf16,
                 top_k=max(2, len(aot_neg_clips) // 2),
+                smoke_local=cfg.smoke_local,
             )
         for epoch in range(resumed_s2_epoch, ep_s2):
             if is_v53 and epoch > resumed_s2_epoch and ((epoch - resumed_s2_epoch) % eff_hnm_refresh == 0):
@@ -1902,9 +2474,11 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
                     device=device,
                     use_bf16=use_bf16,
                     top_k=max(2, len(aot_neg_clips) // 2),
+                    smoke_local=cfg.smoke_local,
                 )
             teacher_exec.train()
             ep_loss = 0.0
+            ep_clips_s2: list[dict[str, Any]] = []
             for step_s2 in range(steps_per_ep):
                 if is_v53 and hard_negs:
                     n_neg_s2 = min(max(1, int(round(float(bs_s1) * eff_stage4_neg_ratio))), max(1, bs_s1 - 1))
@@ -1920,16 +2494,20 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
                         hard_negs[(epoch * max(1, steps_per_ep) + step_s2 + j) % len(hard_negs)]
                         for j in range(n_neg_s2)
                     ]
-                    batch = pos_part + neg_pick
+                    ep_clips_s2.extend(pos_part + neg_pick)
                 else:
                     pos_part = mixer.sample_batch(max(1, bs_s1 - 1))
                     neg_pick = [hard_negs[epoch % len(hard_negs)]] if hard_negs else []
-                    batch = pos_part + neg_pick
+                    ep_clips_s2.extend(pos_part + neg_pick)
+            s2_loader = _make_epoch_dataloader(
+                ep_clips_s2, batch_size=bs_s1, target_hw=crop_hw, device=device, smoke_local=cfg.smoke_local
+            )
+            for x_seq_b, metas_b in s2_loader:
                 teacher_opt.zero_grad(set_to_none=True)
-                loss = _train_one_clip_batch(
+                loss = _train_one_clip_batch_tensors(
                     teacher_exec,
-                    batch,
-                    target_hw=crop_hw,
+                    x_seq_b,
+                    metas_b,
                     device=device,
                     use_bf16=use_bf16,
                 )
@@ -1951,6 +2529,7 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
                     "epoch": epoch + 1,
                     "loss": mean_loss,
                     "artifact_tag": artifact_tag,
+                    "hard_neg_keys": [str(c["key"]) for c in hard_negs if "key" in c],
                     "model_state_dict": {k: v.detach().cpu() for k, v in _unwrap_model(teacher_exec).state_dict().items()},
                     "optimizer_state_dict": teacher_opt.state_dict(),
                 },
@@ -1962,9 +2541,11 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
         del teacher_opt
         _release_compiled_graph(device)
 
-        # ---------------- Stage 3: Native Full-Frame Fine-Tune (`teacher`, resumable & RAM-bounded, D16-G4-RC1-B2) ----------------
+        # ---------------- Stage 3: Native Full-Frame Fine-Tune (`teacher`, resumable, GMC + Negs!) ----------------
         if prev_s3 is not None and "model_state_dict" in prev_s3:
             raw_teacher.load_state_dict(prev_s3["model_state_dict"], strict=True)
+            if not hard_negs:
+                hard_negs = _restore_hard_negs_from_ckpt(prev_s3)
         else:
             with torch.no_grad():
                 raw_teacher.heads.hm_out.bias.mul_(0.5).add_(0.5 * FULL_FRAME_PRIOR_BIAS)
@@ -1974,23 +2555,61 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
                 n_smoke_aot = min(4, max_ff_aot)
                 n_smoke_g3a = min(4, max_ff_g3a)
                 g3a_full = SyntheticG3aClipDataset(
-                    num_pos=n_smoke_g3a, num_neg=1, height=full_hw[0], width=full_hw[1], clip_len=clip_len, seed=cfg.seed + 41
+                    num_pos=n_smoke_g3a,
+                    num_neg=2,
+                    height=full_hw[0],
+                    width=full_hw[1],
+                    clip_len=clip_len,
+                    seed=cfg.seed + 41,
+                    use_affine_gmc=eff_use_affine_gmc,
+                    v53_mode=is_v53,
                 )
                 aot_full_sim = SyntheticG3aClipDataset(
-                    num_pos=n_smoke_aot, num_neg=1, height=full_hw[0], width=full_hw[1], clip_len=clip_len, seed=cfg.seed + 53
+                    num_pos=n_smoke_aot,
+                    num_neg=2,
+                    height=full_hw[0],
+                    width=full_hw[1],
+                    clip_len=clip_len,
+                    seed=cfg.seed + 53,
+                    use_affine_gmc=eff_use_affine_gmc,
+                    v53_mode=is_v53,
                 )
                 full_aot_clips = [{**c, "source_domain": "aot", "native_hw": list(full_hw)} for c in aot_full_sim.positive_clips]
                 full_g3a_clips = [{**c, "native_hw": list(full_hw)} for c in g3a_full.positive_clips]
+                full_neg_clips = (
+                    (
+                        [{**c, "source_domain": "aot", "native_hw": list(full_hw)} for c in aot_full_sim.negative_clips]
+                        + [{**c, "native_hw": list(full_hw)} for c in g3a_full.negative_clips]
+                    )
+                    if is_v53
+                    else []
+                )
             else:
                 assert aot_ds is not None
-                full_aot_clips = aot_ds.build_native_full_frame_clips(full_hw, max_clips=max_ff_aot)
+                full_aot_clips = aot_ds.build_native_full_frame_clips(full_hw, max_clips=max_ff_aot, lazy=True)
                 n_g3a_ff = min(max_ff_g3a, max(1, len(full_aot_clips) // 2))
                 g3a_full = SyntheticG3aClipDataset(
-                    num_pos=n_g3a_ff, num_neg=1, height=full_hw[0], width=full_hw[1], clip_len=clip_len, seed=cfg.seed + 41
+                    num_pos=n_g3a_ff,
+                    num_neg=max(2, n_g3a_ff),
+                    height=full_hw[0],
+                    width=full_hw[1],
+                    clip_len=clip_len,
+                    seed=cfg.seed + 41,
+                    use_affine_gmc=eff_use_affine_gmc,
+                    v53_mode=is_v53,
+                    lazy=True,
                 )
                 full_g3a_clips = [{**c, "native_hw": list(full_hw)} for c in g3a_full.positive_clips]
+                full_neg_clips = (
+                    (
+                        aot_ds.build_native_full_frame_neg_clips(full_hw, max_clips=max(4, max_ff_aot // 2))
+                        + [{**c, "native_hw": list(full_hw)} for c in g3a_full.negative_clips]
+                    )
+                    if is_v53
+                    else []
+                )
 
-            full_frame_clips_built = len(full_aot_clips) + len(full_g3a_clips)
+            full_frame_clips_built = len(full_aot_clips) + len(full_g3a_clips) + len(full_neg_clips)
             full_mixer = AotG3aBatchMixer(full_aot_clips, full_g3a_clips, aot_ratio=0.70, seed=cfg.seed + 7)
 
             vram_s3 = _probe_batch_eager(
@@ -2013,13 +2632,29 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
             for epoch in range(resumed_s3_epoch, ep_s3):
                 teacher_ff_exec.train()
                 ep_loss = 0.0
-                for _ in range(steps_per_ep):
-                    batch = full_mixer.sample_batch(bs_s3)
+                ep_clips_s3: list[dict[str, Any]] = []
+                for step_s3 in range(steps_per_ep):
+                    # Mix ~25-30% full-frame negatives in Stage 3 (extended) to prevent HNM unlearning!
+                    if is_v53 and full_neg_clips and bs_s3 >= 2:
+                        n_neg_s3 = max(1, int(round(float(bs_s3) * 0.30)))
+                        n_neg_s3 = min(n_neg_s3, bs_s3 - 1)
+                        pos_s3 = full_mixer.sample_batch(bs_s3 - n_neg_s3)
+                        neg_s3 = [
+                            dict(full_neg_clips[(epoch * max(1, steps_per_ep) + step_s3 + j) % len(full_neg_clips)])
+                            for j in range(n_neg_s3)
+                        ]
+                        ep_clips_s3.extend(pos_s3 + neg_s3)
+                    else:
+                        ep_clips_s3.extend(full_mixer.sample_batch(bs_s3))
+                s3_loader = _make_epoch_dataloader(
+                    ep_clips_s3, batch_size=bs_s3, target_hw=full_hw, device=device, smoke_local=cfg.smoke_local
+                )
+                for x_seq_b, metas_b in s3_loader:
                     teacher_ff_opt.zero_grad(set_to_none=True)
-                    loss = _train_one_clip_batch(
+                    loss = _train_one_clip_batch_tensors(
                         teacher_ff_exec,
-                        batch,
-                        target_hw=full_hw,
+                        x_seq_b,
+                        metas_b,
                         device=device,
                         use_bf16=use_bf16,
                     )
@@ -2042,6 +2677,7 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
                         "loss": mean_loss,
                         "native_resolution_hw": list(full_hw),
                         "artifact_tag": artifact_tag,
+                        "hard_neg_keys": [str(c["key"]) for c in hard_negs if "key" in c],
                         "model_state_dict": {k: v.detach().cpu() for k, v in _unwrap_model(teacher_ff_exec).state_dict().items()},
                         "optimizer_state_dict": teacher_ff_opt.state_dict(),
                     },
@@ -2052,6 +2688,7 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
             del teacher_ff_opt
             del full_aot_clips
             del full_g3a_clips
+            del full_neg_clips
             del full_mixer
             _release_compiled_graph(device)
 
@@ -2061,6 +2698,7 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
                 "stage": "stage3_fullframe",
                 "tier": "teacher",
                 "artifact_tag": artifact_tag,
+                "hard_neg_keys": [str(c["key"]) for c in hard_negs if "key" in c],
                 "model_state_dict": {k: v.detach().cpu() for k, v in raw_teacher.state_dict().items()},
             },
         )
@@ -2139,22 +2777,29 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
             cscwd_adapters.train()
             fp2_adapter.train()
             ep_loss = 0.0
+            ep_clips_s4: list[dict[str, Any]] = []
             for step_i in range(steps_s4):
-                batch = _sample_stage4_batch(
-                    mixer,
-                    hard_negs if (is_v53 and hard_negs) else aot_neg_clips,
-                    batch_size=bs_s4,
-                    neg_ratio=eff_stage4_neg_ratio,
-                    rng_index=epoch * max(1, steps_s4) + step_i,
-                    small_pos_clips=small_pos_clips if is_v53 else None,
-                    small_prob=eff_small_prob,
-                    rng=sample_rng,
+                ep_clips_s4.extend(
+                    _sample_stage4_batch(
+                        mixer,
+                        hard_negs if (is_v53 and hard_negs) else aot_neg_clips,
+                        batch_size=bs_s4,
+                        neg_ratio=eff_stage4_neg_ratio,
+                        rng_index=epoch * max(1, steps_s4) + step_i,
+                        small_pos_clips=small_pos_clips if is_v53 else None,
+                        small_prob=eff_small_prob,
+                        rng=sample_rng,
+                    )
                 )
+            s4_loader = _make_epoch_dataloader(
+                ep_clips_s4, batch_size=bs_s4, target_hw=crop_hw, device=device, smoke_local=cfg.smoke_local
+            )
+            for x_seq_b, metas_b in s4_loader:
                 s_opt.zero_grad(set_to_none=True)
-                loss = _train_one_clip_batch(
+                loss = _train_one_clip_batch_tensors(
                     student_exec,
-                    batch,
-                    target_hw=crop_hw,
+                    x_seq_b,
+                    metas_b,
                     device=device,
                     use_bf16=use_bf16,
                     teacher_model=raw_teacher,
@@ -2224,7 +2869,14 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
     eval_web = evaluate_xvs_d2(web_model_final, eval_clips, target_hw=crop_hw, device=device)
 
     raw_web_cpu = _unwrap_model(web_model_final).eval().cpu()
-    onnx_report = export_xvs_d2_web_onnx(out_dir / "onnx", model=raw_web_cpu, height=256, width=256)
+    eff_onnx_hw = (
+        (int(cfg.onnx_export_hw[0]), int(cfg.onnx_export_hw[1]))
+        if cfg.onnx_export_hw is not None
+        else ((640, 640) if is_v53 else (256, 256))
+    )
+    onnx_report = export_xvs_d2_web_onnx(
+        out_dir / "onnx", model=raw_web_cpu, height=eff_onnx_hw[0], width=eff_onnx_hw[1]
+    )
 
     eval_payload = {"teacher": eval_teacher, "web": eval_web}
     (out_dir / "tier_summary.json").write_text(json.dumps(tier_summary, indent=2) + "\n", encoding="utf-8")
@@ -2243,6 +2895,7 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
             "use_affine_gmc": bool(eff_use_affine_gmc),
             "hnm_refresh_every_epochs": int(eff_hnm_refresh),
             "small_pos_clips_count": int(len(small_pos_clips)),
+            "onnx_export_hw": [int(eff_onnx_hw[0]), int(eff_onnx_hw[1])],
         },
         "env_report": env_report,
         "dataset_summary": dataset_summary,
@@ -2287,7 +2940,7 @@ def run_xvs_d2_g4_training(cfg: XvsD2G4TrainConfig) -> dict[str, Any]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="OpenXVS v1.1.0 XVS-D2 4-Stage GPU Trainer")
+    parser = argparse.ArgumentParser(description="OpenXVS v1.1.1 XVS-D2 4-Stage Colab G4 Trainer")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--drive-ckpt-dir", type=Path, default=None)
     parser.add_argument("--smoke-local", action="store_true")

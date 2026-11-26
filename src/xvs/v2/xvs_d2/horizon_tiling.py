@@ -1,4 +1,4 @@
-"""Native-Resolution `3x1` Overlapping Horizon-Band Tiling for `XVS-D2` (DO-365B / DO-387).
+"""Native-Resolution `3x1` Overlapping Horizon-Band Tiling for `XVS-D2` (`extended`, DO-365B / DO-387).
 
 Recovering `6-12 px` distant aircraft (`1.5-3.0 km`) on `1920x1080` or `2448x2048` sensors
 requires avoiding sub-Nyquist full-frame downscaling (which crushes `9 px` targets to `~2.3 px`).
@@ -55,22 +55,23 @@ def compute_horizon_tile_boxes(
     img_h: int,
     *,
     tile_hw: tuple[int, int] = (640, 640),
-    num_tiles: int = 3,
+    num_tiles: int | None = None,
     overlap_frac: float = 0.10,
     horizon_y_px: float | None = None,
+    cover_full_width: bool = True,
 ) -> list[HorizonTileSpec]:
-    """Compute `num_tiles` (`3x1` default) overlapping native-res horizon-band tile windows.
+    """Compute overlapping native-res horizon-band tile windows covering full `[0, img_w]` with zero dropped edges.
 
     - Centers the vertical band on `horizon_y_px` (defaults to `0.5 * img_h`), clamped to `[0, img_h]`.
-    - When `img_w >= tile_w`, preserves strict `1:1` native pixel resolution (`scale_x == 1.0`)
-      with at least `overlap_frac` horizontal overlap between adjacent tiles.
-    - When `img_w < tile_w` or `img_h < tile_h` (e.g. small smoke frames), partitions cleanly
-      and records exact `(scale_x, scale_y)` so re-projection back to full frame stays exact.
+    - When `cover_full_width=True` (default), adaptively chooses enough tiles (e.g., `4x1` on
+      `1920x1080`, `5x1` on `2448x2048` at `640x640` with `>= 10%` overlap) so `specs[0].x0 == 0`
+      and `specs[-1].x1 == img_w` (`0` dropped edge pixels!) at strict `1:1` native resolution.
+    - When `img_w < tile_w` or `img_h < tile_h` (e.g. small smoke frames), records exact
+      `(scale_x, scale_y)` so re-projection back to full frame stays exact.
     """
     w = int(img_w)
     h = int(img_h)
     th, tw = int(tile_hw[0]), int(tile_hw[1])
-    n_t = max(1, int(num_tiles))
     ov = float(max(0.0, min(0.5, overlap_frac)))
 
     if w <= 0 or h <= 0 or tw <= 0 or th <= 0:
@@ -89,6 +90,19 @@ def compute_horizon_tile_boxes(
     crop_w = min(w, tw)
     scale_x = float(tw) / float(crop_w)
 
+    # Ideal step giving at least `overlap_frac` overlap between adjacent tiles at 1:1 native resolution
+    step_ideal = max(1, int(round(float(crop_w) * (1.0 - ov))))
+    if w <= crop_w:
+        n_min_full = 1
+    else:
+        n_min_full = 1 + int(math.ceil(float(w - crop_w) / float(step_ideal)))
+
+    if num_tiles is None:
+        n_t = n_min_full
+    else:
+        req_n = max(1, int(num_tiles))
+        n_t = max(req_n, n_min_full) if cover_full_width else req_n
+
     if n_t == 1 or w <= crop_w:
         x0 = max(0, (w - crop_w) // 2)
         return [
@@ -105,16 +119,16 @@ def compute_horizon_tile_boxes(
             )
         ]
 
-    # Ideal step giving exact `overlap_frac` overlap between adjacent tiles at 1:1 native resolution
-    step_ideal = max(1, int(round(float(crop_w) * (1.0 - ov))))
     ideal_span = crop_w + (n_t - 1) * step_ideal
 
-    if w <= ideal_span:
-        # Frame fits completely across `n_t` tiles with >= overlap_frac overlap (e.g., 1920px / 3x640)
+    if cover_full_width or w <= ideal_span:
+        # Full horizontal coverage [0, W] with >= overlap_frac overlap and 0 dropped edge pixels
         xs = np.linspace(0.0, float(w - crop_w), num=n_t)
         x0_list = [max(0, min(w - crop_w, int(round(float(x))))) for x in xs]
+        x0_list[0] = 0
+        x0_list[-1] = w - crop_w
     else:
-        # Wide sensor (e.g. 2448px): center the 1:1 native-res `n_t`-tile band around frame center
+        # Explicit sub-band mode (`cover_full_width=False`): center `n_t` tiles around frame center
         start_x = max(0, (w - ideal_span) // 2)
         x0_list = [max(0, min(w - crop_w, start_x + i * step_ideal)) for i in range(n_t)]
 
@@ -140,11 +154,12 @@ def extract_horizon_tiles(
     frame: np.ndarray,
     *,
     tile_hw: tuple[int, int] = (640, 640),
-    num_tiles: int = 3,
+    num_tiles: int | None = None,
     overlap_frac: float = 0.10,
     horizon_y_px: float | None = None,
+    cover_full_width: bool = True,
 ) -> tuple[list[np.ndarray], list[HorizonTileSpec]]:
-    """Extract `3x1` native-resolution overlapping horizon-band tiles from a 2D or 3D image."""
+    """Extract adaptive native-resolution overlapping horizon-band tiles covering `[0, W]`."""
     arr = np.asarray(frame)
     if arr.ndim not in (2, 3):
         raise ValueError(f"Expected 2D grayscale or 3D HWC frame, got shape {arr.shape}")
@@ -156,6 +171,7 @@ def extract_horizon_tiles(
         num_tiles=num_tiles,
         overlap_frac=overlap_frac,
         horizon_y_px=horizon_y_px,
+        cover_full_width=cover_full_width,
     )
     tiles: list[np.ndarray] = []
     for spec in specs:
@@ -277,14 +293,15 @@ def run_horizon_tiled_d2_inference(
     tile_infer_fn: Callable[[Sequence[np.ndarray], int], list[dict[str, Any]]],
     *,
     tile_hw: tuple[int, int] = (640, 640),
-    num_tiles: int = 3,
+    num_tiles: int | None = None,
     overlap_frac: float = 0.10,
     horizon_y_px: float | None = None,
+    cover_full_width: bool = True,
     nms_radius_px: float = 12.0,
     nms_iou_thr: float = 0.35,
     max_k: int = 64,
 ) -> tuple[list[dict[str, Any]], list[HorizonTileSpec]]:
-    """Extract `3x1` native-res temporal tile stacks across `frames_gray`, run `tile_infer_fn`, and merge via NMS."""
+    """Extract adaptive native-res temporal tile stacks across `frames_gray`, run `tile_infer_fn`, and merge via NMS."""
     if not frames_gray:
         raise ValueError("frames_gray must be non-empty")
     first = np.asarray(frames_gray[0])
@@ -296,6 +313,7 @@ def run_horizon_tiled_d2_inference(
         num_tiles=num_tiles,
         overlap_frac=overlap_frac,
         horizon_y_px=horizon_y_px,
+        cover_full_width=cover_full_width,
     )
     tile_stacks: list[list[np.ndarray]] = [[] for _ in specs]
     for frame in frames_gray:
@@ -305,6 +323,7 @@ def run_horizon_tiled_d2_inference(
             num_tiles=num_tiles,
             overlap_frac=overlap_frac,
             horizon_y_px=horizon_y_px,
+            cover_full_width=cover_full_width,
         )
         for ti, tile_img in enumerate(tiles_t):
             tile_stacks[ti].append(tile_img)

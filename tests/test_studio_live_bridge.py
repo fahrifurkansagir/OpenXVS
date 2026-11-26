@@ -584,7 +584,7 @@ def test_http_server_endpoints_health_demo_tick_and_analyze_image(
             assert resp.headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:4174"
             health = json.loads(resp.read().decode("utf-8"))
         assert health["status"] == "ok"
-        assert health["kani_proofs"] == "18/18"
+        assert health["kani_proofs"] == "26/26"
         assert "gpu_name" in health and "device" in health
         assert health["vram_mb"] < DEFAULT_VRAM_CAP_MB
         assert all(health["models"][k]["real_weights"] for k in ("xvs_d2", "xvs_land", "xvs_thermal", "xvs_nav"))

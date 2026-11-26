@@ -24,6 +24,7 @@ import {
 import { KSFO_28L_ORIGIN, sampleKsfoElevationM, type KsfoTerrainPack } from "./ksfo_terrain_pack.ts";
 import {
   stepManualFlight6DoF,
+  type BreachReason,
   type FlightControlMode,
   type PilotInputState,
   type ShieldReason,
@@ -78,7 +79,7 @@ export interface StudioSimSnapshot {
   readonly shieldOverrideActive: boolean;
   readonly shieldReason: ShieldReason;
   readonly envelopeBreach: boolean;
-  readonly breachReason: string | null;
+  readonly breachReason: BreachReason | null;
   readonly touchdown: TouchdownReport;
   readonly yokePitch: number;
   readonly yokeRoll: number;
@@ -222,7 +223,7 @@ export class StudioScenarioSim {
   private shieldOverrideActive = false;
   private shieldReason: ShieldReason = "NONE";
   private envelopeBreach = false;
-  private breachReason: string | null = null;
+  private breachReason: BreachReason | null = null;
   private touchdown: TouchdownReport = {
     landed: false,
     sinkRateFpm: 0,

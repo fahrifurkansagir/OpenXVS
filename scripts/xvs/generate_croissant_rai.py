@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -47,17 +48,24 @@ CANONICAL_DISTRIBUTION_SPECS: tuple[tuple[str, str, str], ...] = (
     ("file_015_v2_meshdaa_500enc_evidence", "output/xvs/v2_m3/v2_meshdaa_500enc_evidence.json", "application/json"),
 )
 
+_HOST_USER_TOKEN = (os.environ.get("USERNAME") or os.environ.get("USER") or "").strip()
+
 DOUBLE_BLIND_FORBIDDEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"openxvs", re.IGNORECASE),
     re.compile(r"\bxvs[-_]", re.IGNORECASE),
     re.compile(r"[-_]xvs\b", re.IGNORECASE),
     re.compile(r"/xvs/", re.IGNORECASE),
-    re.compile(r"onera", re.IGNORECASE),
     re.compile(r"c:\\\\?projects", re.IGNORECASE),
     re.compile(r"c:\\\\?users", re.IGNORECASE),
-    re.compile(r"internal_ide_path", re.IGNORECASE),
+    re.compile(r"/home/[a-z0-9._-]+", re.IGNORECASE),
+    re.compile(r"antigravity", re.IGNORECASE),
     re.compile("bati" + "stelle", re.IGNORECASE),
     re.compile(r"github\.com/", re.IGNORECASE),
+    *(
+        (re.compile(rf"\b{re.escape(_HOST_USER_TOKEN)}\b", re.IGNORECASE),)
+        if len(_HOST_USER_TOKEN) >= 3
+        else ()
+    ),
 )
 
 REQUIRED_RAI_KEYS: tuple[str, ...] = (

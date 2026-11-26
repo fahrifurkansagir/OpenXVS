@@ -37,6 +37,10 @@ from xvs.v2.xvs_active_range.filter import (
     ActiveRangeMode,
     OwnshipStateNed,
 )
+from xvs.v2.xvs_d2.horizon_tiling import (
+    extract_horizon_tiles,
+    merge_tile_detections,
+)
 from xvs.v2.xvs_d2.track_before_confirm import (
     DEFAULT_CONFIRM_M,
     DEFAULT_CONFIRM_N,
@@ -50,40 +54,60 @@ from xvs.v2.xvs_land.pnpl_ekf import (
     build_ksfo_28l_reference_features,
     solve_4dof_map_pnpl,
 )
-from xvs.v2.xvs_nav.aliasing_gate import (
-    DEFAULT_HAL_NAV_M,
-    K_H0_LOCKED,
-    MIN_PSR_LOCKED,
-    VisualAliasingThresholds,
-    VisualFixMetrics,
-    compute_calibrated_sigma_vis,
-    compute_geom_condition_number,
-    compute_innovation_q_vis,
-    compute_multi_hypothesis_hpl,
-    compute_psr_calibrated,
-    compute_spatial_entropy_4x4,
-    evaluate_visual_aliasing_gate,
-)
-from xvs.v2.xvs_nav.dual_bank_cusum import (
-    CUSUM_H_LOCKED,
-    CUSUM_K_D_LOCKED,
-    CUSUM_NUM_ARMS,
-    DualBankEsEkfCusum,
-)
-from xvs.v2.xvs_nav.sequence_vpr import (
-    DEFAULT_SEQ_WINDOW,
-    SequenceVprConfig,
-    SequenceVprDecision,
-    SequenceVprFilter,
-)
-from xvs.v2.xvs_nav.stage2_xfeat import (
-    DESCRIPTOR_DIM,
-    MAX_DESCRIPTOR_BYTES_PER_TILE,
-    TIER2B_TRIGGER_MIN_INLIERS,
-    LighterGlueFallbackRunner,
-    XFeatOnnxRunner,
-    match_mnn,
-)
+try:
+    from xvs.v2.xvs_nav.aliasing_gate import (
+        DEFAULT_HAL_NAV_M,
+        K_H0_LOCKED,
+        MIN_PSR_LOCKED,
+        VisualAliasingThresholds,
+        VisualFixMetrics,
+        compute_calibrated_sigma_vis,
+        compute_geom_condition_number,
+        compute_innovation_q_vis,
+        compute_multi_hypothesis_hpl,
+        compute_psr_calibrated,
+        compute_spatial_entropy_4x4,
+        evaluate_visual_aliasing_gate,
+    )
+    from xvs.v2.xvs_nav.dual_bank_cusum import (
+        CUSUM_H_LOCKED,
+        CUSUM_K_D_LOCKED,
+        CUSUM_NUM_ARMS,
+        DualBankEsEkfCusum,
+    )
+    from xvs.v2.xvs_nav.sequence_vpr import (
+        DEFAULT_SEQ_WINDOW,
+        SequenceVprConfig,
+        SequenceVprDecision,
+        SequenceVprFilter,
+    )
+    from xvs.v2.xvs_nav.stage2_xfeat import (
+        DESCRIPTOR_DIM,
+        MAX_DESCRIPTOR_BYTES_PER_TILE,
+        TIER2B_TRIGGER_MIN_INLIERS,
+        LighterGlueFallbackRunner,
+        XFeatOnnxRunner,
+        match_mnn,
+    )
+    _HAS_XVS_NAV = True
+except ImportError:
+    _HAS_XVS_NAV = False
+    DEFAULT_HAL_NAV_M = 30.0
+    K_H0_LOCKED = 4.89
+    MIN_PSR_LOCKED = 1.15
+    CUSUM_H_LOCKED = 17.619
+    CUSUM_K_D_LOCKED = 0.50
+    CUSUM_NUM_ARMS = 8
+    DEFAULT_SEQ_WINDOW = 7
+    DESCRIPTOR_DIM = 64
+    MAX_DESCRIPTOR_BYTES_PER_TILE = 16_384
+    TIER2B_TRIGGER_MIN_INLIERS = 25
+    DualBankEsEkfCusum = Any  # type: ignore[misc,assignment]
+    SequenceVprConfig = Any  # type: ignore[misc,assignment]
+    SequenceVprDecision = Any  # type: ignore[misc,assignment]
+    SequenceVprFilter = Any  # type: ignore[misc,assignment]
+    LighterGlueFallbackRunner = Any  # type: ignore[misc,assignment]
+    XFeatOnnxRunner = Any  # type: ignore[misc,assignment]
 from xvs.v2.sensor_health import (
     PinholeIntrinsics,
     SensorHealthMonitor,
@@ -100,6 +124,8 @@ DEFAULT_KSFO_ORTHO = REPO_ROOT / "apps" / "livedeck" / "public" / "assets" / "ks
 D2_CROP_SIZE: int = 256
 AOT_FOCAL_PX: float = 2690.0
 DEMO_TICK_LRU_MAXSIZE: int = 128
+NAV_REF_CACHE_MAXSIZE: int = 64
+RUNWAY_PRESENT_PROB_THR: float = 0.65
 LWIR_L_SAT_PROXY: float = 215.7  # Canonical DR-04 §4.2 radiance proxy scale (matches IRSTD1k/HitUav)
 V5_NAV_GAMMA_CONF_DEFAULT: float = 1.264  # DR-21 split-conformal Rayleigh inflation factor (NAV5)
 V5_NAV_PSR_DELTA_MIN: float = 0.04  # DR-21 background-centered PSR margin floor
@@ -156,11 +182,24 @@ def _warp_hidden_state(h_prev: np.ndarray, dx_full: float, dy_full: float, strid
         return h_prev
     _, channels, hh, hw = h_prev.shape
     mat = np.array([[1.0, 0.0, dx_full / stride], [0.0, 1.0, dy_full / stride]], dtype=np.float32)
+    # Vectorized 4-channel SIMD batched warpAffine (exact 0.0 borderValue across all channels, ~3x faster than 24x loop)
     out = np.empty_like(h_prev)
-    for ch in range(channels):
-        out[0, ch] = cv2.warpAffine(
-            h_prev[0, ch], mat, (hw, hh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+    h0 = h_prev[0]
+    for c0 in range(0, channels, 4):
+        c1 = min(channels, c0 + 4)
+        slab_hwc = np.ascontiguousarray(np.transpose(h0[c0:c1], (1, 2, 0)))
+        warped_slab = cv2.warpAffine(
+            slab_hwc,
+            mat,
+            (hw, hh),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0.0, 0.0, 0.0, 0.0),
         )
+        if warped_slab.ndim == 2:
+            out[0, c0] = warped_slab
+        else:
+            out[0, c0:c1] = np.transpose(warped_slab, (2, 0, 1))
     return out
 
 
@@ -177,16 +216,18 @@ def _decode_d2_top(
     score_thr: float = 0.25,
     stride: float = 2.0,
 ) -> tuple[tuple[float, float, float, float, float] | None, float]:
-    hm = hm_logits[0, 0].astype(np.float32)
-    off = offset[0].astype(np.float32)
-    lsc = log_scale[0].astype(np.float32)
-    pmk = peak_mask[0, 0].astype(np.float32)
+    hm = np.nan_to_num(hm_logits[0, 0].astype(np.float32), nan=-40.0, posinf=-40.0, neginf=-40.0)
+    off = np.nan_to_num(offset[0].astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    lsc = np.nan_to_num(log_scale[0].astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    pmk = np.nan_to_num(peak_mask[0, 0].astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 
     probs = _sigmoid_np(hm)
     h_sz, w_sz = probs.shape
-    max_prob = float(probs.max())
+    max_prob = float(probs.max()) if probs.size > 0 else 0.0
+    if not math.isfinite(max_prob):
+        max_prob = 0.0
 
-    keep = (probs >= float(score_thr)) & (pmk > 0.5)
+    keep = np.isfinite(probs) & (probs >= float(score_thr)) & (pmk > 0.5)
     ys, xs = np.where(keep)
     if ys.size == 0:
         return None, max_prob
@@ -196,6 +237,8 @@ def _decode_d2_top(
     cy = int(ys[best])
     cx = int(xs[best])
     score = float(probs[cy, cx])
+    if not math.isfinite(score):
+        return None, max_prob
 
     y0, y1 = max(0, cy - 1), min(h_sz, cy + 2)
     x0, x1 = max(0, cx - 1), min(w_sz, cx + 2)
@@ -216,6 +259,8 @@ def _decode_d2_top(
     r_wh = math.exp(max(-3.0, min(3.0, float(lsc[1, cy, cx]))))
     bw = max(6.0, min(96.0, s_mom * math.sqrt(r_wh)))
     bh = max(6.0, min(96.0, s_mom / math.sqrt(r_wh)))
+    if not all(math.isfinite(v) for v in (u_px, v_px, bw, bh, score)):
+        return None, max_prob
     return (u_px - 0.5 * bw, v_px - 0.5 * bh, u_px + 0.5 * bw, v_px + 0.5 * bh, score), max_prob
 
 
@@ -328,10 +373,19 @@ def _extract_tbc_summary(
 class D2TrackerState:
     """Isolated temporal ConvGRU + `ActiveRangeController` + `3-of-5` TBC state for a single stream."""
 
-    def __init__(self, hid_c: int = 24, focal_px: float = AOT_FOCAL_PX) -> None:
+    def __init__(
+        self,
+        hid_c: int = 24,
+        focal_px: float = AOT_FOCAL_PX,
+        input_hw: tuple[int, int] = (D2_CROP_SIZE, D2_CROP_SIZE),
+    ) -> None:
         self.hid_c = int(hid_c)
         self.focal_px = float(focal_px)
-        self.h_prev = np.zeros((1, self.hid_c, D2_CROP_SIZE // 4, D2_CROP_SIZE // 4), dtype=np.float32)
+        self.input_hw = (int(input_hw[0]), int(input_hw[1]))
+        self.h_prev = np.zeros(
+            (1, self.hid_c, max(1, self.input_hw[0] // 4), max(1, self.input_hw[1] // 4)),
+            dtype=np.float32,
+        )
         self.gray_hist: list[tuple[np.ndarray, int, int]] = []
         self.active_range_ctrl = ActiveRangeController(
             ActiveRangeConfig(q_hat_conformal=0.955, sigma_bearing_rad=2.86 / self.focal_px)
@@ -383,16 +437,17 @@ class StudioInferenceEngine:
         self._cache_lock = threading.Lock()
 
         # Isolated temporal states: demo_tick vs live webcam/fast stream
-        self._demo_d2_state = D2TrackerState(hid_c=self.bundle.d2_hid_c, focal_px=AOT_FOCAL_PX)
-        self._fast_d2_state = D2TrackerState(hid_c=self.bundle.d2_hid_c, focal_px=AOT_FOCAL_PX)
+        d2_hw = getattr(self.bundle, "d2_input_hw", (D2_CROP_SIZE, D2_CROP_SIZE))
+        self._demo_d2_state = D2TrackerState(hid_c=self.bundle.d2_hid_c, focal_px=AOT_FOCAL_PX, input_hw=d2_hw)
+        self._fast_d2_state = D2TrackerState(hid_c=self.bundle.d2_hid_c, focal_px=AOT_FOCAL_PX, input_hw=d2_hw)
 
         # Canonical KSFO-28L runway reference features (strictly NED) for 4-DoF MAP-PnPL
         self._land_ref_pts_ned, self._land_ref_kl_pairs = build_ksfo_28l_reference_features()
 
-        # Cached KSFO ortho + onboard static NAIP satellite reference descriptor & Stage-2 XFeat DB
+        # Cached KSFO ortho + bounded LRU (<= 64) static NAIP satellite reference descriptor & Stage-2 XFeat DB
         self._ksfo_bgr: np.ndarray | None = None
-        self._nav_ref_desc_cache: dict[str, np.ndarray] = {}
-        self._nav_ref_xfeat_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._nav_ref_desc_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._nav_ref_xfeat_cache: OrderedDict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = OrderedDict()
         self._nav_gallery_descs: np.ndarray | None = None
         self._nav_gallery_tiles: list[np.ndarray] = []
         # Strictly NED coordinates (meters) for the 4 non-adjacent KSFO ortho gallery tiles (> 300 m spacing)
@@ -406,16 +461,20 @@ class StudioInferenceEngine:
             dtype=np.float64,
         )
         # Isolated multi-frame Sequence-VPR filters (`W=7`, strict NED odometry prior + aliasing gate)
-        self._demo_seq_vpr = self.new_nav_sequence_vpr_filter()
-        self._fast_seq_vpr = self.new_nav_sequence_vpr_filter()
+        self._demo_seq_vpr = self.new_nav_sequence_vpr_filter() if _HAS_XVS_NAV else None
+        self._fast_seq_vpr = self.new_nav_sequence_vpr_filter() if _HAS_XVS_NAV else None
         self._ref_seq_vpr: SequenceVprFilter | None = None
         self._demo_last_scenario: str | None = None
-        self._nav_xfeat = XFeatOnnxRunner(
-            onnx_path=self.bundle.nav_xfeat_onnx_path,
-            expected_sha256=self.bundle.nav_xfeat_sha256 if self.bundle.nav_xfeat_sha256 else None,
-            max_keypoints=256,
+        self._nav_xfeat = (
+            XFeatOnnxRunner(
+                onnx_path=self.bundle.nav_xfeat_onnx_path,
+                expected_sha256=self.bundle.nav_xfeat_sha256 if self.bundle.nav_xfeat_sha256 else None,
+                max_keypoints=256,
+            )
+            if _HAS_XVS_NAV
+            else None
         )
-        self._nav_lighterglue = LighterGlueFallbackRunner()
+        self._nav_lighterglue = LighterGlueFallbackRunner() if _HAS_XVS_NAV else None
         self._aot_manifest: dict[str, Any] | None = None
         self._studio_manifest: dict[str, Any] | None = None
 
@@ -428,10 +487,13 @@ class StudioInferenceEngine:
 
     def new_d2_tracker_state(self, focal_px: float = AOT_FOCAL_PX) -> D2TrackerState:
         """Allocate a fresh job-isolated `D2TrackerState` (never touches `demo_tick` state)."""
-        return D2TrackerState(hid_c=self.bundle.d2_hid_c, focal_px=focal_px)
+        d2_hw = getattr(self.bundle, "d2_input_hw", (D2_CROP_SIZE, D2_CROP_SIZE))
+        return D2TrackerState(hid_c=self.bundle.d2_hid_c, focal_px=focal_px, input_hw=d2_hw)
 
     def new_nav_cusum_filter(self) -> DualBankEsEkfCusum:
         """Allocate a fresh local-only Dual-Bank ES-EKF + 8-Arm Cholesky Page's CUSUM spoof-guard."""
+        if not _HAS_XVS_NAV:
+            raise RuntimeError("XVS-Nav module is excluded in this clean-room build")
         return DualBankEsEkfCusum()
 
     def new_nav_sequence_vpr_filter(
@@ -440,6 +502,8 @@ class StudioInferenceEngine:
         config: SequenceVprConfig | None = None,
     ) -> SequenceVprFilter:
         """Allocate a fresh multi-frame `SequenceVprFilter` (`W=7`, strictly NED odometry prior)."""
+        if not _HAS_XVS_NAV:
+            raise RuntimeError("XVS-Nav module is excluded in this clean-room build")
         coords = self._nav_gallery_ne_m if gallery_ne_m is None else np.asarray(gallery_ne_m, dtype=np.float64)
         cfg = (
             SequenceVprConfig(
@@ -476,8 +540,10 @@ class StudioInferenceEngine:
             self._demo_d2_state.reset()
             self._fast_d2_state.reset()
         with self._nav_seq_vpr_lock:
-            self._demo_seq_vpr.reset()
-            self._fast_seq_vpr.reset()
+            if self._demo_seq_vpr is not None:
+                self._demo_seq_vpr.reset()
+            if self._fast_seq_vpr is not None:
+                self._fast_seq_vpr.reset()
             self._ref_seq_vpr = None
             self._demo_last_scenario = None
         self._sensor_health.reset()
@@ -509,35 +575,42 @@ class StudioInferenceEngine:
         return self.bundle.meta[mkey].sha256
 
     def _load_ksfo_ortho(self) -> np.ndarray:
-        if self._ksfo_bgr is not None:
-            return self._ksfo_bgr
+        with self._cache_lock:
+            if self._ksfo_bgr is not None:
+                return self._ksfo_bgr
+        loaded: np.ndarray | None = None
         if self.ksfo_ortho_path.is_file():
-            img = cv2.imread(str(self.ksfo_ortho_path), cv2.IMREAD_COLOR)
-            if img is not None:
-                self._ksfo_bgr = img
-                return img
-        canvas = np.full((512, 512, 3), (44, 52, 46), dtype=np.uint8)
-        cv2.line(canvas, (90, 440), (420, 90), (88, 92, 96), 34, cv2.LINE_AA)
-        cv2.line(canvas, (100, 430), (410, 100), (225, 232, 238), 2, cv2.LINE_AA)
-        self._ksfo_bgr = canvas
-        return canvas
+            loaded = cv2.imread(str(self.ksfo_ortho_path), cv2.IMREAD_COLOR)
+        if loaded is None:
+            loaded = np.full((512, 512, 3), (44, 52, 46), dtype=np.uint8)
+            cv2.line(loaded, (90, 440), (420, 90), (88, 92, 96), 34, cv2.LINE_AA)
+            cv2.line(loaded, (100, 430), (410, 100), (225, 232, 238), 2, cv2.LINE_AA)
+        with self._cache_lock:
+            if self._ksfo_bgr is None:
+                self._ksfo_bgr = loaded
+            return self._ksfo_bgr
 
     def _load_aot_manifest(self) -> dict[str, Any] | None:
-        if self._aot_manifest is not None:
-            return self._aot_manifest
+        with self._cache_lock:
+            if self._aot_manifest is not None:
+                return self._aot_manifest
         mpath = self.aot_pack_dir / "manifest.json"
-        if mpath.is_file():
-            self._aot_manifest = json.loads(mpath.read_text(encoding="utf-8"))
-        return self._aot_manifest
+        loaded = json.loads(mpath.read_text(encoding="utf-8")) if mpath.is_file() else None
+        with self._cache_lock:
+            if self._aot_manifest is None and loaded is not None:
+                self._aot_manifest = loaded
+            return self._aot_manifest
 
     def _load_studio_manifest(self) -> dict[str, Any] | None:
-        if self._studio_manifest is not None:
-            return self._studio_manifest
+        with self._cache_lock:
+            if self._studio_manifest is not None:
+                return self._studio_manifest
         mpath = self.studio_media_dir / "manifest.json"
-        if mpath.is_file():
-            self._studio_manifest = json.loads(mpath.read_text(encoding="utf-8"))
+        loaded = json.loads(mpath.read_text(encoding="utf-8")) if mpath.is_file() else None
+        with self._cache_lock:
+            if self._studio_manifest is None and loaded is not None:
+                self._studio_manifest = loaded
             return self._studio_manifest
-        return None
 
     # ---- Channel 1: XVS-D2 + XVS-ActiveRange ----
 
@@ -546,20 +619,22 @@ class StudioInferenceEngine:
         crop_gray: np.ndarray,
         score_thr: float,
     ) -> tuple[tuple[float, float, float, float, float] | None, float]:
-        """Run a stateless 1-step `XVS-D2` ONNX probe on a 256x256 tile for high-res fallback."""
+        """Run a stateless 1-step `XVS-D2` ONNX probe on a `(d2_h, d2_w)` tile for high-res fallback."""
         if self.bundle.d2_session is None:
             return None, 0.0
+        d2_h, d2_w = getattr(self.bundle, "d2_input_hw", (D2_CROP_SIZE, D2_CROP_SIZE))
         c0 = _scene_normalize_gray(crop_gray)
-        zeros = np.zeros((D2_CROP_SIZE, D2_CROP_SIZE), dtype=np.float32)
+        zeros = np.zeros((d2_h, d2_w), dtype=np.float32)
         x_t = np.stack([c0, zeros, zeros, zeros, zeros, zeros], axis=0)[np.newaxis, :, :, :]
-        h_zero = np.zeros((1, self.bundle.d2_hid_c, D2_CROP_SIZE // 4, D2_CROP_SIZE // 4), dtype=np.float32)
-        outs = self.bundle.d2_session.run(
-            None,
-            {
-                "x_t": x_t.astype(self.bundle.d2_x_dtype),
-                "h_prev_warped": h_zero.astype(self.bundle.d2_h_dtype),
-            },
-        )
+        h_zero = np.zeros((1, self.bundle.d2_hid_c, d2_h // 4, d2_w // 4), dtype=np.float32)
+        with self._d2_ort_lock:
+            outs = self.bundle.d2_session.run(
+                None,
+                {
+                    "x_t": x_t.astype(self.bundle.d2_x_dtype),
+                    "h_prev_warped": h_zero.astype(self.bundle.d2_h_dtype),
+                },
+            )
         return _decode_d2_top(
             outs[0].astype(np.float32),
             outs[1].astype(np.float32),
@@ -604,26 +679,41 @@ class StudioInferenceEngine:
         )
         state = self._demo_d2_state if tracker_state is None else tracker_state
 
+        d2_h, d2_w = getattr(self.bundle, "d2_input_hw", (D2_CROP_SIZE, D2_CROP_SIZE))
         use_native_subcrop = (
-            subcrop_origin_xy is not None and w_in >= D2_CROP_SIZE and h_in >= D2_CROP_SIZE
+            subcrop_origin_xy is not None and w_in >= d2_w and h_in >= d2_h
         )
         if use_native_subcrop and subcrop_origin_xy is not None:
-            ox = max(0, min(w_in - D2_CROP_SIZE, int(subcrop_origin_xy[0])))
-            oy = max(0, min(h_in - D2_CROP_SIZE, int(subcrop_origin_xy[1])))
-            crop_bgr = bgr[oy : oy + D2_CROP_SIZE, ox : ox + D2_CROP_SIZE]
+            ox = max(0, min(w_in - d2_w, int(subcrop_origin_xy[0])))
+            oy = max(0, min(h_in - d2_h, int(subcrop_origin_xy[1])))
+            crop_bgr = bgr[oy : oy + d2_h, ox : ox + d2_w]
             gmc_x = int(crop_x) + ox
             gmc_y = int(crop_y) + oy
         else:
             ox, oy = 0, 0
-            crop_bgr = cv2.resize(bgr, (D2_CROP_SIZE, D2_CROP_SIZE), interpolation=cv2.INTER_AREA)
+            crop_bgr = cv2.resize(bgr, (d2_w, d2_h), interpolation=cv2.INTER_AREA)
             gmc_x = int(crop_x)
             gmc_y = int(crop_y)
 
+        # Scale default AOT_FOCAL_PX proportionally to frame width (`w / 2448.0`) on resized frames
+        eff_focal_px = (
+            max(64.0, float(focal_px) * (float(w_in) / 2448.0))
+            if (abs(float(focal_px) - AOT_FOCAL_PX) < 1.0e-6 and not use_native_subcrop and w_in > 0)
+            else max(64.0, float(focal_px))
+        )
         crop_gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        c0 = _scene_normalize_gray(crop_gray)
+
+        det: tuple[float, float, float, float, float] | None = None
+        det_frame_box: tuple[float, float, float, float] | None = None
+        weak_tbc_det: tuple[float, float, float, float, float] | None = None
+        weak_tbc_box: tuple[float, float, float, float] | None = None
+        max_prob = 0.0
 
         with self._d2_ort_lock:
-            c0 = _scene_normalize_gray(crop_gray)
-            if len(state.gray_hist) >= 1:
+            if state.h_prev.shape[2:] != (d2_h // 4, d2_w // 4):
+                state.h_prev = np.zeros((1, state.hid_c, d2_h // 4, d2_w // 4), dtype=np.float32)
+            if len(state.gray_hist) >= 1 and state.gray_hist[-1][0].shape == (d2_h, d2_w):
                 g1, cx1, cy1 = state.gray_hist[-1]
                 dx1 = float(cx1 - gmc_x)
                 dy1 = float(cy1 - gmc_y)
@@ -631,18 +721,18 @@ class StudioInferenceEngine:
                 c1 = _scene_normalize_gray(w1) * r1
             else:
                 dx1, dy1 = 0.0, 0.0
-                c1 = np.zeros((D2_CROP_SIZE, D2_CROP_SIZE), dtype=np.float32)
-                r1 = np.zeros((D2_CROP_SIZE, D2_CROP_SIZE), dtype=np.float32)
+                c1 = np.zeros((d2_h, d2_w), dtype=np.float32)
+                r1 = np.zeros((d2_h, d2_w), dtype=np.float32)
 
-            if len(state.gray_hist) >= 5:
+            if len(state.gray_hist) >= 5 and state.gray_hist[-5][0].shape == (d2_h, d2_w):
                 g5, cx5, cy5 = state.gray_hist[-5]
                 dx5 = float(cx5 - gmc_x)
                 dy5 = float(cy5 - gmc_y)
                 w5, r5 = _warp_gray_and_mask(g5, dx5, dy5)
                 c2 = _scene_normalize_gray(w5) * r5
             else:
-                c2 = np.zeros((D2_CROP_SIZE, D2_CROP_SIZE), dtype=np.float32)
-                r5 = np.zeros((D2_CROP_SIZE, D2_CROP_SIZE), dtype=np.float32)
+                c2 = np.zeros((d2_h, d2_w), dtype=np.float32)
+                r5 = np.zeros((d2_h, d2_w), dtype=np.float32)
 
             c3 = (c0 - c1) * r1
             c4 = (c0 - c2) * r5
@@ -654,11 +744,6 @@ class StudioInferenceEngine:
             if len(state.gray_hist) > 8:
                 state.gray_hist.pop(0)
 
-            det: tuple[float, float, float, float, float] | None = None
-            det_frame_box: tuple[float, float, float, float] | None = None
-            weak_tbc_det: tuple[float, float, float, float, float] | None = None
-            weak_tbc_box: tuple[float, float, float, float] | None = None
-            max_prob = 0.0
             if self.bundle.d2_session is not None:
                 outs = self.bundle.d2_session.run(
                     None,
@@ -680,8 +765,8 @@ class StudioInferenceEngine:
                     if use_native_subcrop:
                         det_frame_box = (x1 + ox, y1 + oy, x2 + ox, y2 + oy)
                     else:
-                        sx_m = float(w_in) / float(D2_CROP_SIZE)
-                        sy_m = float(h_in) / float(D2_CROP_SIZE)
+                        sx_m = float(w_in) / float(d2_w)
+                        sy_m = float(h_in) / float(d2_h)
                         det_frame_box = (x1 * sx_m, y1 * sy_m, x2 * sx_m, y2 * sy_m)
                 elif float(score_thr) > DEFAULT_WEAK_SCORE_THR:
                     weak_tbc_det, _ = _decode_d2_top(
@@ -696,43 +781,81 @@ class StudioInferenceEngine:
                         if use_native_subcrop:
                             weak_tbc_box = (wx1 + ox, wy1 + oy, wx2 + ox, wy2 + oy)
                         else:
-                            sx_m = float(w_in) / float(D2_CROP_SIZE)
-                            sy_m = float(h_in) / float(D2_CROP_SIZE)
+                            sx_m = float(w_in) / float(d2_w)
+                            sy_m = float(h_in) / float(d2_h)
                             weak_tbc_box = (wx1 * sx_m, wy1 * sy_m, wx2 * sx_m, wy2 * sy_m)
 
-                # Smart multi-crop tiled fallback on high-res (> 384px) real-world video frames
-                if det is None and multi_crop_fallback and not use_native_subcrop and max(w_in, h_in) > 384:
-                    tile_w = min(w_in, max(D2_CROP_SIZE, w_in // 2))
-                    tile_h = min(h_in, max(D2_CROP_SIZE, h_in // 2))
-                    sky_y = max(0, min(h_in - tile_h, int(h_in * 0.08)))
-                    tile_origins = [
-                        (max(0, (w_in - tile_w) // 2), sky_y),
-                        (0, sky_y),
-                        (max(0, w_in - tile_w), sky_y),
-                    ]
-                    best_tile_det: tuple[float, float, float, float, float] | None = None
-                    best_tile_box: tuple[float, float, float, float] | None = None
-                    for tx0, ty0 in tile_origins:
-                        patch = bgr[ty0 : ty0 + tile_h, tx0 : tx0 + tile_w]
-                        p_rs = cv2.resize(patch, (D2_CROP_SIZE, D2_CROP_SIZE), interpolation=cv2.INTER_AREA)
-                        p_gray = cv2.cvtColor(p_rs, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                        tdet, tprob = self._run_d2_single_probe(p_gray, score_thr=score_thr)
-                        if tprob > max_prob:
-                            max_prob = tprob
-                        if tdet is not None and (best_tile_det is None or tdet[4] > best_tile_det[4]):
-                            best_tile_det = tdet
-                            tsx = float(tile_w) / float(D2_CROP_SIZE)
-                            tsy = float(tile_h) / float(D2_CROP_SIZE)
-                            best_tile_box = (
-                                tx0 + tdet[0] * tsx,
-                                ty0 + tdet[1] * tsy,
-                                tx0 + tdet[2] * tsx,
-                                ty0 + tdet[3] * tsy,
-                            )
-                    if best_tile_det is not None and best_tile_box is not None:
-                        det = best_tile_det
-                        det_frame_box = best_tile_box
+        # Smart multi-crop / adaptive horizon-tiling fallback OUTSIDE the main state lock
+        if (
+            self.bundle.d2_session is not None
+            and det is None
+            and multi_crop_fallback
+            and not use_native_subcrop
+            and max(w_in, h_in) > 384
+        ):
+            if d2_h >= 640 and d2_w >= 640:
+                gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                tiles_h, specs_h = extract_horizon_tiles(
+                    gray_full, tile_hw=(d2_h, d2_w), overlap_frac=0.10, cover_full_width=True
+                )
+                per_tile_dets: list[list[dict[str, Any]]] = []
+                for tile_img in tiles_h:
+                    tdet, tprob = self._run_d2_single_probe(tile_img.astype(np.float32), score_thr=score_thr)
+                    if tprob > max_prob:
+                        max_prob = tprob
+                    if tdet is not None:
+                        tu = 0.5 * (tdet[0] + tdet[2])
+                        tv = 0.5 * (tdet[1] + tdet[3])
+                        per_tile_dets.append(
+                            [{"u_px": tu, "v_px": tv, "w": tdet[2] - tdet[0], "h": tdet[3] - tdet[1], "score": tdet[4]}]
+                        )
+                    else:
+                        per_tile_dets.append([])
+                merged_h = merge_tile_detections(per_tile_dets, specs_h, nms_radius_px=12.0)
+                if merged_h:
+                    top_m = merged_h[0]
+                    bw_m = float(top_m["w"])
+                    bh_m = float(top_m["h"])
+                    det_frame_box = (
+                        float(top_m["u_px"]) - 0.5 * bw_m,
+                        float(top_m["v_px"]) - 0.5 * bh_m,
+                        float(top_m["u_px"]) + 0.5 * bw_m,
+                        float(top_m["v_px"]) + 0.5 * bh_m,
+                    )
+                    det = (*det_frame_box, float(top_m["score"]))
+            else:
+                tile_w = min(w_in, max(d2_w, w_in // 2))
+                tile_h = min(h_in, max(d2_h, h_in // 2))
+                sky_y = max(0, min(h_in - tile_h, int(h_in * 0.08)))
+                tile_origins = [
+                    (max(0, (w_in - tile_w) // 2), sky_y),
+                    (0, sky_y),
+                    (max(0, w_in - tile_w), sky_y),
+                ]
+                best_tile_det: tuple[float, float, float, float, float] | None = None
+                best_tile_box: tuple[float, float, float, float] | None = None
+                for tx0, ty0 in tile_origins:
+                    patch = bgr[ty0 : ty0 + tile_h, tx0 : tx0 + tile_w]
+                    p_rs = cv2.resize(patch, (d2_w, d2_h), interpolation=cv2.INTER_AREA)
+                    p_gray = cv2.cvtColor(p_rs, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                    tdet, tprob = self._run_d2_single_probe(p_gray, score_thr=score_thr)
+                    if tprob > max_prob:
+                        max_prob = tprob
+                    if tdet is not None and (best_tile_det is None or tdet[4] > best_tile_det[4]):
+                        best_tile_det = tdet
+                        tsx = float(tile_w) / float(d2_w)
+                        tsy = float(tile_h) / float(d2_h)
+                        best_tile_box = (
+                            tx0 + tdet[0] * tsx,
+                            ty0 + tdet[1] * tsy,
+                            tx0 + tdet[2] * tsx,
+                            ty0 + tdet[3] * tsy,
+                        )
+                if best_tile_det is not None and best_tile_box is not None:
+                    det = best_tile_det
+                    det_frame_box = best_tile_box
 
+        with self._d2_ort_lock:
             if det is not None and det_frame_box is not None:
                 fx1, fy1, fx2, fy2 = det_frame_box
                 score = float(det[4])
@@ -753,8 +876,8 @@ class StudioInferenceEngine:
                 size_rate = 0.0
                 score = 0.0
 
-            alpha_rad = math.atan2(cx_px - 0.5 * float(w_in), float(focal_px))
-            beta_rad = math.atan2(0.5 * float(h_in) - cy_px, float(focal_px))
+            alpha_rad = math.atan2(cx_px - 0.5 * float(w_in), eff_focal_px)
+            beta_rad = math.atan2(0.5 * float(h_in) - cy_px, eff_focal_px)
 
             # 3-of-5 Bearing Track-Before-Confirm (`BearingTrackBeforeConfirm`, Camera RDF / NED bearings)
             if tbc_detections is not None:
@@ -766,8 +889,8 @@ class StudioInferenceEngine:
                         el_rad=float(beta_rad),
                         score=float(score),
                         modality="eo",
-                        sigma_az_rad=2.86 / float(focal_px),
-                        sigma_el_rad=2.86 / float(focal_px),
+                        sigma_az_rad=2.86 / eff_focal_px,
+                        sigma_el_rad=2.86 / eff_focal_px,
                         size_px=float(size_px),
                         u_px=float(cx_px),
                         v_px=float(cy_px),
@@ -780,12 +903,12 @@ class StudioInferenceEngine:
                 w_sz = math.sqrt(max(1.0, (wx2 - wx1) * (wy2 - wy1)))
                 dets_for_tbc = [
                     BearingDetection(
-                        az_rad=math.atan2(w_cx - 0.5 * float(w_in), float(focal_px)),
-                        el_rad=math.atan2(0.5 * float(h_in) - w_cy, float(focal_px)),
+                        az_rad=math.atan2(w_cx - 0.5 * float(w_in), eff_focal_px),
+                        el_rad=math.atan2(0.5 * float(h_in) - w_cy, eff_focal_px),
                         score=float(weak_tbc_det[4]),
                         modality="eo",
-                        sigma_az_rad=2.86 / float(focal_px),
-                        sigma_el_rad=2.86 / float(focal_px),
+                        sigma_az_rad=2.86 / eff_focal_px,
+                        sigma_el_rad=2.86 / eff_focal_px,
                         size_px=float(w_sz),
                         u_px=float(w_cx),
                         v_px=float(w_cy),
@@ -1025,7 +1148,7 @@ class StudioInferenceEngine:
         use_horizon_roi = (
             bool(horizon_preserving_roi)
             if horizon_preserving_roi is not None
-            else land_meta.tier.startswith(("wave_c", "v52"))
+            else land_meta.tier.startswith(("wave_c", "v52", "v53"))
         )
         ox, oy, rw, rh = self._compute_land_roi_origin(
             w_in, h_in, roi_box_px, horizon_preserving=use_horizon_roi
@@ -1039,26 +1162,32 @@ class StudioInferenceEngine:
         inp_np = np.ascontiguousarray(np.transpose(rgb_f32, (2, 0, 1))[np.newaxis, :, :, :], dtype=np.float32)
 
         raw_keyline_sigma_px: np.ndarray | None = None
+        raw_runway_present_logit: float | None = None
         if self.bundle.land_session is not None:
             out_names = [o.name for o in self.bundle.land_session.get_outputs()]
             has_keyline_sigma = "keyline_sigma_px" in out_names
-            fetch_names = (
-                ["keypoints_xy", "keylines_hesse", "cov_2x2", "keyline_sigma_px"]
-                if has_keyline_sigma
-                else ["keypoints_xy", "keylines_hesse", "cov_2x2"]
-            )
+            has_runway_present = "runway_present_logit" in out_names
+            fetch_names = ["keypoints_xy", "keylines_hesse", "cov_2x2"]
+            if has_keyline_sigma:
+                fetch_names.append("keyline_sigma_px")
+            if has_runway_present:
+                fetch_names.append("runway_present_logit")
             with self._land_ort_lock:
                 ort_outs = self.bundle.land_session.run(fetch_names, {"roi_crop": inp_np})
-            kpts_xy = np.asarray(ort_outs[0][0], dtype=np.float64)
-            keylines = np.asarray(ort_outs[1][0], dtype=np.float64)
-            cov_raw = torch.from_numpy(np.asarray(ort_outs[2][0], dtype=np.float32))
+            out_by_name = dict(zip(fetch_names, ort_outs))
+            kpts_xy = np.asarray(out_by_name["keypoints_xy"][0], dtype=np.float64)
+            keylines = np.asarray(out_by_name["keylines_hesse"][0], dtype=np.float64)
+            cov_raw = torch.from_numpy(np.asarray(out_by_name["cov_2x2"][0], dtype=np.float32))
             if has_keyline_sigma:
-                raw_keyline_sigma_px = np.asarray(ort_outs[3][0], dtype=np.float64).reshape(-1)
+                raw_keyline_sigma_px = np.asarray(out_by_name["keyline_sigma_px"][0], dtype=np.float64).reshape(-1)
+            if has_runway_present:
+                raw_runway_present_logit = float(np.asarray(out_by_name["runway_present_logit"]).reshape(-1)[0])
         else:
             if self.bundle.land_model is None:
                 raise RuntimeError("XVS-Land neither ONNX session nor PyTorch model is initialized")
             inp = torch.from_numpy(inp_np).to(self.bundle.land_device)
-            out = self.bundle.land_model(inp)
+            with self._land_ort_lock:
+                out = self.bundle.land_model(inp)
             kpts_xy = out["keypoints_xy"][0].detach().cpu().numpy().astype(np.float64)
             keylines = out["keylines_hesse"][0].detach().cpu().numpy().astype(np.float64)
             cov_raw = out["cov_2x2"][0].detach().cpu()
@@ -1066,16 +1195,33 @@ class StudioInferenceEngine:
                 raw_keyline_sigma_px = (
                     out["keyline_sigma_px"][0].detach().cpu().numpy().astype(np.float64).reshape(-1)
                 )
+            if "runway_present_logit" in out:
+                raw_runway_present_logit = float(
+                    out["runway_present_logit"].detach().cpu().float().reshape(-1)[0].item()
+                )
 
-        # Fail-closed validation: `None` on 5-output v5.1 models, finite > 0 `(5,)` on 6-output v5.2 models
+        # Fail-closed validation: 5-output v5.1, 6-output v5.2, or 7-output extended (`runway_present_logit`)
         keyline_sigmas_px = validate_keyline_sigmas_px(raw_keyline_sigma_px, expected_count=keylines.shape[0])
-        onnx_contract = "v52_6output" if keyline_sigmas_px is not None else "v51_5output"
+        runway_present_prob: float | None = None
+        runway_present = True
+        if raw_runway_present_logit is not None:
+            if math.isfinite(raw_runway_present_logit):
+                clamped_l = max(-40.0, min(40.0, float(raw_runway_present_logit)))
+                runway_present_prob = 1.0 / (1.0 + math.exp(-clamped_l))
+            else:
+                runway_present_prob = 0.0
+            runway_present = bool(runway_present_prob >= RUNWAY_PRESENT_PROB_THR)
+        onnx_contract = (
+            "v53_7output"
+            if raw_runway_present_logit is not None
+            else ("v52_6output" if keyline_sigmas_px is not None else "v51_5output")
+        )
 
         cov_cal = self.bundle.land_calibrator.calibrate_covariance(cov_raw).numpy().astype(np.float64)
 
-        # Optional 4-DoF Horizon-Constrained Huber-Tukey IRLS MAP-PnPL (strictly NED, zero silent defaults)
+        # Optional 4-DoF Horizon-Constrained Huber-Tukey IRLS MAP-PnPL (strictly skipped on extended runway_present fail-closed!)
         pnpl_payload: dict[str, Any] | None = None
-        if solve_pnpl:
+        if solve_pnpl and runway_present:
             hdg_default = math.radians(297.7)
             use_pts_ned = self._land_ref_pts_ned if pts_ned is None else np.asarray(pts_ned, dtype=np.float64)
             use_kl_pairs = self._land_ref_kl_pairs if keyline_pairs is None else list(keyline_pairs)
@@ -1142,10 +1288,14 @@ class StudioInferenceEngine:
         center_v = float(np.mean(kpts_256[:, 1]))
         lat_dev_deg = round((center_u - 128.0) / 256.0 * 18.0, 2)
         glideslope_deg = round(3.0 + (128.0 - center_v) / 256.0 * 2.5, 2)
-        hpl_m = round(max(12.0, mean_sigma_px * 14.5), 2)
-        vpl_m = round(max(6.0, mean_sigma_px * 5.2), 2)
+        hpl_m = round(max(12.0, mean_sigma_px * 14.5), 2) if runway_present else 999.0
+        vpl_m = round(max(6.0, mean_sigma_px * 5.2), 2) if runway_present else 999.0
         latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-        summary_str = f"28L 12-KPT | GS {glideslope_deg:.1f}deg | VPL {vpl_m:.0f}m"
+        summary_str = (
+            f"28L 12-KPT | GS {glideslope_deg:.1f}deg | VPL {vpl_m:.0f}m"
+            if runway_present
+            else f"NO RUNWAY (P={runway_present_prob:.2f}<0.65) | P0 INHIBIT"
+        )
         ckpt_sha = land_meta.sha256
 
         res: dict[str, Any] = {
@@ -1156,9 +1306,16 @@ class StudioInferenceEngine:
             "real_weights": land_meta.real_weights,
             "checkpoint_sha256": ckpt_sha,
             "latency_ms": latency_ms,
-            "confidence": round(max(0.1, min(0.99, 1.0 - mean_sigma_px / 60.0)), 4),
+            "confidence": (
+                round(max(0.1, min(0.99, 1.0 - mean_sigma_px / 60.0)), 4)
+                if runway_present
+                else round(float(runway_present_prob or 0.0), 4)
+            ),
             "summary": summary_str,
             "onnx_output_contract": onnx_contract,
+            "runway_present": bool(runway_present),
+            "runway_present_prob": round(float(runway_present_prob), 4) if runway_present_prob is not None else None,
+            "p0_inhibit": bool(not runway_present),
             "roi_hw": [int(roi_h), int(roi_w)],
             "keypoints_xy_256": [[round(float(x), 2), round(float(y), 2)] for x, y in kpts_256],
             "keylines_hesse": [
@@ -1200,15 +1357,16 @@ class StudioInferenceEngine:
                 p_r1 = (int(round(ox * sx)), int(round(oy * sy)))
                 p_r2 = (int(round((ox + rw) * sx)), int(round((oy + rh) * sy)))
                 cv2.rectangle(vis, p_r1, p_r2, COL_AMBER, 1, cv2.LINE_AA)
-            for idx, pt in enumerate(pts_vis):
-                col = COL_CYAN if idx % 2 == 0 else COL_EMERALD
-                cv2.circle(vis, pt, 3, col, -1, cv2.LINE_AA)
-            if len(pts_vis) >= 12:
-                cv2.line(vis, pts_vis[0], pts_vis[9], COL_CYAN, 2, cv2.LINE_AA)
-                cv2.line(vis, pts_vis[2], pts_vis[11], COL_CYAN, 2, cv2.LINE_AA)
-                cv2.line(vis, pts_vis[1], pts_vis[10], COL_EMERALD, 1, cv2.LINE_AA)
-                cv2.line(vis, pts_vis[0], pts_vis[2], COL_EMERALD, 2, cv2.LINE_AA)
-            _draw_badge(vis, summary_str, (8, 22), COL_CYAN)
+            if runway_present:
+                for idx, pt in enumerate(pts_vis):
+                    col = COL_CYAN if idx % 2 == 0 else COL_EMERALD
+                    cv2.circle(vis, pt, 3, col, -1, cv2.LINE_AA)
+                if len(pts_vis) >= 12:
+                    cv2.line(vis, pts_vis[0], pts_vis[9], COL_CYAN, 2, cv2.LINE_AA)
+                    cv2.line(vis, pts_vis[2], pts_vis[11], COL_CYAN, 2, cv2.LINE_AA)
+                    cv2.line(vis, pts_vis[1], pts_vis[10], COL_EMERALD, 1, cv2.LINE_AA)
+                    cv2.line(vis, pts_vis[0], pts_vis[2], COL_EMERALD, 2, cv2.LINE_AA)
+            _draw_badge(vis, summary_str, (8, 22), COL_CYAN if runway_present else COL_ROSE)
             b64 = _encode_jpeg_b64(vis, quality=84)
             res["image_b64"] = b64
             res["annotated_jpeg_b64"] = f"data:image/jpeg;base64,{b64}"
@@ -1295,7 +1453,8 @@ class StudioInferenceEngine:
             x_lwir = torch.from_numpy(x_lwir_np).to(self.bundle.thermal_device)
             q_eo_t = torch.tensor([q_eo_run], dtype=torch.float32, device=self.bundle.thermal_device)
             q_lwir_t = torch.tensor([q_lwir_run], dtype=torch.float32, device=self.bundle.thermal_device)
-            out = self.bundle.thermal_model(x_eo, x_lwir, q_eo=q_eo_t, q_lwir=q_lwir_t)
+            with self._thermal_ort_lock:
+                out = self.bundle.thermal_model(x_eo, x_lwir, q_eo=q_eo_t, q_lwir=q_lwir_t)
             vacuity_map = out["vacuity"][0, 0].detach().cpu().numpy().astype(np.float64)
             hm_probs = torch.sigmoid(out["fused_hm_logits"][0, 0]).detach().cpu().numpy().astype(np.float64)
             w_eo_eff = float(out["w_eo_eff"].mean().detach().cpu().item())
@@ -1411,19 +1570,24 @@ class StudioInferenceEngine:
             .unsqueeze(0)
             .to(device=self.bundle.nav_device, dtype=self.bundle.nav_dtype)
         )
-        raw_desc = self.bundle.nav_model(inp)[0].detach().cpu().float().numpy()
+        with self._nav_ort_lock:
+            raw_desc = self.bundle.nav_model(inp)[0].detach().cpu().float().numpy()
         return _apply_pca_whitening(raw_desc, self.bundle.nav_pca_whitening)[0]
 
     def _get_cached_ref_desc(self, ref_tile: np.ndarray, ref_cache_key: str | None) -> np.ndarray:
-        """Return cached static satellite reference descriptor (real onboard map DB behavior)."""
+        """Return bounded-LRU (<= 64) cached static satellite reference descriptor."""
         if ref_cache_key is not None:
             with self._cache_lock:
                 if ref_cache_key in self._nav_ref_desc_cache:
+                    self._nav_ref_desc_cache.move_to_end(ref_cache_key)
                     return self._nav_ref_desc_cache[ref_cache_key]
         desc = self._encode_nav_bgr(ref_tile)
         if ref_cache_key is not None:
             with self._cache_lock:
                 self._nav_ref_desc_cache[ref_cache_key] = desc
+                self._nav_ref_desc_cache.move_to_end(ref_cache_key)
+                while len(self._nav_ref_desc_cache) > NAV_REF_CACHE_MAXSIZE:
+                    self._nav_ref_desc_cache.popitem(last=False)
         return desc
 
     def _get_cached_ref_xfeat(
@@ -1431,20 +1595,27 @@ class StudioInferenceEngine:
         ref_src: np.ndarray,
         ref_cache_key: str | None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return cached Stage-2A XFeat luminance keypoints/descriptors for static satellite tiles."""
+        """Return bounded-LRU (<= 64) cached Stage-2A XFeat keypoints/descriptors for static satellite tiles."""
+        if self._nav_xfeat is None:
+            raise RuntimeError("XVS-Nav module is excluded in this clean-room build")
         if ref_cache_key is not None:
             with self._cache_lock:
                 if ref_cache_key in self._nav_ref_xfeat_cache:
+                    self._nav_ref_xfeat_cache.move_to_end(ref_cache_key)
                     return self._nav_ref_xfeat_cache[ref_cache_key]
-        feats = self._nav_xfeat.extract(ref_src)
+        feats = self._nav_xfeat.extract(ref_src, color_order="bgr")
         if ref_cache_key is not None:
             with self._cache_lock:
                 self._nav_ref_xfeat_cache[ref_cache_key] = feats
+                self._nav_ref_xfeat_cache.move_to_end(ref_cache_key)
+                while len(self._nav_ref_xfeat_cache) > NAV_REF_CACHE_MAXSIZE:
+                    self._nav_ref_xfeat_cache.popitem(last=False)
         return feats
 
     def _ensure_nav_gallery(self) -> tuple[np.ndarray, list[np.ndarray]]:
-        if self._nav_gallery_descs is not None and self._nav_gallery_tiles:
-            return self._nav_gallery_descs, self._nav_gallery_tiles
+        with self._cache_lock:
+            if self._nav_gallery_descs is not None and self._nav_gallery_tiles:
+                return self._nav_gallery_descs, self._nav_gallery_tiles
         ortho = self._load_ksfo_ortho()
         oh, ow = ortho.shape[:2]
         tiles: list[np.ndarray] = []
@@ -1465,9 +1636,12 @@ class StudioInferenceEngine:
             tile = cv2.resize(patch, (224, 224), interpolation=cv2.INTER_AREA)
             tiles.append(tile)
             descs.append(self._get_cached_ref_desc(tile, f"ksfo_gallery_{idx}"))
-        self._nav_gallery_tiles = tiles
-        self._nav_gallery_descs = np.stack(descs, axis=0).astype(np.float32)
-        return self._nav_gallery_descs, self._nav_gallery_tiles
+        descs_arr = np.stack(descs, axis=0).astype(np.float32)
+        with self._cache_lock:
+            if self._nav_gallery_descs is None:
+                self._nav_gallery_tiles = tiles
+                self._nav_gallery_descs = descs_arr
+            return self._nav_gallery_descs, self._nav_gallery_tiles
 
     def infer_crossview_nav(
         self,
@@ -1489,6 +1663,8 @@ class StudioInferenceEngine:
         camera_intrinsics: PinholeIntrinsics | None = None,
     ) -> dict[str, Any]:
         """Run XVS-Nav retrieval (V5.0 ONNX or NB2 .pt) + 6-stage aliasing gate + local 8-arm CUSUM + Stage-2 XFeat."""
+        if not _HAS_XVS_NAV or self._nav_xfeat is None or self._nav_lighterglue is None:
+            raise RuntimeError("XVS-Nav module is excluded in this clean-room build")
         t0 = time.perf_counter()
         bgr = _ensure_bgr(frame_bgr)
         h_in, w_in = bgr.shape[:2]
@@ -1567,7 +1743,7 @@ class StudioInferenceEngine:
             xfeat_ref_key = f"ksfo_gallery_{best_idx}"
 
         # 2. Stage-2A XFeat + Conditional Tier-2B LighterGlue Geometric Correspondences (0 synthetic lines)
-        kq, dq, _ = self._nav_xfeat.extract(bgr)
+        kq, dq, _ = self._nav_xfeat.extract(bgr, color_order="bgr")
         kr, dr, _ = self._get_cached_ref_xfeat(ref_src, xfeat_ref_key)
         q_idx, m_idx, m_scores = match_mnn(dq, dr)
         tier2a_matches = int(q_idx.size)
@@ -1585,23 +1761,43 @@ class StudioInferenceEngine:
                 stage2_tier_used = "tier2b_lighterglue"
 
         inlier_q_pts = kq[q_idx] if q_idx.size > 0 else np.zeros((0, 2), dtype=np.float32)
+        inlier_q_pts_raw = inlier_q_pts.copy()
         inlier_r_pts = kr[m_idx] if m_idx.size > 0 else np.zeros((0, 2), dtype=np.float32)
         inlier_scores = m_scores if m_scores.size > 0 else np.zeros((0,), dtype=np.float32)
         if camera_intrinsics is not None and inlier_q_pts.shape[0] > 0:
             inlier_q_pts = undistort_keypoints_pinhole(
-                inlier_q_pts, camera_intrinsics
+                inlier_q_pts.copy(), camera_intrinsics
             ).astype(np.float32)
-        ransac_inliers = int(q_idx.size)
+        ransac_inliers = 0
         if q_idx.size >= 4:
             _, h_mask = cv2.findHomography(inlier_q_pts, inlier_r_pts, cv2.RANSAC, 5.0)
             if h_mask is not None:
                 mask_bool = h_mask.reshape(-1).astype(bool)
                 n_h_inliers = int(np.sum(mask_bool))
-                ransac_inliers = n_h_inliers
                 if n_h_inliers >= 4:
+                    ransac_inliers = n_h_inliers
                     inlier_q_pts = inlier_q_pts[mask_bool]
+                    inlier_q_pts_raw = inlier_q_pts_raw[mask_bool]
                     inlier_r_pts = inlier_r_pts[mask_bool]
                     inlier_scores = inlier_scores[mask_bool]
+                else:
+                    # Fail-closed: clear unverified outliers so they NEVER enter h_norm/kappa_geom
+                    ransac_inliers = 0
+                    inlier_q_pts = np.zeros((0, 2), dtype=np.float32)
+                    inlier_q_pts_raw = np.zeros((0, 2), dtype=np.float32)
+                    inlier_r_pts = np.zeros((0, 2), dtype=np.float32)
+                    inlier_scores = np.zeros((0,), dtype=np.float32)
+            else:
+                ransac_inliers = 0
+                inlier_q_pts = np.zeros((0, 2), dtype=np.float32)
+                inlier_q_pts_raw = np.zeros((0, 2), dtype=np.float32)
+                inlier_r_pts = np.zeros((0, 2), dtype=np.float32)
+                inlier_scores = np.zeros((0,), dtype=np.float32)
+        else:
+            inlier_q_pts = np.zeros((0, 2), dtype=np.float32)
+            inlier_q_pts_raw = np.zeros((0, 2), dtype=np.float32)
+            inlier_r_pts = np.zeros((0, 2), dtype=np.float32)
+            inlier_scores = np.zeros((0,), dtype=np.float32)
 
         # 3. 6-Stage Visual-Aliasing Admission Gate + Split-Conformal Multi-Hypothesis HPL (HAL = 30.0 m)
         if inlier_q_pts.shape[0] >= 3:
@@ -1680,7 +1876,7 @@ class StudioInferenceEngine:
             thresholds=gate_thresholds,
         )
 
-        # 3b. Multi-frame NED IMU-Odometry Sequence-VPR (`W=7`, strict fail-closed `0 HMI`)
+        # 3b. Multi-frame NED IMU-Odometry Sequence-VPR (`W=7`, strict fail-closed `0 HMI`, narrow lock scope)
         if seq_vpr_filter is not None:
             active_seq_vpr = seq_vpr_filter
             seq_sims = (
@@ -1688,13 +1884,23 @@ class StudioInferenceEngine:
                 if seq_vpr_similarities is not None
                 else (sims_all if ref_bgr is not None else sims_gal)
             )
-            seq_dec: SequenceVprDecision = active_seq_vpr.step(
-                seq_sims,
-                delta_ne_odom_m=delta_ne_odom_m,
-                odom_sigma_m=float(odom_sigma_m),
-                visual_fix_metrics=vis_fix_metrics,
-                aliasing_thresholds=gate_thresholds,
-            )
+            if seq_vpr_filter is self._fast_seq_vpr or seq_vpr_filter is self._demo_seq_vpr:
+                with self._nav_seq_vpr_lock:
+                    seq_dec = active_seq_vpr.step(
+                        seq_sims,
+                        delta_ne_odom_m=delta_ne_odom_m,
+                        odom_sigma_m=float(odom_sigma_m),
+                        visual_fix_metrics=vis_fix_metrics,
+                        aliasing_thresholds=gate_thresholds,
+                    )
+            else:
+                seq_dec = active_seq_vpr.step(
+                    seq_sims,
+                    delta_ne_odom_m=delta_ne_odom_m,
+                    odom_sigma_m=float(odom_sigma_m),
+                    visual_fix_metrics=vis_fix_metrics,
+                    aliasing_thresholds=gate_thresholds,
+                )
         else:
             with self._nav_seq_vpr_lock:
                 if ref_bgr is not None:
@@ -1894,12 +2100,12 @@ class StudioInferenceEngine:
                     cv2.circle(vis, (sx, sy), 3, line_col, -1, cv2.LINE_AA)
                     cv2.line(vis, (qx, qy), (sx, sy), line_col, 1, cv2.LINE_AA)
                     correspondences_drawn += 1
-            elif inlier_q_pts.shape[0] > 0:
+            elif inlier_q_pts_raw.shape[0] > 0:
                 correspondence_source = "stage2_xfeat"
                 top_order = np.argsort(-inlier_scores)[:12]
                 for midx in top_order:
-                    qx = max(0, min(191, int(round(float(inlier_q_pts[midx, 0]) * lx_s))))
-                    qy = max(0, min(255, int(round(float(inlier_q_pts[midx, 1]) * ly_s))))
+                    qx = max(0, min(191, int(round(float(inlier_q_pts_raw[midx, 0]) * lx_s))))
+                    qy = max(0, min(255, int(round(float(inlier_q_pts_raw[midx, 1]) * ly_s))))
                     sx = 192 + max(0, min(191, int(round(float(inlier_r_pts[midx, 0]) * rx_s))))
                     sy = max(0, min(255, int(round(float(inlier_r_pts[midx, 1]) * ry_s))))
                     cv2.circle(vis, (qx, qy), 3, COL_CYAN, -1, cv2.LINE_AA)
@@ -1969,13 +2175,12 @@ class StudioInferenceEngine:
                 "w_lwir_eff": raw["w_lwir_eff"],
             }
         elif ch == "nav":
-            with self._nav_seq_vpr_lock:
-                raw = self.infer_crossview_nav(
-                    frame_bgr,
-                    gps_offset_m=0.0,
-                    seq_vpr_filter=self._fast_seq_vpr,
-                    return_jpeg=return_jpeg,
-                )
+            raw = self.infer_crossview_nav(
+                frame_bgr,
+                gps_offset_m=0.0,
+                seq_vpr_filter=self._fast_seq_vpr,
+                return_jpeg=return_jpeg,
+            )
             metrics = {
                 "cosine_sim": raw["cosine_sim"],
                 "psr": raw["psr"],
@@ -2124,7 +2329,8 @@ class StudioInferenceEngine:
 
         with self._nav_seq_vpr_lock:
             if self._demo_last_scenario != scen or cycle_idx == 0:
-                self._demo_seq_vpr.reset()
+                if self._demo_seq_vpr is not None:
+                    self._demo_seq_vpr.reset()
                 self._ref_seq_vpr = None
                 self._demo_last_scenario = scen
 

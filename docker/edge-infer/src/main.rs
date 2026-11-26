@@ -42,11 +42,16 @@ use xvs_rta_core::{
     build_rta_input_from_f64, RtaFloatTelemetry, RtaTickInput, SimplexRta, ODD_YAML_SHA256,
 };
 
-pub const EDGE_INFER_VERSION: &str = "5.2.0";
+pub const EDGE_INFER_VERSION: &str = "1.1.1";
 pub const NON_FLIGHT_SIM_ONLY: bool = cfg!(feature = "non_flight_sim_only");
 pub const ACTUATOR_AUTHORITY: bool = false;
 pub const NON_FLIGHT_WATERMARK: &str =
     "SIMULATION & BENCHMARK EVALUATION ONLY — ZERO ACTUATION — NOT FOR FLIGHT";
+
+pub const D2_CROP_SIZE: usize = 256;
+pub const D2_HID_C: usize = 24;
+pub const D2_HID_HW: usize = D2_CROP_SIZE / 4; // 64
+pub const LAND_RUNWAY_PRESENT_MIN_PROB: f64 = 0.65;
 
 pub const V52_LAND_STUDENT_T_NU: f64 = 6.0;
 pub const V52_LAND_STUDENT_T_SCALE: f64 = 1.048_075_542_704_791_2;
@@ -162,12 +167,13 @@ impl StudentTCalibrator {
     }
 }
 
-// ---- Dual-Contract XVS-Land 5-Output (v4.5/v5.1) & 6-Output (v5.2 `keyline_sigma_px`) Parser ----
+// ---- Multi-Contract XVS-Land 5-Output (v5.1), 6-Output (v5.2) & 7-Output (extended `runway_present_logit`) Parser ----
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum LandOutputContract {
     V51FiveOutput,
     V52SixOutputKeylineSigma,
+    V53SevenOutputRunwayPresence,
 }
 
 impl LandOutputContract {
@@ -175,6 +181,7 @@ impl LandOutputContract {
         match self {
             Self::V51FiveOutput => "v51_5output",
             Self::V52SixOutputKeylineSigma => "v52_6output",
+            Self::V53SevenOutputRunwayPresence => "v53_7output",
         }
     }
 }
@@ -189,6 +196,10 @@ pub struct ParsedLandOutputs {
     pub keyline_sigma_px: Option<[f64; LAND_NUM_KEYLINES]>,
     pub keyline_precision_weights: [f64; LAND_NUM_KEYLINES],
     pub effective_keyline_sigma_px: f64,
+    pub runway_present_logit: Option<f64>,
+    pub runway_present_prob: Option<f64>,
+    pub runway_present_admitted: bool,
+    pub runway_gate_mode: &'static str,
 }
 
 pub fn resolve_land_input_hw(sess: &Session) -> (usize, usize) {
@@ -202,11 +213,68 @@ pub fn resolve_land_input_hw(sess: &Session) -> (usize, usize) {
     (256, 256)
 }
 
+/// Inspect XVS-D2 ONNX session input shapes dynamically:
+/// `x_t` `[1, 6, H, W]` (`256x256` v5.2 OR `640x640` extended) and `h_prev_warped` `[1, C, H/4, W/4]`.
+pub fn resolve_d2_input_shapes(sess: &Session) -> (usize, usize, usize, usize, usize) {
+    let mut in_h = D2_CROP_SIZE;
+    let mut in_w = D2_CROP_SIZE;
+    let mut hid_c = D2_HID_C;
+    let mut hid_h = D2_HID_HW;
+    let mut hid_w = D2_HID_HW;
+    let mut saw_x = false;
+    let mut saw_h = false;
+
+    for inp in sess.inputs() {
+        if let Some(shape) = inp.dtype().tensor_shape() {
+            if shape.len() == 4 {
+                if inp.name() == "x_t" && shape[2] > 0 && shape[3] > 0 {
+                    in_h = shape[2] as usize;
+                    in_w = shape[3] as usize;
+                    saw_x = true;
+                } else if inp.name() == "h_prev_warped"
+                    && shape[1] > 0
+                    && shape[2] > 0
+                    && shape[3] > 0
+                {
+                    hid_c = shape[1] as usize;
+                    hid_h = shape[2] as usize;
+                    hid_w = shape[3] as usize;
+                    saw_h = true;
+                }
+            }
+        }
+    }
+    if saw_x && !saw_h {
+        hid_h = (in_h / 4).max(1);
+        hid_w = (in_w / 4).max(1);
+    }
+    (in_h, in_w, hid_c, hid_h, hid_w)
+}
+
+#[inline]
+fn sigmoid_f64(x: f64) -> f64 {
+    if !x.is_finite() {
+        return 0.0;
+    }
+    1.0 / (1.0 + (-x.clamp(-60.0, 60.0)).exp())
+}
+
 pub fn parse_xvs_land_outputs(
     kpts: &[f32],
     keylines: &[f32],
     cov: &[f32],
     keyline_sigma_opt: Option<&[f32]>,
+    calibrator: &StudentTCalibrator,
+) -> Result<ParsedLandOutputs, String> {
+    parse_xvs_land_outputs_with_presence(kpts, keylines, cov, keyline_sigma_opt, None, calibrator)
+}
+
+pub fn parse_xvs_land_outputs_with_presence(
+    kpts: &[f32],
+    keylines: &[f32],
+    cov: &[f32],
+    keyline_sigma_opt: Option<&[f32]>,
+    runway_present_logit_opt: Option<&[f32]>,
     calibrator: &StudentTCalibrator,
 ) -> Result<ParsedLandOutputs, String> {
     if kpts.len() < LAND_NUM_KEYPOINTS * 2 {
@@ -273,7 +341,7 @@ pub fn parse_xvs_land_outputs(
         keylines_hesse.push(kl);
     }
 
-    let (contract, keyline_sigma_px, keyline_precision_weights, effective_keyline_sigma_px) =
+    let (mut contract, keyline_sigma_px, keyline_precision_weights, effective_keyline_sigma_px) =
         match keyline_sigma_opt {
             None => {
                 let w_unif = 1.0 / (LAND_DEFAULT_KEYLINE_SIGMA_PX * LAND_DEFAULT_KEYLINE_SIGMA_PX);
@@ -327,6 +395,30 @@ pub fn parse_xvs_land_outputs(
             }
         };
 
+    let (runway_present_logit, runway_present_prob, runway_present_admitted, runway_gate_mode) =
+        match runway_present_logit_opt {
+            None => (None, None, true, "NOMINAL"),
+            Some(raw_pres) => {
+                if raw_pres.is_empty() {
+                    return Err("Land runway_present_logit tensor is empty".to_string());
+                }
+                contract = LandOutputContract::V53SevenOutputRunwayPresence;
+                let logit = raw_pres[0] as f64;
+                if !logit.is_finite() {
+                    (None, Some(0.0), false, "P0_INVALID_INHIBIT")
+                } else {
+                    let prob = sigmoid_f64(logit);
+                    let admitted = prob.is_finite() && prob >= LAND_RUNWAY_PRESENT_MIN_PROB;
+                    let gate_mode = if admitted {
+                        "NOMINAL"
+                    } else {
+                        "P0_INVALID_INHIBIT"
+                    };
+                    (Some(logit), Some(prob), admitted, gate_mode)
+                }
+            }
+        };
+
     Ok(ParsedLandOutputs {
         contract,
         keypoints_xy,
@@ -336,17 +428,29 @@ pub fn parse_xvs_land_outputs(
         keyline_sigma_px,
         keyline_precision_weights,
         effective_keyline_sigma_px,
+        runway_present_logit,
+        runway_present_prob,
+        runway_present_admitted,
+        runway_gate_mode,
     })
 }
 
-// ---- v5.2.0 Pure-Rust Sensor & Optics Hardening Mirror (`#![forbid(unsafe_code)]`) ----
+// ---- Wave-1/2 Synced Pure-Rust Sensor & Optics Hardening Mirror (`#![forbid(unsafe_code)]`) ----
 
 pub const LWIR_NUC_FREEZE_MAD_THR: f64 = 0.25;
 pub const LWIR_NUC_FREEZE_MIN_TICKS: u32 = 3;
 pub const LWIR_CONTRAST_COLLAPSE_P95_P05_THR: f64 = 10.0;
+pub const LWIR_CONTRAST_REF_RANGE: f64 = 30.0;
+pub const LWIR_LOCAL_PEAK_MIN_DN: f64 = 40.0;
+pub const LWIR_LOCAL_PEAK_DELTA_DN: f64 = 25.0;
+pub const LWIR_LOCAL_PEAK_SNR_MIN: f64 = 6.0;
 pub const LWIR_FFC_BIT_IMMINENT: u8 = 1 << 0;
 pub const LWIR_FFC_BIT_IN_PROGRESS: u8 = 1 << 1;
 pub const EO_SECTOR_DEGRADED_THR: f64 = 0.50;
+pub const FPN_DEAD_LINE_FLAG_FRAC: f64 = 0.03;
+pub const FPN_DEAD_LINE_FAIL_FRAC: f64 = 0.10;
+pub const NOISE_STD_MIN: f64 = 15.0;
+pub const NOISE_AUTOCORR_MIN: f64 = 0.25;
 pub const MAX_TIMESTAMP_SKEW_MS: f64 = 200.0;
 pub const FSYNC_PRECISION_MAX_SKEW_MS: f64 = 1.0;
 pub const BEARING_TBC_CONFIRM_M: u8 = 3;
@@ -932,6 +1036,27 @@ impl BearingTrackBeforeConfirm {
         self.confirmed
     }
 
+    pub fn hits_in_window(&self) -> u8 {
+        self.hits_in_window
+    }
+
+    /// Observe optional `(alpha_rad, beta_rad)` bearing measurement gated by EO optical health.
+    /// Fails closed (treats tick as miss) whenever `q_eo_eff` is non-finite / below threshold or EO is degraded.
+    pub fn observe_with_health(
+        &mut self,
+        det: Option<(f64, f64)>,
+        q_eo_eff: f64,
+        eo_degraded: bool,
+    ) -> BearingTrackSnapshot {
+        let eo_healthy =
+            q_eo_eff.is_finite() && q_eo_eff >= EO_SECTOR_DEGRADED_THR && !eo_degraded;
+        if eo_healthy {
+            self.observe(det)
+        } else {
+            self.observe(None)
+        }
+    }
+
     pub fn observe(&mut self, det: Option<(f64, f64)>) -> BearingTrackSnapshot {
         let hit = match det {
             Some((alpha, beta)) if alpha.is_finite() && beta.is_finite() => {
@@ -1029,6 +1154,35 @@ pub struct EoOpticalQuality {
     pub sector_q_eo: [f64; 12],
     pub min_sector_q_eo: f64,
     pub degraded_sector_mask: u16,
+    pub dead_line_fraction: f64,
+    pub fpn_score: f64,
+    pub spatial_autocorr: f64,
+    pub noise_score: f64,
+    pub dead_pixel_fpn_fault: bool,
+    pub sensor_noise_fault: bool,
+    pub degraded: bool,
+}
+
+impl EoOpticalQuality {
+    pub fn flags(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.focus_quality < EO_SECTOR_DEGRADED_THR {
+            out.push("MOTION_OR_FOCUS_BLUR");
+        }
+        if self.glare_ratio > 0.375 {
+            out.push("SUN_GLARE_OVEREXPOSED");
+        }
+        if self.occlusion_ratio > 0.675 {
+            out.push("LENS_CAP_OR_UNDEREXPOSED");
+        }
+        if self.dead_pixel_fpn_fault {
+            out.push("DEAD_PIXEL_FPN_FAULT");
+        }
+        if self.sensor_noise_fault {
+            out.push("SENSOR_NOISE_FAULT");
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -1039,8 +1193,59 @@ pub struct LwirHealthStatus {
     pub ffc_imminent: bool,
     pub ffc_in_progress: bool,
     pub dynamic_range_p95_p05: f64,
+    pub effective_dynamic_range: f64,
     pub contrast_collapsed: bool,
+    pub localized_hot_target_rescue: bool,
+    pub glare_ratio: f64,
+    pub occlusion_ratio: f64,
+    pub dead_line_fraction: f64,
+    pub fpn_score: f64,
+    pub spatial_autocorr: f64,
+    pub noise_score: f64,
+    pub dead_pixel_fpn_fault: bool,
+    pub sensor_noise_fault: bool,
+    pub q_lwir_optical: f64,
+    pub degraded: bool,
     pub mask_lwir_frame: bool,
+}
+
+impl LwirHealthStatus {
+    pub fn flags(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.nuc_frozen {
+            out.push("LWIR_NUC_SHUTTER_FROZEN");
+        }
+        if self.ffc_imminent {
+            out.push("LWIR_FFC_IMMINENT");
+        }
+        if self.ffc_in_progress {
+            out.push("LWIR_FFC_IN_PROGRESS");
+        }
+        let glare_score = (1.0 - (self.glare_ratio - 0.02).max(0.0) / 0.48).clamp(0.0, 1.0);
+        if glare_score < EO_SECTOR_DEGRADED_THR {
+            out.push("SUN_GLARE_OVEREXPOSED");
+        }
+        let occ_score = if self.localized_hot_target_rescue {
+            1.0
+        } else {
+            (1.0 - (self.occlusion_ratio - 0.10).max(0.0) / 0.65).clamp(0.0, 1.0)
+        };
+        if occ_score < EO_SECTOR_DEGRADED_THR {
+            out.push("LENS_CAP_OR_UNDEREXPOSED");
+        }
+        let contrast_score =
+            (self.effective_dynamic_range / LWIR_CONTRAST_REF_RANGE).clamp(0.0, 1.0);
+        if self.contrast_collapsed || contrast_score < EO_SECTOR_DEGRADED_THR {
+            out.push("LOW_CONTRAST_DYNAMIC_RANGE");
+        }
+        if self.dead_pixel_fpn_fault {
+            out.push("DEAD_PIXEL_FPN_FAULT");
+        }
+        if self.sensor_noise_fault {
+            out.push("SENSOR_NOISE_FAULT");
+        }
+        out
+    }
 }
 
 pub fn lwir_dynamic_range_p95_p05(lwir_u8: &[u8]) -> f64 {
@@ -1070,6 +1275,256 @@ pub fn lwir_dynamic_range_p95_p05(lwir_u8: &[u8]) -> f64 {
         }
     }
     (p95 as f64) - (p05 as f64)
+}
+
+#[inline]
+fn hist_percentile_u8(hist: &[usize; 256], n: usize, pct_num: usize, pct_den: usize) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    let idx = (n.saturating_sub(1).saturating_mul(pct_num)) / pct_den.max(1);
+    let mut cum = 0usize;
+    for (val, &cnt) in hist.iter().enumerate() {
+        cum += cnt;
+        if cum > idx {
+            return val as f64;
+        }
+    }
+    255.0
+}
+
+#[inline]
+fn hist_median_u32(hist: &[u32; 256], n: usize) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    let lo_idx = (n - 1) / 2;
+    let hi_idx = n / 2;
+    let mut cum = 0usize;
+    let mut lo_v = 0u8;
+    let mut hi_v = 0u8;
+    let mut found_lo = false;
+    for (val, &cnt) in hist.iter().enumerate() {
+        cum += cnt as usize;
+        if !found_lo && cum > lo_idx {
+            lo_v = val as u8;
+            found_lo = true;
+        }
+        if cum > hi_idx {
+            hi_v = val as u8;
+            break;
+        }
+    }
+    0.5 * ((lo_v as f64) + (hi_v as f64))
+}
+
+#[inline]
+fn hist_line_median_and_stuck(hist: &[u32; 256], len: usize) -> (f64, bool) {
+    let med = hist_median_u32(hist, len);
+    let mut sum_u64 = 0u64;
+    let mut sq_u64 = 0u64;
+    for (v, &cnt) in hist.iter().enumerate() {
+        if cnt != 0 {
+            let c = cnt as u64;
+            let vu = v as u64;
+            sum_u64 += c * vu;
+            sq_u64 += c * vu * vu;
+        }
+    }
+    let lf = len as f64;
+    let mean = (sum_u64 as f64) / lf;
+    let std = (((sq_u64 as f64) / lf) - mean * mean).max(0.0).sqrt();
+    if std < 1.0 {
+        return (med, true);
+    }
+    let lo_b = ((med - 1.5).floor().max(0.0) as usize).min(255);
+    let hi_b = ((med + 1.5).ceil().min(255.0) as usize).min(255);
+    let mut near = 0usize;
+    for (v, &cnt) in hist.iter().enumerate().take(hi_b + 1).skip(lo_b) {
+        if ((v as f64) - med).abs() <= 1.5 {
+            near += cnt as usize;
+        }
+    }
+    (med, ((near as f64) / lf) >= 0.70)
+}
+
+/// Detect stuck/dead sensor readout rows & columns (exact Wave-1/2 parity with Studio `rust_engine.rs`).
+pub fn detect_dead_line_fpn_u8(plane: &[u8], w: usize, h: usize) -> (f64, f64) {
+    if w < 6 || h < 6 || plane.len() != w * h {
+        return (0.0, 1.0);
+    }
+    let mut frame_sum = 0u64;
+    let mut frame_sq = 0u64;
+    let mut row_med = vec![0.0_f64; h];
+    let mut row_stuck = vec![false; h];
+    for y in 0..h {
+        let mut hist = [0u32; 256];
+        let row = &plane[y * w..(y + 1) * w];
+        for &px in row {
+            hist[px as usize] += 1;
+        }
+        for (v, &cnt) in hist.iter().enumerate() {
+            if cnt != 0 {
+                let c = cnt as u64;
+                let vu = v as u64;
+                frame_sum += c * vu;
+                frame_sq += c * vu * vu;
+            }
+        }
+        let (med, stuck) = hist_line_median_and_stuck(&hist, w);
+        row_med[y] = med;
+        row_stuck[y] = stuck;
+    }
+
+    let n = (w * h) as f64;
+    let mean = (frame_sum as f64) / n;
+    let frame_std = (((frame_sq as f64) / n) - mean * mean).max(0.0).sqrt();
+    if !frame_std.is_finite() || frame_std < 1.0 {
+        return (0.0, 1.0);
+    }
+
+    let mut dead_rows = 0usize;
+    for y in 2..(h - 2) {
+        if !row_stuck[y] {
+            continue;
+        }
+        let m = row_med[y];
+        let r_up = (m - row_med[y - 1]).abs().max((m - row_med[y - 2]).abs());
+        let r_dn = (m - row_med[y + 1]).abs().max((m - row_med[y + 2]).abs());
+        let jump = r_up.min(r_dn);
+        let pinned_rail = m <= 2.0 || m >= 253.0;
+        if jump >= 15.0 || (pinned_rail && jump >= 8.0) {
+            dead_rows += 1;
+        }
+    }
+
+    let mut col_med = vec![0.0_f64; w];
+    let mut col_stuck = vec![false; w];
+    const COL_TILE: usize = 16;
+    let mut col_hists = [[0u32; 256]; COL_TILE];
+    let mut x0 = 0usize;
+    while x0 < w {
+        let tile_w = (w - x0).min(COL_TILE);
+        for hist in col_hists.iter_mut().take(tile_w) {
+            hist.fill(0);
+        }
+        for y in 0..h {
+            let slice = &plane[y * w + x0..y * w + x0 + tile_w];
+            for (k, &px) in slice.iter().enumerate() {
+                col_hists[k][px as usize] += 1;
+            }
+        }
+        for (k, hist) in col_hists.iter().take(tile_w).enumerate() {
+            let (med, stuck) = hist_line_median_and_stuck(hist, h);
+            col_med[x0 + k] = med;
+            col_stuck[x0 + k] = stuck;
+        }
+        x0 += tile_w;
+    }
+
+    let mut dead_cols = 0usize;
+    for x in 2..(w - 2) {
+        if !col_stuck[x] {
+            continue;
+        }
+        let m = col_med[x];
+        let c_lt = (m - col_med[x - 1]).abs().max((m - col_med[x - 2]).abs());
+        let c_rt = (m - col_med[x + 1]).abs().max((m - col_med[x + 2]).abs());
+        let jump = c_lt.min(c_rt);
+        let pinned_rail = m <= 2.0 || m >= 253.0;
+        if jump >= 15.0 || (pinned_rail && jump >= 8.0) {
+            dead_cols += 1;
+        }
+    }
+
+    let f_rows = (dead_rows as f64) / (h as f64);
+    let f_cols = (dead_cols as f64) / (w as f64);
+    let dead_frac = (f_rows + f_cols).min(1.0);
+    if dead_frac < FPN_DEAD_LINE_FLAG_FRAC {
+        return (dead_frac, 1.0);
+    }
+    let span = (FPN_DEAD_LINE_FAIL_FRAC - FPN_DEAD_LINE_FLAG_FRAC).max(1e-6);
+    let fpn_score = (0.45 * (1.0 - (dead_frac - FPN_DEAD_LINE_FLAG_FRAC) / span)).clamp(0.0, 1.0);
+    (dead_frac, fpn_score)
+}
+
+/// Detect spatially uncorrelated white/binary noise (exact Wave-1/2 parity with Studio `rust_engine.rs`).
+pub fn detect_white_noise_fault_u8(plane: &[u8], w: usize, h: usize) -> (f64, f64) {
+    if w < 4 || h < 4 || plane.len() != w * h {
+        return (1.0, 1.0);
+    }
+    let n = (w * h) as f64;
+    let mut sum_u64 = 0u64;
+    let mut sq_u64 = 0u64;
+    for &px in plane {
+        let v = px as u64;
+        sum_u64 += v;
+        sq_u64 += v * v;
+    }
+    let mean = (sum_u64 as f64) / n;
+    let var = (((sq_u64 as f64) / n) - mean * mean).max(0.0);
+    let std_val = var.sqrt();
+    if !std_val.is_finite() || std_val <= NOISE_STD_MIN || var <= 1e-6 {
+        return (1.0, 1.0);
+    }
+
+    let mut lut = [0.0_f64; 256];
+    for (v, slot) in lut.iter_mut().enumerate() {
+        *slot = (v as f64) - mean;
+    }
+
+    let mut cov_h1 = 0.0_f64;
+    let mut cov_h2 = 0.0_f64;
+    let mut cov_v1 = 0.0_f64;
+    let mut cov_v2 = 0.0_f64;
+
+    for y in 0..h {
+        let row0 = &plane[y * w..(y + 1) * w];
+        for x in 0..(w - 2) {
+            let a = lut[row0[x] as usize];
+            cov_h1 += a * lut[row0[x + 1] as usize];
+            cov_h2 += a * lut[row0[x + 2] as usize];
+        }
+        cov_h1 += lut[row0[w - 2] as usize] * lut[row0[w - 1] as usize];
+
+        if y + 1 < h {
+            let row1 = &plane[(y + 1) * w..(y + 2) * w];
+            for (&p0, &p1) in row0.iter().zip(row1.iter()) {
+                cov_v1 += lut[p0 as usize] * lut[p1 as usize];
+            }
+        }
+        if y + 2 < h {
+            let row2 = &plane[(y + 2) * w..(y + 3) * w];
+            for (&p0, &p2) in row0.iter().zip(row2.iter()) {
+                cov_v2 += lut[p0 as usize] * lut[p2 as usize];
+            }
+        }
+    }
+
+    let cnt_h1 = (h * (w - 1)).max(1) as f64;
+    let cnt_h2 = (h * (w - 2)).max(1) as f64;
+    let cnt_v1 = ((h - 1) * w).max(1) as f64;
+    let cnt_v2 = ((h - 2) * w).max(1) as f64;
+
+    let ac_h1 = (cov_h1 / cnt_h1) / var;
+    let ac_v1 = (cov_v1 / cnt_v1) / var;
+    let ac_h2 = (cov_h2 / cnt_h2) / var;
+    let ac_v2 = (cov_v2 / cnt_v2) / var;
+    let ac = ac_h1.max(ac_v1);
+    if !ac.is_finite() {
+        return (0.0, 0.0);
+    }
+    let periodic_checker = ac_h2.is_finite()
+        && ac_v2.is_finite()
+        && ac_h2.abs().max(ac_v2.abs()) >= 0.70;
+    if periodic_checker {
+        return (ac_h2.abs().max(ac_v2.abs()), 1.0);
+    }
+    if ac < NOISE_AUTOCORR_MIN {
+        let noise_score = (0.05 * ac.max(0.0) / NOISE_AUTOCORR_MIN).clamp(0.0, 0.05);
+        return (ac, noise_score);
+    }
+    (ac, 1.0)
 }
 
 fn evaluate_luma_patch_quality(
@@ -1119,14 +1574,13 @@ fn evaluate_luma_patch_quality(
     let n_int = cnt.max(1) as f64;
     let mean = sum / n_int;
     let lap_var = ((sum_sq / n_int) - mean * mean).max(0.0);
-    let focus_quality = if lap_var < 6.0 {
-        (lap_var / 6.0) * 0.15
-    } else if lap_var < 50.0 {
-        0.15 + 0.85 * ((lap_var - 6.0) / 44.0)
-    } else {
+    let focus_quality = if !lap_var.is_finite() || lap_var <= 0.0 {
+        0.0
+    } else if lap_var >= 50.0 {
         1.0
-    }
-    .clamp(0.0, 1.0);
+    } else {
+        ((lap_var / (lap_var + 6.0)) * (56.0 / 50.0)).clamp(0.0, 1.0)
+    };
     let glare_ratio = (bright_cnt as f64) / (total.max(1) as f64);
     let occlusion_ratio = (dark_cnt as f64) / (total.max(1) as f64);
     let q_glare = if glare_ratio <= 0.15 {
@@ -1152,12 +1606,31 @@ pub struct SensorHealthMonitor {
     pub lwir_ffc_imminent: bool,
     pub lwir_ffc_in_progress: bool,
     pub lwir_dynamic_range_p95_p05: f64,
+    pub lwir_effective_dynamic_range: f64,
     pub lwir_contrast_collapsed: bool,
+    pub lwir_localized_hot_target_rescue: bool,
+    pub lwir_glare_ratio: f64,
+    pub lwir_occlusion_ratio: f64,
+    pub lwir_dead_line_fraction: f64,
+    pub lwir_fpn_score: f64,
+    pub lwir_spatial_autocorr: f64,
+    pub lwir_noise_score: f64,
+    pub lwir_dead_pixel_fpn_fault: bool,
+    pub lwir_sensor_noise_fault: bool,
+    pub lwir_q_optical: f64,
+    pub lwir_degraded: bool,
     pub eo_blur_score: f64,
     pub eo_focus_quality: f64,
     pub eo_glare_ratio: f64,
     pub eo_occlusion_ratio: f64,
     pub eo_q_optical: f64,
+    pub eo_dead_line_fraction: f64,
+    pub eo_fpn_score: f64,
+    pub eo_spatial_autocorr: f64,
+    pub eo_noise_score: f64,
+    pub eo_dead_pixel_fpn_fault: bool,
+    pub eo_sensor_noise_fault: bool,
+    pub eo_degraded: bool,
     pub grid_4x4_q_eo: [f64; 16],
     pub sector_q_eo: [f64; 12],
     pub min_sector_q_eo: f64,
@@ -1181,16 +1654,35 @@ impl SensorHealthMonitor {
             prev_lwir_u8: None,
             lwir_freeze_ticks: 0,
             lwir_nuc_frozen: false,
-            lwir_last_mad: f64::NAN,
+            lwir_last_mad: -1.0,
             lwir_ffc_imminent: false,
             lwir_ffc_in_progress: false,
             lwir_dynamic_range_p95_p05: 255.0,
+            lwir_effective_dynamic_range: 255.0,
             lwir_contrast_collapsed: false,
+            lwir_localized_hot_target_rescue: false,
+            lwir_glare_ratio: 0.0,
+            lwir_occlusion_ratio: 0.0,
+            lwir_dead_line_fraction: 0.0,
+            lwir_fpn_score: 1.0,
+            lwir_spatial_autocorr: 1.0,
+            lwir_noise_score: 1.0,
+            lwir_dead_pixel_fpn_fault: false,
+            lwir_sensor_noise_fault: false,
+            lwir_q_optical: 1.0,
+            lwir_degraded: false,
             eo_blur_score: 100.0,
             eo_focus_quality: 1.0,
             eo_glare_ratio: 0.0,
             eo_occlusion_ratio: 0.0,
             eo_q_optical: 1.0,
+            eo_dead_line_fraction: 0.0,
+            eo_fpn_score: 1.0,
+            eo_spatial_autocorr: 1.0,
+            eo_noise_score: 1.0,
+            eo_dead_pixel_fpn_fault: false,
+            eo_sensor_noise_fault: false,
+            eo_degraded: false,
             grid_4x4_q_eo: [1.0; 16],
             sector_q_eo: [1.0; 12],
             min_sector_q_eo: 1.0,
@@ -1201,6 +1693,63 @@ impl SensorHealthMonitor {
             timestamp_skew_fault: false,
             fsync_precision_ok: true,
         }
+    }
+
+    pub fn eo_flags(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.eo_focus_quality < EO_SECTOR_DEGRADED_THR {
+            out.push("MOTION_OR_FOCUS_BLUR");
+        }
+        if self.eo_glare_ratio > 0.375 {
+            out.push("SUN_GLARE_OVEREXPOSED");
+        }
+        if self.eo_occlusion_ratio > 0.675 {
+            out.push("LENS_CAP_OR_UNDEREXPOSED");
+        }
+        if self.eo_dead_pixel_fpn_fault {
+            out.push("DEAD_PIXEL_FPN_FAULT");
+        }
+        if self.eo_sensor_noise_fault {
+            out.push("SENSOR_NOISE_FAULT");
+        }
+        out
+    }
+
+    pub fn lwir_flags(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.lwir_nuc_frozen {
+            out.push("LWIR_NUC_SHUTTER_FROZEN");
+        }
+        if self.lwir_ffc_imminent {
+            out.push("LWIR_FFC_IMMINENT");
+        }
+        if self.lwir_ffc_in_progress {
+            out.push("LWIR_FFC_IN_PROGRESS");
+        }
+        let glare_score = (1.0 - (self.lwir_glare_ratio - 0.02).max(0.0) / 0.48).clamp(0.0, 1.0);
+        if glare_score < EO_SECTOR_DEGRADED_THR {
+            out.push("SUN_GLARE_OVEREXPOSED");
+        }
+        let occ_score = if self.lwir_localized_hot_target_rescue {
+            1.0
+        } else {
+            (1.0 - (self.lwir_occlusion_ratio - 0.10).max(0.0) / 0.65).clamp(0.0, 1.0)
+        };
+        if occ_score < EO_SECTOR_DEGRADED_THR {
+            out.push("LENS_CAP_OR_UNDEREXPOSED");
+        }
+        let contrast_score =
+            (self.lwir_effective_dynamic_range / LWIR_CONTRAST_REF_RANGE).clamp(0.0, 1.0);
+        if self.lwir_contrast_collapsed || contrast_score < EO_SECTOR_DEGRADED_THR {
+            out.push("LOW_CONTRAST_DYNAMIC_RANGE");
+        }
+        if self.lwir_dead_pixel_fpn_fault {
+            out.push("DEAD_PIXEL_FPN_FAULT");
+        }
+        if self.lwir_sensor_noise_fault {
+            out.push("SENSOR_NOISE_FAULT");
+        }
+        out
     }
 
     pub fn evaluate_eo_luma_plane(luma: &[f64], w: usize, h: usize) -> EoOpticalQuality {
@@ -1215,10 +1764,34 @@ impl SensorHealthMonitor {
                 sector_q_eo: [0.0; 12],
                 min_sector_q_eo: 0.0,
                 degraded_sector_mask: 0x0FFF,
+                dead_line_fraction: 0.0,
+                fpn_score: 0.0,
+                spatial_autocorr: 0.0,
+                noise_score: 0.0,
+                dead_pixel_fpn_fault: false,
+                sensor_noise_fault: false,
+                degraded: true,
             };
         }
-        let (lap_var, focus_quality, glare_ratio, occlusion_ratio, q_eo_optical) =
+
+        let plane_u8: Vec<u8> = luma
+            .iter()
+            .map(|&v| {
+                if v.is_finite() {
+                    v.round().clamp(0.0, 255.0) as u8
+                } else {
+                    0u8
+                }
+            })
+            .collect();
+        let (dead_line_frac, fpn_score) = detect_dead_line_fpn_u8(&plane_u8, w, h);
+        let (spatial_autocorr, noise_score) = detect_white_noise_fault_u8(&plane_u8, w, h);
+        let fault_mult = (fpn_score * noise_score).clamp(0.0, 1.0);
+
+        let (lap_var, focus_quality, glare_ratio, occlusion_ratio, q_opt_base) =
             evaluate_luma_patch_quality(luma, w, 0, w, 0, h);
+        let q_eo_optical = (q_opt_base * fault_mult).clamp(0.0, 1.0);
+
         let mut grid_4x4_q_eo = [1.0_f64; 16];
         for r in 0..4usize {
             let y0 = (r * h) / 4;
@@ -1227,7 +1800,7 @@ impl SensorHealthMonitor {
                 let x0 = (c * w) / 4;
                 let x1 = ((c + 1) * w) / 4;
                 let (_, _, _, _, tile_q) = evaluate_luma_patch_quality(luma, w, x0, x1, y0, y1);
-                grid_4x4_q_eo[r * 4 + c] = round4(tile_q);
+                grid_4x4_q_eo[r * 4 + c] = round4((tile_q * fault_mult).clamp(0.0, 1.0));
             }
         }
         let mut sector_q_eo = [1.0_f64; 12];
@@ -1243,23 +1816,36 @@ impl SensorHealthMonitor {
                 let (_, _, _, _, band_q) = evaluate_luma_patch_quality(luma, w, x0, x1, y0, y1);
                 worst_band_q = worst_band_q.min(band_q);
             }
-            let q_s = round4(worst_band_q);
+            let q_s = round4((worst_band_q * fault_mult).clamp(0.0, 1.0));
             *slot = q_s;
             min_sector_q_eo = min_sector_q_eo.min(q_s);
             if q_s < EO_SECTOR_DEGRADED_THR {
                 degraded_sector_mask |= 1u16 << s;
             }
         }
+        let dead_pixel_fpn_fault = dead_line_frac >= FPN_DEAD_LINE_FLAG_FRAC;
+        let sensor_noise_fault = noise_score < EO_SECTOR_DEGRADED_THR;
+        let q_rounded = round4(q_eo_optical);
+
         EoOpticalQuality {
             blur_score: round2(lap_var),
             focus_quality: round4(focus_quality),
             glare_ratio: round4(glare_ratio),
             occlusion_ratio: round4(occlusion_ratio),
-            q_eo_optical: round4(q_eo_optical),
+            q_eo_optical: q_rounded,
             grid_4x4_q_eo,
             sector_q_eo,
             min_sector_q_eo: round4(min_sector_q_eo),
             degraded_sector_mask,
+            dead_line_fraction: round4(dead_line_frac),
+            fpn_score: round4(fpn_score),
+            spatial_autocorr: round4(spatial_autocorr),
+            noise_score: round4(noise_score),
+            dead_pixel_fpn_fault,
+            sensor_noise_fault,
+            degraded: q_rounded < EO_SECTOR_DEGRADED_THR
+                || dead_pixel_fpn_fault
+                || sensor_noise_fault,
         }
     }
 
@@ -1271,6 +1857,13 @@ impl SensorHealthMonitor {
         self.eo_glare_ratio = q.glare_ratio;
         self.eo_occlusion_ratio = q.occlusion_ratio;
         self.eo_q_optical = q.q_eo_optical;
+        self.eo_dead_line_fraction = q.dead_line_fraction;
+        self.eo_fpn_score = q.fpn_score;
+        self.eo_spatial_autocorr = q.spatial_autocorr;
+        self.eo_noise_score = q.noise_score;
+        self.eo_dead_pixel_fpn_fault = q.dead_pixel_fpn_fault;
+        self.eo_sensor_noise_fault = q.sensor_noise_fault;
+        self.eo_degraded = q.degraded;
         self.grid_4x4_q_eo = q.grid_4x4_q_eo;
         self.sector_q_eo = q.sector_q_eo;
         self.min_sector_q_eo = q.min_sector_q_eo;
@@ -1278,9 +1871,15 @@ impl SensorHealthMonitor {
         q
     }
 
-    pub fn observe_lwir_frame_with_ffc(
+    /// Observe a 2D LWIR plane with hardware `FFC_IMMINENT`/`FFC_IN_PROGRESS` bitmask,
+    /// `p95-p05` contrast-collapse backstop, cold-sky + `>=2x2` hot-target preservation
+    /// (rejecting isolated 1-pixel hot noise spikes), dead-pixel FPN, white-noise autocorr,
+    /// saturation/glare, and consecutive `MAD < 0.25` DMA-freeze detector.
+    pub fn observe_lwir_plane_with_ffc(
         &mut self,
         lwir_u8: &[u8],
+        w: usize,
+        h: usize,
         ffc_bits: u8,
     ) -> LwirHealthStatus {
         let ffc_imminent = (ffc_bits & LWIR_FFC_BIT_IMMINENT) != 0;
@@ -1288,10 +1887,144 @@ impl SensorHealthMonitor {
         self.lwir_ffc_imminent = ffc_imminent;
         self.lwir_ffc_in_progress = ffc_in_progress;
 
-        let dyn_range = lwir_dynamic_range_p95_p05(lwir_u8);
-        let contrast_collapsed = lwir_u8.is_empty() || dyn_range < LWIR_CONTRAST_COLLAPSE_P95_P05_THR;
+        let n = lwir_u8.len();
+        let has_2d = w >= 2 && h >= 2 && w.saturating_mul(h) == n;
+
+        let (
+            dyn_range,
+            eff_dyn_range,
+            contrast_collapsed,
+            localized_hot_target_rescue,
+            glare_ratio,
+            occlusion_ratio,
+            dead_line_frac,
+            fpn_score,
+            spatial_autocorr,
+            noise_score,
+            q_lwir_optical,
+        ) = if n == 0 {
+            (0.0, 0.0, true, false, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        } else {
+            let mut hist = [0usize; 256];
+            let mut over_cnt = 0usize;
+            let mut under_cnt = 0usize;
+            for &px in lwir_u8 {
+                hist[px as usize] += 1;
+                if px >= 250 {
+                    over_cnt += 1;
+                }
+                if px <= 5 {
+                    under_cnt += 1;
+                }
+            }
+            let p05 = hist_percentile_u8(&hist, n, 5, 100);
+            let p50 = hist_percentile_u8(&hist, n, 50, 100);
+            let p95 = hist_percentile_u8(&hist, n, 95, 100);
+            let p999 = hist_percentile_u8(&hist, n, 999, 1000);
+            let dyn_range = (p95 - p05).max(0.0);
+
+            let over_ratio = (over_cnt as f64) / (n as f64);
+            let under_ratio = (under_cnt as f64) / (n as f64);
+
+            let (dlf, fs) = if has_2d {
+                detect_dead_line_fpn_u8(lwir_u8, w, h)
+            } else {
+                (0.0, 1.0)
+            };
+            let (ac, ns) = if has_2d {
+                detect_white_noise_fault_u8(lwir_u8, w, h)
+            } else {
+                (1.0, 1.0)
+            };
+
+            let sensor_clean_for_peak =
+                dlf < FPN_DEAD_LINE_FLAG_FRAC && ns >= EO_SECTOR_DEGRADED_THR;
+
+            // 2x2 morphological min-filter rejects isolated 1-pixel hot noise spikes while
+            // preserving genuine >=2x2 hot targets on cold night/overcast skies.
+            let min2x2_max = if has_2d {
+                let mut best = 0u8;
+                for y in 0..(h - 1) {
+                    let r0 = y * w;
+                    let r1 = (y + 1) * w;
+                    for x in 0..(w - 1) {
+                        let m = lwir_u8[r0 + x]
+                            .min(lwir_u8[r0 + x + 1])
+                            .min(lwir_u8[r1 + x])
+                            .min(lwir_u8[r1 + x + 1]);
+                        if m > best {
+                            best = m;
+                        }
+                    }
+                }
+                best as f64
+            } else {
+                p999
+            };
+
+            let mut mad_hist = [0usize; 256];
+            let p50_i = p50.round() as i32;
+            for (val, &cnt) in hist.iter().enumerate() {
+                if cnt > 0 {
+                    let d = ((val as i32) - p50_i).unsigned_abs() as usize;
+                    mad_hist[d.min(255)] += cnt;
+                }
+            }
+            let bg_mad = hist_percentile_u8(&mad_hist, n, 50, 100);
+            let bg_sigma = (1.4826 * bg_mad).max(1.0);
+
+            let peak_val = min2x2_max;
+            let peak_above_bg = (peak_val - p50).max(0.0);
+            let peak_snr = peak_above_bg / bg_sigma;
+
+            let has_localized = sensor_clean_for_peak
+                && peak_val >= LWIR_LOCAL_PEAK_MIN_DN
+                && peak_above_bg >= LWIR_LOCAL_PEAK_DELTA_DN
+                && (peak_snr >= LWIR_LOCAL_PEAK_SNR_MIN || peak_above_bg >= 35.0);
+
+            let eff_dyn = if has_localized {
+                dyn_range.max(peak_above_bg)
+            } else {
+                dyn_range
+            };
+            let glare_score = (1.0 - (over_ratio - 0.02).max(0.0) / 0.48).clamp(0.0, 1.0);
+            let occ_score = if has_localized {
+                1.0
+            } else {
+                (1.0 - (under_ratio - 0.10).max(0.0) / 0.65).clamp(0.0, 1.0)
+            };
+            let contrast_score = (eff_dyn / LWIR_CONTRAST_REF_RANGE).clamp(0.0, 1.0);
+            let collapsed = eff_dyn < LWIR_CONTRAST_COLLAPSE_P95_P05_THR;
+            let q_opt = (contrast_score * glare_score * occ_score * fs * ns).clamp(0.0, 1.0);
+
+            (
+                dyn_range,
+                eff_dyn,
+                collapsed,
+                has_localized,
+                over_ratio,
+                under_ratio,
+                dlf,
+                fs,
+                ac,
+                ns,
+                q_opt,
+            )
+        };
+
         self.lwir_dynamic_range_p95_p05 = round2(dyn_range);
+        self.lwir_effective_dynamic_range = round2(eff_dyn_range);
         self.lwir_contrast_collapsed = contrast_collapsed;
+        self.lwir_localized_hot_target_rescue = localized_hot_target_rescue;
+        self.lwir_glare_ratio = round4(glare_ratio);
+        self.lwir_occlusion_ratio = round4(occlusion_ratio);
+        self.lwir_dead_line_fraction = round4(dead_line_frac);
+        self.lwir_fpn_score = round4(fpn_score);
+        self.lwir_spatial_autocorr = round4(spatial_autocorr);
+        self.lwir_noise_score = round4(noise_score);
+        self.lwir_dead_pixel_fpn_fault = dead_line_frac >= FPN_DEAD_LINE_FLAG_FRAC;
+        self.lwir_sensor_noise_fault = noise_score < EO_SECTOR_DEGRADED_THR;
+        self.lwir_q_optical = round4(q_lwir_optical);
 
         let mad = if let Some(prev) = self.prev_lwir_u8.as_ref() {
             if prev.len() == lwir_u8.len() && !lwir_u8.is_empty() {
@@ -1310,17 +2043,25 @@ impl SensorHealthMonitor {
             } else {
                 self.lwir_freeze_ticks = 0;
                 self.lwir_nuc_frozen = false;
-                f64::NAN
+                -1.0
             }
         } else {
             self.lwir_freeze_ticks = 0;
             self.lwir_nuc_frozen = false;
-            f64::NAN
+            -1.0
         };
         self.lwir_last_mad = mad;
         self.prev_lwir_u8 = Some(lwir_u8.to_vec());
-        let mask_lwir_frame =
-            self.lwir_nuc_frozen || ffc_imminent || ffc_in_progress || contrast_collapsed;
+
+        let mask_lwir_frame = self.lwir_nuc_frozen
+            || ffc_imminent
+            || ffc_in_progress
+            || contrast_collapsed
+            || self.lwir_dead_pixel_fpn_fault
+            || self.lwir_sensor_noise_fault;
+        let degraded = mask_lwir_frame || self.lwir_q_optical < EO_SECTOR_DEGRADED_THR;
+        self.lwir_degraded = degraded;
+
         LwirHealthStatus {
             nuc_frozen: self.lwir_nuc_frozen,
             freeze_ticks: self.lwir_freeze_ticks,
@@ -1328,9 +2069,34 @@ impl SensorHealthMonitor {
             ffc_imminent,
             ffc_in_progress,
             dynamic_range_p95_p05: self.lwir_dynamic_range_p95_p05,
+            effective_dynamic_range: self.lwir_effective_dynamic_range,
             contrast_collapsed,
+            localized_hot_target_rescue,
+            glare_ratio: self.lwir_glare_ratio,
+            occlusion_ratio: self.lwir_occlusion_ratio,
+            dead_line_fraction: self.lwir_dead_line_fraction,
+            fpn_score: self.lwir_fpn_score,
+            spatial_autocorr: self.lwir_spatial_autocorr,
+            noise_score: self.lwir_noise_score,
+            dead_pixel_fpn_fault: self.lwir_dead_pixel_fpn_fault,
+            sensor_noise_fault: self.lwir_sensor_noise_fault,
+            q_lwir_optical: self.lwir_q_optical,
+            degraded,
             mask_lwir_frame,
         }
+    }
+
+    pub fn observe_lwir_frame_with_ffc(
+        &mut self,
+        lwir_u8: &[u8],
+        ffc_bits: u8,
+    ) -> LwirHealthStatus {
+        let (w, h) = if lwir_u8.len() == 160 * 128 {
+            (160_usize, 128_usize)
+        } else {
+            (0_usize, 0_usize)
+        };
+        self.observe_lwir_plane_with_ffc(lwir_u8, w, h, ffc_bits)
     }
 
     pub fn observe_timestamps(&mut self, cam_ts_ms: f64, imu_ts_ms: f64) -> TimestampCheckResult {
@@ -1364,7 +2130,7 @@ impl SensorHealthMonitor {
         {
             0.0
         } else {
-            q_lwir_base
+            (q_lwir_base * self.lwir_q_optical).clamp(0.0, 1.0)
         };
         (round4(q_eo_eff), round4(q_lwir_eff))
     }
@@ -1378,6 +2144,8 @@ pub fn is_forbidden_system_ort_path(path: &Path) -> bool {
         || lower.contains("/windows/syswow64/")
         || lower.contains("\\windows\\winsxs\\")
         || lower.contains("/windows/winsxs/")
+        || lower.ends_with("\\windows\\system32")
+        || lower.ends_with("/windows/system32")
 }
 
 pub fn resolve_ort_dylib_path() -> Result<PathBuf, String> {
@@ -1396,29 +2164,55 @@ pub fn resolve_ort_dylib_path() -> Result<PathBuf, String> {
     }
 
     let mut search_paths: Vec<PathBuf> = Vec::new();
+    let lib_names: &[&str] = if cfg!(target_os = "windows") {
+        &["onnxruntime.dll"]
+    } else if cfg!(target_os = "macos") {
+        &["libonnxruntime.dylib"]
+    } else {
+        &["libonnxruntime.so"]
+    };
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            search_paths.push(dir.join("onnxruntime.dll"));
-            search_paths.push(dir.join("lib").join("onnxruntime.dll"));
-            search_paths.push(dir.join("libonnxruntime.so"));
-            search_paths.push(dir.join("lib").join("libonnxruntime.so"));
+            for name in lib_names {
+                search_paths.push(dir.join(name));
+                search_paths.push(dir.join("lib").join(name));
+                search_paths.push(dir.join("resources").join(name));
+            }
         }
     }
-    search_paths.push(PathBuf::from("/opt/openxvs/lib/libonnxruntime.so"));
-    search_paths.push(PathBuf::from("/usr/local/lib/libonnxruntime.so"));
-
     if let Ok(cwd) = std::env::current_dir() {
-        let mut cur = Some(cwd.as_path());
-        for _ in 0..6 {
+        for name in lib_names {
+            search_paths.push(cwd.join(name));
+            search_paths.push(cwd.join("lib").join(name));
+        }
+    }
+    for name in lib_names {
+        search_paths.push(PathBuf::from("/opt/openxvs/lib").join(name));
+        search_paths.push(PathBuf::from("/usr/local/lib").join(name));
+    }
+
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let cwd = std::env::current_dir().ok();
+    for start in [cwd.as_deref(), exe_dir.as_deref()].into_iter().flatten() {
+        let mut cur = Some(start);
+        for _ in 0..7 {
             if let Some(base) = cur {
-                search_paths.push(
-                    base.join(".venv")
-                        .join("Lib")
-                        .join("site-packages")
-                        .join("onnxruntime")
-                        .join("capi")
-                        .join("onnxruntime.dll"),
-                );
+                if cfg!(target_os = "windows") {
+                    search_paths.push(
+                        base.join(".venv")
+                            .join("Lib")
+                            .join("site-packages")
+                            .join("onnxruntime")
+                            .join("capi")
+                            .join("onnxruntime.dll"),
+                    );
+                } else {
+                    for name in lib_names {
+                        search_paths.push(base.join("lib").join(name));
+                    }
+                }
                 cur = base.parent();
             }
         }
@@ -1438,18 +2232,45 @@ fn find_model_path(
     direct_names: &[&str],
     repo_rel_candidates: &[&str],
 ) -> Option<PathBuf> {
-    for name in direct_names {
-        let p = model_dir.join(name);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
     if explicit_model_dir {
+        for name in direct_names {
+            let p = model_dir.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
         return None;
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut cur = Some(cwd.as_path());
-        for _ in 0..6 {
+
+    // Auto-discovery order: exe_dir -> exe_dir/models -> cwd -> cwd/models -> model_dir (/opt/openxvs/models) -> repo parents
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let cwd = std::env::current_dir().ok();
+
+    let mut direct_dirs: Vec<PathBuf> = Vec::with_capacity(6);
+    if let Some(ref d) = exe_dir {
+        direct_dirs.push(d.clone());
+        direct_dirs.push(d.join("models"));
+    }
+    if let Some(ref d) = cwd {
+        direct_dirs.push(d.clone());
+        direct_dirs.push(d.join("models"));
+    }
+    direct_dirs.push(model_dir.to_path_buf());
+
+    for dir in &direct_dirs {
+        for name in direct_names {
+            let p = dir.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    for start in [cwd.as_deref(), exe_dir.as_deref()].into_iter().flatten() {
+        let mut cur = Some(start);
+        for _ in 0..7 {
             if let Some(base) = cur {
                 for rel in repo_rel_candidates {
                     let p = base.join(rel);
@@ -1629,6 +2450,7 @@ struct ModelBenchResult {
     loaded: bool,
     status: String,
     sha256: Option<String>,
+    load_ms: Option<f64>,
     latency_ms: Option<f64>,
     output_summary: String,
 }
@@ -1685,20 +2507,28 @@ fn acquire_edge_ort_env() -> Result<Environment, String> {
         .clone()
 }
 
-fn build_optimized_ort_session(env: &Environment, path: &Path) -> ort::Result<Session> {
-    let phys_threads = std::env::var("OMP_NUM_THREADS")
+fn resolve_ort_thread_budget() -> usize {
+    std::env::var("OMP_NUM_THREADS")
         .ok()
         .and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|&n| n >= 1)
         .map(|n| n.clamp(1, 6))
         .unwrap_or_else(|| {
             std::thread::available_parallelism()
-                .map(|n| (n.get() / 2).clamp(2, 6))
-                .unwrap_or(4)
-        });
+                .map(|n| (n.get() / 2).clamp(1, 2))
+                .unwrap_or(2)
+        })
+}
+
+fn build_optimized_ort_session(
+    env: &Environment,
+    path: &Path,
+    max_intra_threads: usize,
+) -> ort::Result<Session> {
+    let intra_threads = resolve_ort_thread_budget().min(max_intra_threads.max(1));
     let mut builder = Session::builder(env)?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(phys_threads)?
+        .with_intra_threads(intra_threads)?
         .with_inter_threads(1)?
         .with_intra_op_spinning(false)?
         .with_inter_op_spinning(false)?
@@ -1802,144 +2632,205 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
     if let Ok(env) = acquire_edge_ort_env() {
         ort_loaded = true;
 
-        // 3.1 XVS-D2 (SHA-256 pinned fail-closed)
-                if let Some(d2_path) = find_model_path(
-                    model_dir,
-                    explicit_model_dir,
-                    &["xvs_d2_web_fp16.onnx"],
-                    &[
-                        "apps/livedeck/public/models/xvs_d2_web_fp16.onnx",
-                        "models/xvs_d2_web_fp16.onnx",
-                    ],
-                ) {
-                    match verify_pinned_onnx_artifact(&d2_path, D2_ONNX_PINS) {
-                        Err((_, bad_sha)) => models.push(ModelBenchResult {
+        // 3.1 XVS-D2 (SHA-256 pinned fail-closed, dynamic 256x256 / 640x640 extended input shape, 1T pinned)
+        if let Some(d2_path) = find_model_path(
+            model_dir,
+            explicit_model_dir,
+            &["xvs_d2_web_fp16.onnx"],
+            &[
+                "apps/livedeck/public/models/xvs_d2_web_fp16.onnx",
+                "models/xvs_d2_web_fp16.onnx",
+            ],
+        ) {
+            match verify_pinned_onnx_artifact(&d2_path, D2_ONNX_PINS) {
+                Err((_, bad_sha)) => models.push(ModelBenchResult {
+                    name: "xvs_d2".to_string(),
+                    loaded: false,
+                    status: "SHA256_MISMATCH_REJECTED".to_string(),
+                    sha256: bad_sha,
+                    load_ms: None,
+                    latency_ms: None,
+                    output_summary: "SHA-256 pin mismatch; rejected fail-closed".to_string(),
+                }),
+                Ok((_, sha)) => {
+                    let t_load = Instant::now();
+                    match build_optimized_ort_session(&env, &d2_path, 1) {
+                        Err(e) => models.push(ModelBenchResult {
                             name: "xvs_d2".to_string(),
                             loaded: false,
-                            status: "SHA256_MISMATCH_REJECTED".to_string(),
-                            sha256: bad_sha,
+                            status: format!("ERROR: {e}"),
+                            sha256: Some(sha),
+                            load_ms: None,
                             latency_ms: None,
-                            output_summary: "SHA-256 pin mismatch; rejected fail-closed"
-                                .to_string(),
+                            output_summary: "failed".to_string(),
                         }),
-                        Ok((_, sha)) => {
-                            let t0 = Instant::now();
-                            let res = build_optimized_ort_session(&env, &d2_path).and_then(|mut s| {
-                                    let x_t = vec![0.0_f32; 6 * 256 * 256];
-                                    let h_prev = vec![0.0_f32; 24 * 64 * 64];
-                                    let tx = TensorRef::from_array_view((
-                                        [1usize, 6, 256, 256],
-                                        x_t.as_slice(),
-                                    ))?;
-                                    let th = TensorRef::from_array_view((
-                                        [1usize, 24, 64, 64],
-                                        h_prev.as_slice(),
-                                    ))?;
-                                    let outs =
-                                        s.run(ort::inputs!["x_t" => tx, "h_prev_warped" => th])?;
-                                    let (_, hm) = outs["hm_logits"].try_extract_tensor::<f32>()?;
-                                    Ok(hm.len())
-                                });
-                            let dt = t0.elapsed().as_secs_f64() * 1000.0;
-                            match res {
-                                Ok(n) => models.push(ModelBenchResult {
+                        Ok(mut s) => {
+                            let load_ms = round2(t_load.elapsed().as_secs_f64() * 1000.0);
+                            let (in_h, in_w, hid_c, hid_h, hid_w) = resolve_d2_input_shapes(&s);
+                            let x_t = vec![0.0_f32; 6 * in_h * in_w];
+                            let h_prev = vec![0.0_f32; hid_c * hid_h * hid_w];
+                            let run_res = (|| -> ort::Result<(usize, f64)> {
+                                // 1 warm-up pass + 1 timed warm pass (separates ORT session init from steady infer_ms)
+                                let tx0 = TensorRef::from_array_view((
+                                    [1usize, 6, in_h, in_w],
+                                    x_t.as_slice(),
+                                ))?;
+                                let th0 = TensorRef::from_array_view((
+                                    [1usize, hid_c, hid_h, hid_w],
+                                    h_prev.as_slice(),
+                                ))?;
+                                let _ = s.run(ort::inputs!["x_t" => tx0, "h_prev_warped" => th0])?;
+
+                                let tx = TensorRef::from_array_view((
+                                    [1usize, 6, in_h, in_w],
+                                    x_t.as_slice(),
+                                ))?;
+                                let th = TensorRef::from_array_view((
+                                    [1usize, hid_c, hid_h, hid_w],
+                                    h_prev.as_slice(),
+                                ))?;
+                                let t0 = Instant::now();
+                                let outs =
+                                    s.run(ort::inputs!["x_t" => tx, "h_prev_warped" => th])?;
+                                let dt = t0.elapsed().as_secs_f64() * 1000.0;
+                                let (_, hm) = outs["hm_logits"].try_extract_tensor::<f32>()?;
+                                Ok((hm.len(), dt))
+                            })();
+                            match run_res {
+                                Ok((n, dt)) => models.push(ModelBenchResult {
                                     name: "xvs_d2".to_string(),
                                     loaded: true,
                                     status: "OK".to_string(),
                                     sha256: Some(sha),
-                                    latency_ms: Some((dt * 100.0).round() / 100.0),
-                                    output_summary: format!("hm_logits_len={n}"),
+                                    load_ms: Some(load_ms),
+                                    latency_ms: Some(round2(dt)),
+                                    output_summary: format!("hm_logits_len={n} in={in_h}x{in_w}"),
                                 }),
                                 Err(e) => models.push(ModelBenchResult {
                                     name: "xvs_d2".to_string(),
                                     loaded: false,
                                     status: format!("ERROR: {e}"),
                                     sha256: Some(sha),
+                                    load_ms: Some(load_ms),
                                     latency_ms: None,
                                     output_summary: "failed".to_string(),
                                 }),
                             }
                         }
                     }
-                } else {
-                    models.push(ModelBenchResult {
-                        name: "xvs_d2".to_string(),
-                        loaded: false,
-                        status: "MODEL_NOT_MOUNTED".to_string(),
-                        sha256: None,
-                        latency_ms: None,
-                        output_summary: "mount xvs_d2_web_fp16.onnx in OPENXVS_MODEL_DIR"
-                            .to_string(),
-                    });
                 }
+            }
+        } else {
+            models.push(ModelBenchResult {
+                name: "xvs_d2".to_string(),
+                loaded: false,
+                status: "MODEL_NOT_MOUNTED".to_string(),
+                sha256: None,
+                load_ms: None,
+                latency_ms: None,
+                output_summary: "mount xvs_d2_web_fp16.onnx in OPENXVS_MODEL_DIR".to_string(),
+            });
+        }
 
-                // 3.2 XVS-ThermalNet v5.2 (1.756 MiB FP16 promoted -> v4.5 fallback, SHA-256 pinned fail-closed)
-                if let Some(th_path) = find_model_path(
-                    model_dir,
-                    explicit_model_dir,
-                    &[
-                        "xvs_thermal_v52_fp16.onnx",
-                        "xvs_thermal_v52_fp32.onnx",
-                        "xvs_thermal_v45_fp32.onnx",
-                        "xvs_thermal_v45_fp16.onnx",
-                    ],
-                    &[
-                        "models/xvs_thermal_v52_fp16.onnx",
-                        "outputs/colab_g4_v52_mega/harvest/thermal_v52/xvs_thermal_v52_fp16.onnx",
-                        "models/xvs_thermal_v52_fp32.onnx",
-                        "outputs/colab_g4_v52_mega/harvest/thermal_v52/xvs_thermal_v52_fp32.onnx",
-                        "outputs/colab_l4_v45/harvest_thermal/xvs_thermal_v45_fp32.onnx",
-                        "outputs/colab_l4_v45/harvest_thermal/xvs_thermal_v45_fp16.onnx",
-                        "models/xvs_thermal_v45_fp32.onnx",
-                        "models/xvs_thermal_v45_fp16.onnx",
-                    ],
-                ) {
-                    match verify_pinned_onnx_artifact(&th_path, THERMAL_ONNX_PINS) {
-                        Err((_, bad_sha)) => models.push(ModelBenchResult {
+        // 3.2 XVS-ThermalNet v5.2 (1.756 MiB FP16 promoted -> v4.5 fallback, SHA-256 pinned fail-closed, 1T pinned)
+        if let Some(th_path) = find_model_path(
+            model_dir,
+            explicit_model_dir,
+            &[
+                "xvs_thermal_v52_fp16.onnx",
+                "xvs_thermal_v52_fp32.onnx",
+                "xvs_thermal_v45_fp32.onnx",
+                "xvs_thermal_v45_fp16.onnx",
+            ],
+            &[
+                "models/xvs_thermal_v52_fp16.onnx",
+                "outputs/colab_g4_v52_mega/harvest/thermal_v52/xvs_thermal_v52_fp16.onnx",
+                "models/xvs_thermal_v52_fp32.onnx",
+                "outputs/colab_g4_v52_mega/harvest/thermal_v52/xvs_thermal_v52_fp32.onnx",
+                "outputs/colab_l4_v45/harvest_thermal/xvs_thermal_v45_fp32.onnx",
+                "outputs/colab_l4_v45/harvest_thermal/xvs_thermal_v45_fp16.onnx",
+                "models/xvs_thermal_v45_fp32.onnx",
+                "models/xvs_thermal_v45_fp16.onnx",
+            ],
+        ) {
+            match verify_pinned_onnx_artifact(&th_path, THERMAL_ONNX_PINS) {
+                Err((_, bad_sha)) => models.push(ModelBenchResult {
+                    name: "xvs_thermal".to_string(),
+                    loaded: false,
+                    status: "SHA256_MISMATCH_REJECTED".to_string(),
+                    sha256: bad_sha,
+                    load_ms: None,
+                    latency_ms: None,
+                    output_summary: "SHA-256 pin mismatch; rejected fail-closed".to_string(),
+                }),
+                Ok((_, sha)) => {
+                    let t_load = Instant::now();
+                    match build_optimized_ort_session(&env, &th_path, 1) {
+                        Err(e) => models.push(ModelBenchResult {
                             name: "xvs_thermal".to_string(),
                             loaded: false,
-                            status: "SHA256_MISMATCH_REJECTED".to_string(),
-                            sha256: bad_sha,
+                            status: format!("ERROR: {e}"),
+                            sha256: Some(sha),
+                            load_ms: None,
                             latency_ms: None,
-                            output_summary: "SHA-256 pin mismatch; rejected fail-closed"
-                                .to_string(),
+                            output_summary: "failed".to_string(),
                         }),
-                        Ok((_, sha)) => {
-                            let t0 = Instant::now();
-                            let res = build_optimized_ort_session(&env, &th_path).and_then(|mut s| {
-                                    let x_eo = vec![0.0_f32; 3 * 256 * 320];
-                                    let x_lw = vec![0.0_f32; 2 * 128 * 160];
-                                    let q_eo = [0.0_f32];
-                                    let q_lw = [0.0_f32];
-                                    let teo = TensorRef::from_array_view((
-                                        [1usize, 3, 256, 320],
-                                        x_eo.as_slice(),
-                                    ))?;
-                                    let tlw = TensorRef::from_array_view((
-                                        [1usize, 2, 128, 160],
-                                        x_lw.as_slice(),
-                                    ))?;
-                                    let tqe = TensorRef::from_array_view(([1usize], q_eo.as_slice()))?;
-                                    let tql = TensorRef::from_array_view(([1usize], q_lw.as_slice()))?;
-                                    let outs = s.run(ort::inputs![
-                                        "x_eo" => teo,
-                                        "x_lwir" => tlw,
-                                        "q_eo" => tqe,
-                                        "q_lwir" => tql
-                                    ])?;
-                                    let (_, vac) = outs["vacuity"].try_extract_tensor::<f32>()?;
-                                    let mean_v = vac.iter().map(|&v| v as f64).sum::<f64>()
-                                        / (vac.len().max(1) as f64);
-                                    Ok(mean_v)
-                                });
-                            let dt = t0.elapsed().as_secs_f64() * 1000.0;
-                            match res {
-                                Ok(mv) => models.push(ModelBenchResult {
+                        Ok(mut s) => {
+                            let load_ms = round2(t_load.elapsed().as_secs_f64() * 1000.0);
+                            let x_eo = vec![0.0_f32; 3 * 256 * 320];
+                            let x_lw = vec![0.0_f32; 2 * 128 * 160];
+                            let q_eo = [0.0_f32];
+                            let q_lw = [0.0_f32];
+                            let run_res = (|| -> ort::Result<(f64, f64)> {
+                                // 1 warm-up pass + 1 timed warm pass
+                                let teo0 = TensorRef::from_array_view((
+                                    [1usize, 3, 256, 320],
+                                    x_eo.as_slice(),
+                                ))?;
+                                let tlw0 = TensorRef::from_array_view((
+                                    [1usize, 2, 128, 160],
+                                    x_lw.as_slice(),
+                                ))?;
+                                let tqe0 = TensorRef::from_array_view(([1usize], q_eo.as_slice()))?;
+                                let tql0 = TensorRef::from_array_view(([1usize], q_lw.as_slice()))?;
+                                let _ = s.run(ort::inputs![
+                                    "x_eo" => teo0,
+                                    "x_lwir" => tlw0,
+                                    "q_eo" => tqe0,
+                                    "q_lwir" => tql0
+                                ])?;
+
+                                let teo = TensorRef::from_array_view((
+                                    [1usize, 3, 256, 320],
+                                    x_eo.as_slice(),
+                                ))?;
+                                let tlw = TensorRef::from_array_view((
+                                    [1usize, 2, 128, 160],
+                                    x_lw.as_slice(),
+                                ))?;
+                                let tqe = TensorRef::from_array_view(([1usize], q_eo.as_slice()))?;
+                                let tql = TensorRef::from_array_view(([1usize], q_lw.as_slice()))?;
+                                let t0 = Instant::now();
+                                let outs = s.run(ort::inputs![
+                                    "x_eo" => teo,
+                                    "x_lwir" => tlw,
+                                    "q_eo" => tqe,
+                                    "q_lwir" => tql
+                                ])?;
+                                let dt = t0.elapsed().as_secs_f64() * 1000.0;
+                                let (_, vac) = outs["vacuity"].try_extract_tensor::<f32>()?;
+                                let mean_v = vac.iter().map(|&v| v as f64).sum::<f64>()
+                                    / (vac.len().max(1) as f64);
+                                Ok((mean_v, dt))
+                            })();
+                            match run_res {
+                                Ok((mv, dt)) => models.push(ModelBenchResult {
                                     name: "xvs_thermal".to_string(),
                                     loaded: true,
                                     status: "OK".to_string(),
                                     sha256: Some(sha),
-                                    latency_ms: Some((dt * 100.0).round() / 100.0),
+                                    load_ms: Some(load_ms),
+                                    latency_ms: Some(round2(dt)),
                                     output_summary: format!("dual_blind_vacuity={mv:.4}"),
                                 }),
                                 Err(e) => models.push(ModelBenchResult {
@@ -1947,193 +2838,264 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
                                     loaded: false,
                                     status: format!("ERROR: {e}"),
                                     sha256: Some(sha),
+                                    load_ms: Some(load_ms),
                                     latency_ms: None,
                                     output_summary: "failed".to_string(),
                                 }),
                             }
                         }
                     }
-                } else {
-                    models.push(ModelBenchResult {
-                        name: "xvs_thermal".to_string(),
-                        loaded: false,
-                        status: "MODEL_NOT_MOUNTED".to_string(),
-                        sha256: None,
-                        latency_ms: None,
-                        output_summary: "mount xvs_thermal_v52_fp16.onnx in OPENXVS_MODEL_DIR"
-                            .to_string(),
-                    });
                 }
+            }
+        } else {
+            models.push(ModelBenchResult {
+                name: "xvs_thermal".to_string(),
+                loaded: false,
+                status: "MODEL_NOT_MOUNTED".to_string(),
+                sha256: None,
+                load_ms: None,
+                latency_ms: None,
+                output_summary: "mount xvs_thermal_v52_fp16.onnx in OPENXVS_MODEL_DIR".to_string(),
+            });
+        }
 
-                // 3.3 XVS-Land v5.2 + StudentTCalibrator (2.766 MiB FP16 6-output promoted -> v4.5 fallback)
-                if let Some(land_path) = find_model_path(
-                    model_dir,
-                    explicit_model_dir,
-                    &[
-                        "xvs_land_v52_fp16.onnx",
-                        "xvs_land_v52_fp32.onnx",
-                        "xvs_land_v45_fp16.onnx",
-                        "xvs_land_v45.onnx",
-                    ],
-                    &[
-                        "models/xvs_land_v52_fp16.onnx",
-                        "outputs/colab_g4_v52_mega/harvest/land_v52/xvs_land_v52_fp16.onnx",
-                        "models/xvs_land_v52_fp32.onnx",
-                        "outputs/colab_g4_v52_mega/harvest/land_v52/xvs_land_v52_fp32.onnx",
-                        "outputs/colab_l4_v45/harvest_land/xvs_land_v45_fp16.onnx",
-                        "outputs/colab_l4_v45/harvest_land/xvs_land_v45.onnx",
-                        "models/xvs_land_v45_fp16.onnx",
-                        "models/xvs_land_v45.onnx",
-                    ],
-                ) {
-                    match verify_pinned_onnx_artifact(&land_path, LAND_ONNX_PINS) {
-                        Err((_, bad_sha)) => models.push(ModelBenchResult {
+        // 3.3 XVS-Land v1.1.1 + StudentTCalibrator (6-output promoted + optional 7th output runway_present_logit, 1T pinned)
+        if let Some(land_path) = find_model_path(
+            model_dir,
+            explicit_model_dir,
+            &[
+                "xvs_land_v52_fp16.onnx",
+                "xvs_land_v52_fp32.onnx",
+                "xvs_land_v45_fp16.onnx",
+                "xvs_land_v45.onnx",
+            ],
+            &[
+                "models/xvs_land_v52_fp16.onnx",
+                "outputs/colab_g4_v52_mega/harvest/land_v52/xvs_land_v52_fp16.onnx",
+                "models/xvs_land_v52_fp32.onnx",
+                "outputs/colab_g4_v52_mega/harvest/land_v52/xvs_land_v52_fp32.onnx",
+                "outputs/colab_l4_v45/harvest_land/xvs_land_v45_fp16.onnx",
+                "outputs/colab_l4_v45/harvest_land/xvs_land_v45.onnx",
+                "models/xvs_land_v45_fp16.onnx",
+                "models/xvs_land_v45.onnx",
+            ],
+        ) {
+            match verify_pinned_onnx_artifact(&land_path, LAND_ONNX_PINS) {
+                Err((_, bad_sha)) => models.push(ModelBenchResult {
+                    name: "xvs_land".to_string(),
+                    loaded: false,
+                    status: "SHA256_MISMATCH_REJECTED".to_string(),
+                    sha256: bad_sha,
+                    load_ms: None,
+                    latency_ms: None,
+                    output_summary: "SHA-256 pin mismatch; rejected fail-closed".to_string(),
+                }),
+                Ok((_, sha)) => {
+                    let is_v52 = sha.eq_ignore_ascii_case(EXPECTED_LAND_V52_FP16_SHA256)
+                        || sha.eq_ignore_ascii_case(EXPECTED_LAND_V52_FP32_SHA256);
+                    let (nu, scale) = if is_v52 {
+                        (V52_LAND_STUDENT_T_NU, V52_LAND_STUDENT_T_SCALE)
+                    } else {
+                        (LAND_STUDENT_T_NU, LAND_STUDENT_T_SCALE)
+                    };
+                    let cal = StudentTCalibrator::new(nu, scale)
+                        .expect("valid default StudentTCalibrator");
+                    let t_load = Instant::now();
+                    match build_optimized_ort_session(&env, &land_path, 1) {
+                        Err(e) => models.push(ModelBenchResult {
                             name: "xvs_land".to_string(),
                             loaded: false,
-                            status: "SHA256_MISMATCH_REJECTED".to_string(),
-                            sha256: bad_sha,
+                            status: format!("ERROR: {e}"),
+                            sha256: Some(sha),
+                            load_ms: None,
                             latency_ms: None,
-                            output_summary: "SHA-256 pin mismatch; rejected fail-closed"
-                                .to_string(),
+                            output_summary: "failed".to_string(),
                         }),
-                        Ok((_, sha)) => {
-                            let is_v52 = sha.eq_ignore_ascii_case(EXPECTED_LAND_V52_FP16_SHA256)
-                                || sha.eq_ignore_ascii_case(EXPECTED_LAND_V52_FP32_SHA256);
-                            let (nu, scale) = if is_v52 {
-                                (V52_LAND_STUDENT_T_NU, V52_LAND_STUDENT_T_SCALE)
-                            } else {
-                                (LAND_STUDENT_T_NU, LAND_STUDENT_T_SCALE)
-                            };
-                            let cal = StudentTCalibrator::new(nu, scale)
-                                .expect("valid default StudentTCalibrator");
-                            let t0 = Instant::now();
-                            let res: Result<ParsedLandOutputs, String> =
-                                build_optimized_ort_session(&env, &land_path)
-                                    .map_err(|e| format!("{e}"))
-                                    .and_then(|mut s| {
-                                        let (roi_h, roi_w) = resolve_land_input_hw(&s);
-                                        let roi = vec![0.5_f32; 3 * roi_h * roi_w];
-                                        let troi = TensorRef::from_array_view((
-                                            [1usize, 3, roi_h, roi_w],
-                                            roi.as_slice(),
-                                        ))
+                        Ok(mut s) => {
+                            let load_ms = round2(t_load.elapsed().as_secs_f64() * 1000.0);
+                            let (roi_h, roi_w) = resolve_land_input_hw(&s);
+                            let roi = vec![0.5_f32; 3 * roi_h * roi_w];
+                            let res: Result<(ParsedLandOutputs, f64), String> = (|| {
+                                // 1 warm-up pass + 1 timed warm pass
+                                let troi0 = TensorRef::from_array_view((
+                                    [1usize, 3, roi_h, roi_w],
+                                    roi.as_slice(),
+                                ))
+                                .map_err(|e| format!("{e}"))?;
+                                let _ = s
+                                    .run(ort::inputs!["roi_crop" => troi0])
+                                    .map_err(|e| format!("{e}"))?;
+
+                                let troi = TensorRef::from_array_view((
+                                    [1usize, 3, roi_h, roi_w],
+                                    roi.as_slice(),
+                                ))
+                                .map_err(|e| format!("{e}"))?;
+                                let t0 = Instant::now();
+                                let outs = s
+                                    .run(ort::inputs!["roi_crop" => troi])
+                                    .map_err(|e| format!("{e}"))?;
+                                let dt = t0.elapsed().as_secs_f64() * 1000.0;
+                                let (_, kpts) = outs["keypoints_xy"]
+                                    .try_extract_tensor::<f32>()
+                                    .map_err(|e| format!("{e}"))?;
+                                let (_, kl) = outs["keylines_hesse"]
+                                    .try_extract_tensor::<f32>()
+                                    .map_err(|e| format!("{e}"))?;
+                                let (_, cov) = outs["cov_2x2"]
+                                    .try_extract_tensor::<f32>()
+                                    .map_err(|e| format!("{e}"))?;
+                                let kl_sig_opt = if let Some(sv) = outs.get("keyline_sigma_px") {
+                                    let (_, sl) = sv
+                                        .try_extract_tensor::<f32>()
                                         .map_err(|e| format!("{e}"))?;
-                                        let outs = s
-                                            .run(ort::inputs!["roi_crop" => troi])
-                                            .map_err(|e| format!("{e}"))?;
-                                        let (_, kpts) = outs["keypoints_xy"]
+                                    Some(sl)
+                                } else {
+                                    None
+                                };
+                                let rwy_pres_opt =
+                                    if let Some(rv) = outs.get("runway_present_logit") {
+                                        let (_, rl) = rv
                                             .try_extract_tensor::<f32>()
                                             .map_err(|e| format!("{e}"))?;
-                                        let (_, kl) = outs["keylines_hesse"]
-                                            .try_extract_tensor::<f32>()
-                                            .map_err(|e| format!("{e}"))?;
-                                        let (_, cov) = outs["cov_2x2"]
-                                            .try_extract_tensor::<f32>()
-                                            .map_err(|e| format!("{e}"))?;
-                                        let kl_sig_opt = if let Some(sv) =
-                                            outs.get("keyline_sigma_px")
-                                        {
-                                            let (_, sl) = sv
-                                                .try_extract_tensor::<f32>()
-                                                .map_err(|e| format!("{e}"))?;
-                                            Some(sl)
-                                        } else {
-                                            None
-                                        };
-                                        parse_xvs_land_outputs(kpts, kl, cov, kl_sig_opt, &cal)
-                                    });
-                            let dt = t0.elapsed().as_secs_f64() * 1000.0;
+                                        Some(rl)
+                                    } else {
+                                        None
+                                    };
+                                let parsed = parse_xvs_land_outputs_with_presence(
+                                    kpts,
+                                    kl,
+                                    cov,
+                                    kl_sig_opt,
+                                    rwy_pres_opt,
+                                    &cal,
+                                )?;
+                                Ok((parsed, dt))
+                            })();
                             match res {
-                                Ok(parsed) => models.push(ModelBenchResult {
-                                    name: "xvs_land".to_string(),
-                                    loaded: true,
-                                    status: "OK".to_string(),
-                                    sha256: Some(sha),
-                                    latency_ms: Some((dt * 100.0).round() / 100.0),
-                                    output_summary: format!(
+                                Ok((parsed, dt)) => {
+                                    let mut summary = format!(
                                         "keypoints={} cal_sigma0_px={:.2} contract={} eff_kl_sigma_px={:.2}",
                                         parsed.keypoints_xy.len(),
                                         parsed.calibrated_kp_sigmas_px[0],
                                         parsed.contract.as_str(),
                                         parsed.effective_keyline_sigma_px,
-                                    ),
-                                }),
+                                    );
+                                    if let Some(prob) = parsed.runway_present_prob {
+                                        summary.push_str(&format!(
+                                            " rwy_prob={prob:.3} rwy_gate={}",
+                                            parsed.runway_gate_mode
+                                        ));
+                                    }
+                                    models.push(ModelBenchResult {
+                                        name: "xvs_land".to_string(),
+                                        loaded: true,
+                                        status: "OK".to_string(),
+                                        sha256: Some(sha),
+                                        load_ms: Some(load_ms),
+                                        latency_ms: Some(round2(dt)),
+                                        output_summary: summary,
+                                    });
+                                }
                                 Err(e) => models.push(ModelBenchResult {
                                     name: "xvs_land".to_string(),
                                     loaded: false,
                                     status: format!("ERROR: {e}"),
                                     sha256: Some(sha),
+                                    load_ms: Some(load_ms),
                                     latency_ms: None,
                                     output_summary: "failed".to_string(),
                                 }),
                             }
                         }
                     }
-                } else {
-                    models.push(ModelBenchResult {
-                        name: "xvs_land".to_string(),
-                        loaded: false,
-                        status: "MODEL_NOT_MOUNTED".to_string(),
-                        sha256: None,
-                        latency_ms: None,
-                        output_summary: "mount xvs_land_v52_fp16.onnx in OPENXVS_MODEL_DIR"
-                            .to_string(),
-                    });
                 }
+            }
+        } else {
+            models.push(ModelBenchResult {
+                name: "xvs_land".to_string(),
+                loaded: false,
+                status: "MODEL_NOT_MOUNTED".to_string(),
+                sha256: None,
+                load_ms: None,
+                latency_ms: None,
+                output_summary: "mount xvs_land_v52_fp16.onnx in OPENXVS_MODEL_DIR".to_string(),
+            });
+        }
 
-                // 3.4 XVS-Nav v5.0 Stage-1 (Faz-B 21.525 MB FP16 prioritized -> Faz-A fallback; SHA-256 fail-closed)
-                if let Some(nav_path) = find_model_path(
-                    model_dir,
-                    explicit_model_dir,
-                    &[
-                        "xvs_nav_v5_fazb_fp16.onnx",
-                        "xvs_nav_v5_fp16.onnx",
-                        "xvs_nav_v5_fazb_fp32.onnx",
-                        "xvs_nav_v5_fp32.onnx",
-                    ],
-                    &[
-                        "outputs/colab_l4_v5_nav/harvest_faz_b/xvs_nav_v5_fazb_fp16.onnx",
-                        "models/xvs_nav_v5_fazb_fp16.onnx",
-                        "outputs/colab_l4_v5_nav/harvest/xvs_nav_v5_fp16.onnx",
-                        "models/xvs_nav_v5_fp16.onnx",
-                    ],
-                ) {
-                    match verify_pinned_onnx_artifact(&nav_path, NAV_ONNX_PINS) {
-                        Err((_, bad_sha)) => models.push(ModelBenchResult {
+        // 3.4 XVS-Nav v5.0 Stage-1 (Faz-B 21.525 MB FP16 prioritized -> Faz-A fallback; SHA-256 fail-closed, up to 2T)
+        if let Some(nav_path) = find_model_path(
+            model_dir,
+            explicit_model_dir,
+            &[
+                "xvs_nav_v5_fazb_fp16.onnx",
+                "xvs_nav_v5_fp16.onnx",
+                "xvs_nav_v5_fazb_fp32.onnx",
+                "xvs_nav_v5_fp32.onnx",
+            ],
+            &[
+                "outputs/colab_l4_v5_nav/harvest_faz_b/xvs_nav_v5_fazb_fp16.onnx",
+                "models/xvs_nav_v5_fazb_fp16.onnx",
+                "outputs/colab_l4_v5_nav/harvest/xvs_nav_v5_fp16.onnx",
+                "models/xvs_nav_v5_fp16.onnx",
+            ],
+        ) {
+            match verify_pinned_onnx_artifact(&nav_path, NAV_ONNX_PINS) {
+                Err((_, bad_sha)) => models.push(ModelBenchResult {
+                    name: "xvs_nav_v5".to_string(),
+                    loaded: false,
+                    status: "SHA256_MISMATCH_REJECTED".to_string(),
+                    sha256: bad_sha,
+                    load_ms: None,
+                    latency_ms: None,
+                    output_summary: "SHA-256 pin mismatch; rejected fail-closed".to_string(),
+                }),
+                Ok((_, sha)) => {
+                    let t_load = Instant::now();
+                    match build_optimized_ort_session(&env, &nav_path, 2) {
+                        Err(e) => models.push(ModelBenchResult {
                             name: "xvs_nav_v5".to_string(),
                             loaded: false,
-                            status: "SHA256_MISMATCH_REJECTED".to_string(),
-                            sha256: bad_sha,
+                            status: format!("ERROR: {e}"),
+                            sha256: Some(sha),
+                            load_ms: None,
                             latency_ms: None,
-                            output_summary: "SHA-256 pin mismatch; rejected fail-closed"
-                                .to_string(),
+                            output_summary: "failed".to_string(),
                         }),
-                        Ok((_, sha)) => {
-                            let res = build_optimized_ort_session(&env, &nav_path).and_then(|mut s| {
-                                    let img = vec![0.5_f32; 3 * 224 * 224];
-                                    let tin = TensorRef::from_array_view((
-                                        [1usize, 3, 224, 224],
-                                        img.as_slice(),
-                                    ))?;
-                                    let t0 = Instant::now();
-                                    let outs = s.run(ort::inputs!["img_s1" => tin])?;
-                                    let dt = t0.elapsed().as_secs_f64() * 1000.0;
-                                    let (_, desc) =
-                                        outs["desc_global"].try_extract_tensor::<f32>()?;
-                                    let l2 = desc
-                                        .iter()
-                                        .map(|&v| (v as f64) * (v as f64))
-                                        .sum::<f64>()
-                                        .sqrt();
-                                    Ok((desc.len(), l2, dt))
-                                });
+                        Ok(mut s) => {
+                            let load_ms = round2(t_load.elapsed().as_secs_f64() * 1000.0);
+                            let img = vec![0.5_f32; 3 * 224 * 224];
+                            let res = (|| -> ort::Result<(usize, f64, f64)> {
+                                // 1 warm-up pass + 1 timed warm pass
+                                let tin0 = TensorRef::from_array_view((
+                                    [1usize, 3, 224, 224],
+                                    img.as_slice(),
+                                ))?;
+                                let _ = s.run(ort::inputs!["img_s1" => tin0])?;
+
+                                let tin = TensorRef::from_array_view((
+                                    [1usize, 3, 224, 224],
+                                    img.as_slice(),
+                                ))?;
+                                let t0 = Instant::now();
+                                let outs = s.run(ort::inputs!["img_s1" => tin])?;
+                                let dt = t0.elapsed().as_secs_f64() * 1000.0;
+                                let (_, desc) = outs["desc_global"].try_extract_tensor::<f32>()?;
+                                let l2 = desc
+                                    .iter()
+                                    .map(|&v| (v as f64) * (v as f64))
+                                    .sum::<f64>()
+                                    .sqrt();
+                                Ok((desc.len(), l2, dt))
+                            })();
                             match res {
                                 Ok((dim, l2, dt)) => models.push(ModelBenchResult {
                                     name: "xvs_nav_v5".to_string(),
                                     loaded: true,
                                     status: "READY_RUST_ORT_V5".to_string(),
                                     sha256: Some(sha),
-                                    latency_ms: Some((dt * 100.0).round() / 100.0),
+                                    load_ms: Some(load_ms),
+                                    latency_ms: Some(round2(dt)),
                                     output_summary: format!("dim={dim} l2_norm={l2:.6}"),
                                 }),
                                 Err(e) => models.push(ModelBenchResult {
@@ -2141,100 +3103,123 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
                                     loaded: false,
                                     status: format!("ERROR: {e}"),
                                     sha256: Some(sha),
+                                    load_ms: Some(load_ms),
                                     latency_ms: None,
                                     output_summary: "failed".to_string(),
                                 }),
                             }
                         }
                     }
-                } else {
-                    models.push(ModelBenchResult {
-                        name: "xvs_nav_v5".to_string(),
-                        loaded: false,
-                        status: "AWAITING_V5_ONNX_HARVEST".to_string(),
-                        sha256: None,
-                        latency_ms: None,
-                        output_summary: "Plug-in slot ready for xvs_nav_v5_fazb_fp16.onnx".to_string(),
-                    });
                 }
+            }
+        } else {
+            models.push(ModelBenchResult {
+                name: "xvs_nav_v5".to_string(),
+                loaded: false,
+                status: "AWAITING_V5_ONNX_HARVEST".to_string(),
+                sha256: None,
+                load_ms: None,
+                latency_ms: None,
+                output_summary: "Plug-in slot ready for xvs_nav_v5_fazb_fp16.onnx".to_string(),
+            });
+        }
 
-                // 3.5 Stage-2A XFeat (1.303 MB FP16 prioritized -> 2.530 MB FP32 fallback; SHA-256 fail-closed)
-                if let Some(xfeat_path) = find_model_path(
-                    model_dir,
-                    explicit_model_dir,
-                    &["xfeat_320x256_fp16.onnx", "xfeat_320x256_fp32.onnx"],
-                    &[
-                        "outputs/colab_l4_v5_nav/harvest_faz_b/xfeat_320x256_fp16.onnx",
-                        "models/xfeat_320x256_fp16.onnx",
-                        "outputs/colab_l4_v5_nav/harvest_faz_b/xfeat_320x256_fp32.onnx",
-                        "outputs/colab_l4_v5_nav/harvest/xfeat_320x256_fp32.onnx",
-                        "models/xfeat_320x256_fp32.onnx",
-                    ],
-                ) {
-                    match verify_pinned_onnx_artifact(&xfeat_path, XFEAT_ONNX_PINS) {
-                        Err((_, bad_sha)) => models.push(ModelBenchResult {
+        // 3.5 Stage-2A XFeat (1.303 MB FP16 prioritized -> 2.530 MB FP32 fallback; SHA-256 fail-closed, 1T pinned)
+        if let Some(xfeat_path) = find_model_path(
+            model_dir,
+            explicit_model_dir,
+            &["xfeat_320x256_fp16.onnx", "xfeat_320x256_fp32.onnx"],
+            &[
+                "outputs/colab_l4_v5_nav/harvest_faz_b/xfeat_320x256_fp16.onnx",
+                "models/xfeat_320x256_fp16.onnx",
+                "outputs/colab_l4_v5_nav/harvest_faz_b/xfeat_320x256_fp32.onnx",
+                "outputs/colab_l4_v5_nav/harvest/xfeat_320x256_fp32.onnx",
+                "models/xfeat_320x256_fp32.onnx",
+            ],
+        ) {
+            match verify_pinned_onnx_artifact(&xfeat_path, XFEAT_ONNX_PINS) {
+                Err((_, bad_sha)) => models.push(ModelBenchResult {
+                    name: "xvs_xfeat".to_string(),
+                    loaded: false,
+                    status: "SHA256_MISMATCH_REJECTED".to_string(),
+                    sha256: bad_sha,
+                    load_ms: None,
+                    latency_ms: None,
+                    output_summary: "SHA-256 pin mismatch; rejected fail-closed".to_string(),
+                }),
+                Ok((_, sha)) => {
+                    let t_load = Instant::now();
+                    match build_optimized_ort_session(&env, &xfeat_path, 1) {
+                        Err(e) => models.push(ModelBenchResult {
                             name: "xvs_xfeat".to_string(),
                             loaded: false,
-                            status: "SHA256_MISMATCH_REJECTED".to_string(),
-                            sha256: bad_sha,
+                            status: format!("ERROR: {e}"),
+                            sha256: Some(sha),
+                            load_ms: None,
                             latency_ms: None,
-                            output_summary: "SHA-256 pin mismatch; rejected fail-closed"
-                                .to_string(),
+                            output_summary: "failed".to_string(),
                         }),
-                        Ok((_, sha)) => {
-                            let res = build_optimized_ort_session(&env, &xfeat_path).and_then(|mut s| {
-                                    // Multi-scale textured terrain + sharp corners probe for authentic XFeat keypoints
-                                    let mut img = vec![0.0_f32; 3 * 256 * 320];
-                                    let mut pat = vec![0.0_f32; 256 * 320];
-                                    for y in 0..256usize {
-                                        let yf = y as f32;
-                                        for x in 0..320usize {
-                                            let xf = x as f32;
-                                            let v = (0.5
-                                                + 0.25 * (xf * 0.19).sin() * (yf * 0.23).cos()
-                                                + 0.20
-                                                    * ((xf + yf) * 0.37).sin()
-                                                    * ((xf - yf) * 0.11).cos())
-                                            .clamp(0.0, 1.0);
-                                            pat[y * 320 + x] = v;
+                        Ok(mut s) => {
+                            let load_ms = round2(t_load.elapsed().as_secs_f64() * 1000.0);
+                            // Multi-scale textured terrain + sharp corners probe for authentic XFeat keypoints
+                            let mut img = vec![0.0_f32; 3 * 256 * 320];
+                            let mut pat = vec![0.0_f32; 256 * 320];
+                            for y in 0..256usize {
+                                let yf = y as f32;
+                                for x in 0..320usize {
+                                    let xf = x as f32;
+                                    let v = (0.5
+                                        + 0.25 * (xf * 0.19).sin() * (yf * 0.23).cos()
+                                        + 0.20
+                                            * ((xf + yf) * 0.37).sin()
+                                            * ((xf - yf) * 0.11).cos())
+                                    .clamp(0.0, 1.0);
+                                    pat[y * 320 + x] = v;
+                                }
+                            }
+                            for r in (20..236usize).step_by(28) {
+                                for c in (20..300usize).step_by(32) {
+                                    for dy in 0..10usize {
+                                        for dx in 0..10usize {
+                                            let inner =
+                                                (2..8).contains(&dy) && (2..8).contains(&dx);
+                                            pat[(r + dy) * 320 + (c + dx)] =
+                                                if inner { 0.05 } else { 0.95 };
                                         }
                                     }
-                                    for r in (20..236usize).step_by(28) {
-                                        for c in (20..300usize).step_by(32) {
-                                            for dy in 0..10usize {
-                                                for dx in 0..10usize {
-                                                    let inner =
-                                                        (2..8).contains(&dy) && (2..8).contains(&dx);
-                                                    pat[(r + dy) * 320 + (c + dx)] =
-                                                        if inner { 0.05 } else { 0.95 };
-                                                }
-                                            }
-                                        }
-                                    }
-                                    for ch in 0..3usize {
-                                        img[ch * 256 * 320..(ch + 1) * 256 * 320]
-                                            .copy_from_slice(&pat);
-                                    }
-                                    let tin = TensorRef::from_array_view((
-                                        [1usize, 3, 256, 320],
-                                        img.as_slice(),
-                                    ))?;
-                                    let t0 = Instant::now();
-                                    let outs = s.run(ort::inputs!["img_s2" => tin])?;
-                                    let (_, kpts) =
-                                        outs["keypoints"].try_extract_tensor::<f32>()?;
-                                    let (_, hm) = outs["heatmap"].try_extract_tensor::<f32>()?;
-                                    let n_kpts = count_xfeat_keypoints(kpts, hm, 256, 0.05);
-                                    let dt = t0.elapsed().as_secs_f64() * 1000.0;
-                                    Ok((n_kpts, dt))
-                                });
+                                }
+                            }
+                            for ch in 0..3usize {
+                                img[ch * 256 * 320..(ch + 1) * 256 * 320].copy_from_slice(&pat);
+                            }
+                            let res = (|| -> ort::Result<(usize, f64)> {
+                                // 1 warm-up pass + 1 timed warm pass
+                                let tin0 = TensorRef::from_array_view((
+                                    [1usize, 3, 256, 320],
+                                    img.as_slice(),
+                                ))?;
+                                let _ = s.run(ort::inputs!["img_s2" => tin0])?;
+
+                                let tin = TensorRef::from_array_view((
+                                    [1usize, 3, 256, 320],
+                                    img.as_slice(),
+                                ))?;
+                                let t0 = Instant::now();
+                                let outs = s.run(ort::inputs!["img_s2" => tin])?;
+                                let (_, kpts) = outs["keypoints"].try_extract_tensor::<f32>()?;
+                                let (_, hm) = outs["heatmap"].try_extract_tensor::<f32>()?;
+                                let n_kpts = count_xfeat_keypoints(kpts, hm, 256, 0.05);
+                                let dt = t0.elapsed().as_secs_f64() * 1000.0;
+                                Ok((n_kpts, dt))
+                            })();
                             match res {
                                 Ok((nk, dt)) => models.push(ModelBenchResult {
                                     name: "xvs_xfeat".to_string(),
                                     loaded: true,
                                     status: "READY_RUST_ORT_V5".to_string(),
                                     sha256: Some(sha),
-                                    latency_ms: Some((dt * 100.0).round() / 100.0),
+                                    load_ms: Some(load_ms),
+                                    latency_ms: Some(round2(dt)),
                                     output_summary: format!("xfeat_keypoints_count={nk}"),
                                 }),
                                 Err(e) => models.push(ModelBenchResult {
@@ -2242,71 +3227,98 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
                                     loaded: false,
                                     status: format!("ERROR: {e}"),
                                     sha256: Some(sha),
+                                    load_ms: Some(load_ms),
                                     latency_ms: None,
                                     output_summary: "failed".to_string(),
                                 }),
                             }
                         }
                     }
-                } else {
-                    models.push(ModelBenchResult {
-                        name: "xvs_xfeat".to_string(),
-                        loaded: false,
-                        status: "MODEL_NOT_MOUNTED".to_string(),
-                        sha256: None,
-                        latency_ms: None,
-                        output_summary: "mount xfeat_320x256_fp16.onnx in OPENXVS_MODEL_DIR"
-                            .to_string(),
-                    });
                 }
+            }
+        } else {
+            models.push(ModelBenchResult {
+                name: "xvs_xfeat".to_string(),
+                loaded: false,
+                status: "MODEL_NOT_MOUNTED".to_string(),
+                sha256: None,
+                load_ms: None,
+                latency_ms: None,
+                output_summary: "mount xfeat_320x256_fp16.onnx in OPENXVS_MODEL_DIR".to_string(),
+            });
+        }
 
-                // 3.6 Stage-2B LighterGlue (2.455 MB FP16 static K=256 prioritized -> FP32 fallback; SHA-256 fail-closed)
-                if let Some(lg_path) = find_model_path(
-                    model_dir,
-                    explicit_model_dir,
-                    &["lighterglue_k256_fp16.onnx", "lighterglue_k256_fp32.onnx"],
-                    &[
-                        "outputs/colab_l4_v5_nav/harvest_faz_b/lighterglue_k256_fp16.onnx",
-                        "models/lighterglue_k256_fp16.onnx",
-                        "outputs/colab_l4_v5_nav/harvest_faz_b/lighterglue_k256_fp32.onnx",
-                        "models/lighterglue_k256_fp32.onnx",
-                    ],
-                ) {
-                    match verify_pinned_onnx_artifact(&lg_path, LIGHTERGLUE_ONNX_PINS) {
-                        Err((_, bad_sha)) => models.push(ModelBenchResult {
+        // 3.6 Stage-2B LighterGlue (2.455 MB FP16 static K=256 prioritized -> FP32 fallback; SHA-256 fail-closed, 1T pinned)
+        if let Some(lg_path) = find_model_path(
+            model_dir,
+            explicit_model_dir,
+            &["lighterglue_k256_fp16.onnx", "lighterglue_k256_fp32.onnx"],
+            &[
+                "outputs/colab_l4_v5_nav/harvest_faz_b/lighterglue_k256_fp16.onnx",
+                "models/lighterglue_k256_fp16.onnx",
+                "outputs/colab_l4_v5_nav/harvest_faz_b/lighterglue_k256_fp32.onnx",
+                "models/lighterglue_k256_fp32.onnx",
+            ],
+        ) {
+            match verify_pinned_onnx_artifact(&lg_path, LIGHTERGLUE_ONNX_PINS) {
+                Err((_, bad_sha)) => models.push(ModelBenchResult {
+                    name: "xvs_lighterglue".to_string(),
+                    loaded: false,
+                    status: "SHA256_MISMATCH_REJECTED".to_string(),
+                    sha256: bad_sha,
+                    load_ms: None,
+                    latency_ms: None,
+                    output_summary: "SHA-256 pin mismatch; rejected fail-closed".to_string(),
+                }),
+                Ok((_, sha)) => {
+                    let t_load = Instant::now();
+                    match build_optimized_ort_session(&env, &lg_path, 1) {
+                        Err(e) => models.push(ModelBenchResult {
                             name: "xvs_lighterglue".to_string(),
                             loaded: false,
-                            status: "SHA256_MISMATCH_REJECTED".to_string(),
-                            sha256: bad_sha,
+                            status: format!("ERROR: {e}"),
+                            sha256: Some(sha),
+                            load_ms: None,
                             latency_ms: None,
-                            output_summary: "SHA-256 pin mismatch; rejected fail-closed"
-                                .to_string(),
+                            output_summary: "failed".to_string(),
                         }),
-                        Ok((_, sha)) => {
-                            let res = build_optimized_ort_session(&env, &lg_path).and_then(|mut s| {
-                                // Deterministic 256-keypoint geometric grid + distinct L2-normalized 64-D descriptors
-                                let k = LIGHTERGLUE_STATIC_K;
-                                let d = LIGHTERGLUE_DESC_DIM;
-                                let mut kpts = vec![0.0_f32; k * 2];
-                                let mut desc = vec![0.0_f32; k * d];
-                                for i in 0..k {
-                                    let gx = (i % 16) as f32;
-                                    let gy = (i / 16) as f32;
-                                    kpts[i * 2] = -0.9 + (gx / 15.0) * 1.8;
-                                    kpts[i * 2 + 1] = -0.9 + (gy / 15.0) * 1.8;
-                                    let mut nsq = 0.0_f32;
-                                    for c in 0..d {
-                                        let phase =
-                                            ((i as f32) * 0.37 + (c as f32) * 0.71).sin()
-                                                + 0.5 * ((i as f32) * 1.13 - (c as f32) * 0.29).cos();
-                                        desc[i * d + c] = phase;
-                                        nsq += phase * phase;
-                                    }
-                                    let inv = 1.0_f32 / nsq.sqrt().max(1e-12);
-                                    for c in 0..d {
-                                        desc[i * d + c] *= inv;
-                                    }
+                        Ok(mut s) => {
+                            let load_ms = round2(t_load.elapsed().as_secs_f64() * 1000.0);
+                            // Deterministic 256-keypoint geometric grid + distinct L2-normalized 64-D descriptors
+                            let k = LIGHTERGLUE_STATIC_K;
+                            let d = LIGHTERGLUE_DESC_DIM;
+                            let mut kpts = vec![0.0_f32; k * 2];
+                            let mut desc = vec![0.0_f32; k * d];
+                            for i in 0..k {
+                                let gx = (i % 16) as f32;
+                                let gy = (i / 16) as f32;
+                                kpts[i * 2] = -0.9 + (gx / 15.0) * 1.8;
+                                kpts[i * 2 + 1] = -0.9 + (gy / 15.0) * 1.8;
+                                let mut nsq = 0.0_f32;
+                                for c in 0..d {
+                                    let phase = ((i as f32) * 0.37 + (c as f32) * 0.71).sin()
+                                        + 0.5 * ((i as f32) * 1.13 - (c as f32) * 0.29).cos();
+                                    desc[i * d + c] = phase;
+                                    nsq += phase * phase;
                                 }
+                                let inv = 1.0_f32 / nsq.sqrt().max(1e-12);
+                                for c in 0..d {
+                                    desc[i * d + c] *= inv;
+                                }
+                            }
+                            let res = (|| -> ort::Result<(Vec<i64>, bool, usize, f64, f64)> {
+                                // 1 warm-up pass + 1 timed warm pass
+                                let tk0_w = TensorRef::from_array_view(([1usize, k, 2], kpts.as_slice()))?;
+                                let tk1_w = TensorRef::from_array_view(([1usize, k, 2], kpts.as_slice()))?;
+                                let td0_w = TensorRef::from_array_view(([1usize, k, d], desc.as_slice()))?;
+                                let td1_w = TensorRef::from_array_view(([1usize, k, d], desc.as_slice()))?;
+                                let _ = s.run(ort::inputs![
+                                    "kpts0" => tk0_w,
+                                    "kpts1" => tk1_w,
+                                    "desc0" => td0_w,
+                                    "desc1" => td1_w
+                                ])?;
+
                                 let tk0 = TensorRef::from_array_view(([1usize, k, 2], kpts.as_slice()))?;
                                 let tk1 = TensorRef::from_array_view(([1usize, k, 2], kpts.as_slice()))?;
                                 let td0 = TensorRef::from_array_view(([1usize, k, d], desc.as_slice()))?;
@@ -2321,21 +3333,29 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
                                 let (shape, scores) = outs["scores"].try_extract_tensor::<f32>()?;
                                 let dims: Vec<i64> = shape.iter().copied().collect();
                                 let all_finite = scores.iter().all(|v| v.is_finite());
-                                let (n_matches, mean_p) =
-                                    count_lighterglue_mutual_matches(scores, LIGHTERGLUE_MATCH_MIN_PROB);
+                                let (n_matches, mean_p) = count_lighterglue_mutual_matches(
+                                    scores,
+                                    LIGHTERGLUE_MATCH_MIN_PROB,
+                                );
                                 let dt = t0.elapsed().as_secs_f64() * 1000.0;
                                 Ok((dims, all_finite, n_matches, mean_p, dt))
-                            });
+                            })();
                             match res {
                                 Ok((dims, true, nm, mp, dt))
-                                    if dims == [1, LIGHTERGLUE_STATIC_K as i64, LIGHTERGLUE_STATIC_K as i64] =>
+                                    if dims
+                                        == [
+                                            1,
+                                            LIGHTERGLUE_STATIC_K as i64,
+                                            LIGHTERGLUE_STATIC_K as i64,
+                                        ] =>
                                 {
                                     models.push(ModelBenchResult {
                                         name: "xvs_lighterglue".to_string(),
                                         loaded: true,
                                         status: "READY_RUST_ORT_V5".to_string(),
                                         sha256: Some(sha),
-                                        latency_ms: Some((dt * 100.0).round() / 100.0),
+                                        load_ms: Some(load_ms),
+                                        latency_ms: Some(round2(dt)),
                                         output_summary: format!(
                                             "scores_shape=1x256x256 mutual_matches={nm} mean_prob={mp:.4}"
                                         ),
@@ -2348,6 +3368,7 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
                                         "INVALID_OUTPUT_SHAPE_OR_NAN: dims={dims:?} finite={finite}"
                                     ),
                                     sha256: Some(sha),
+                                    load_ms: Some(load_ms),
                                     latency_ms: None,
                                     output_summary: "failed".to_string(),
                                 }),
@@ -2356,23 +3377,27 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
                                     loaded: false,
                                     status: format!("ERROR: {e}"),
                                     sha256: Some(sha),
+                                    load_ms: Some(load_ms),
                                     latency_ms: None,
                                     output_summary: "failed".to_string(),
                                 }),
                             }
                         }
                     }
-                } else {
-                    models.push(ModelBenchResult {
-                        name: "xvs_lighterglue".to_string(),
-                        loaded: false,
-                        status: "MODEL_NOT_MOUNTED".to_string(),
-                        sha256: None,
-                        latency_ms: None,
-                        output_summary: "mount lighterglue_k256_fp16.onnx in OPENXVS_MODEL_DIR"
-                            .to_string(),
-                    });
                 }
+            }
+        } else {
+            models.push(ModelBenchResult {
+                name: "xvs_lighterglue".to_string(),
+                loaded: false,
+                status: "MODEL_NOT_MOUNTED".to_string(),
+                sha256: None,
+                load_ms: None,
+                latency_ms: None,
+                output_summary: "mount lighterglue_k256_fp16.onnx in OPENXVS_MODEL_DIR"
+                    .to_string(),
+            });
+        }
     }
 
     // 2.5 Pure-Rust v5.2.0 Optics, 4x4/12-Sector SensorHealth, FFC/Contrast-Collapse, FSYNC/SLERP, 3-of-5 TBC check
@@ -2501,6 +3526,7 @@ fn resolve_default_model_dir() -> (PathBuf, bool) {
     }
 }
 
+#[cfg(test)]
 fn run_self_check() -> EdgeSelfCheckReport {
     let (model_dir, explicit) = resolve_default_model_dir();
     run_self_check_with_model_dir(&model_dir, explicit)
@@ -2599,10 +3625,11 @@ fn load_pinned_session_for_soak(
     direct_names: &[&str],
     repo_rel_candidates: &[&str],
     pins: &[(&str, &str)],
+    max_intra_threads: usize,
 ) -> Option<(Session, String)> {
     let path = find_model_path(model_dir, explicit, direct_names, repo_rel_candidates)?;
     let (_, sha) = verify_pinned_onnx_artifact(&path, pins).ok()?;
-    let sess = build_optimized_ort_session(env, &path).ok()?;
+    let sess = build_optimized_ort_session(env, &path, max_intra_threads).ok()?;
     Some((sess, sha))
 }
 
@@ -2620,6 +3647,7 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
 
     let mut models_loaded: Vec<String> = Vec::new();
     let mut d2_sess: Option<Session> = None;
+    let mut d2_shapes = (D2_CROP_SIZE, D2_CROP_SIZE, D2_HID_C, D2_HID_HW, D2_HID_HW);
     let mut thermal_sess: Option<Session> = None;
     let mut land_sess: Option<(Session, usize, usize, StudentTCalibrator)> = None;
     let mut nav_sess: Option<Session> = None;
@@ -2637,7 +3665,9 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
                 "models/xvs_d2_web_fp16.onnx",
             ],
             D2_ONNX_PINS,
+            1,
         ) {
+            d2_shapes = resolve_d2_input_shapes(&s);
             d2_sess = Some(s);
             models_loaded.push("xvs_d2".to_string());
         }
@@ -2658,6 +3688,7 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
                 "models/xvs_thermal_v45_fp32.onnx",
             ],
             THERMAL_ONNX_PINS,
+            1,
         ) {
             thermal_sess = Some(s);
             models_loaded.push("xvs_thermal".to_string());
@@ -2679,6 +3710,7 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
                 "models/xvs_land_v45_fp16.onnx",
             ],
             LAND_ONNX_PINS,
+            1,
         ) {
             let (rh, rw) = resolve_land_input_hw(&s);
             let is_v52 = sha.eq_ignore_ascii_case(EXPECTED_LAND_V52_FP16_SHA256)
@@ -2709,6 +3741,7 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
                 "models/xvs_nav_v5_fp16.onnx",
             ],
             NAV_ONNX_PINS,
+            2,
         ) {
             nav_sess = Some(s);
             models_loaded.push("xvs_nav_v5".to_string());
@@ -2725,6 +3758,7 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
                 "models/xfeat_320x256_fp32.onnx",
             ],
             XFEAT_ONNX_PINS,
+            1,
         ) {
             xfeat_sess = Some(s);
             models_loaded.push("xvs_xfeat".to_string());
@@ -2741,6 +3775,7 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
                 "models/lighterglue_k256_fp32.onnx",
             ],
             LIGHTERGLUE_ONNX_PINS,
+            1,
         ) {
             lg_sess = Some(s);
             models_loaded.push("xvs_lighterglue".to_string());
@@ -2748,8 +3783,9 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
     }
 
     // Pre-allocate reusable input tensors outside soak loop (zero per-tick heap churn)
-    let d2_x = vec![0.15_f32; 6 * 256 * 256];
-    let mut d2_h = vec![0.0_f32; 24 * 64 * 64];
+    let (d2_in_h, d2_in_w, d2_hid_c, d2_hid_h, d2_hid_w) = d2_shapes;
+    let d2_x = vec![0.15_f32; 6 * d2_in_h * d2_in_w];
+    let mut d2_h = vec![0.0_f32; d2_hid_c * d2_hid_h * d2_hid_w];
     let th_eo = vec![0.35_f32; 3 * 256 * 320];
     let th_lw = vec![0.40_f32; 2 * 128 * 160];
     let th_qe = [0.85_f32];
@@ -2809,23 +3845,64 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
         v_stall_mps: 14.5,
     };
 
-    // Warm up 1 tick before RSS start snapshot so ORT arenas settle honestly
-    if let Some(s) = d2_sess.as_mut() {
-        if let (Ok(tx), Ok(th)) = (
-            TensorRef::from_array_view(([1usize, 6, 256, 256], d2_x.as_slice())),
-            TensorRef::from_array_view(([1usize, 24, 64, 64], d2_h.as_slice())),
-        ) {
-            let _ = s.run(ort::inputs!["x_t" => tx, "h_prev_warped" => th]);
+    // Warm up ALL 6 loaded sessions for 2 passes BEFORE RSS start snapshot:
+    // Pass 1 records ORT MemoryPattern; Pass 2 commits the contiguous BFC arena so steady-state
+    // soak ticks run with ~0 MiB RSS growth and zero cold allocation spikes on tick 1.
+    for _ in 0..2 {
+        if let Some(s) = d2_sess.as_mut() {
+            if let (Ok(tx), Ok(th)) = (
+                TensorRef::from_array_view(([1usize, 6, d2_in_h, d2_in_w], d2_x.as_slice())),
+                TensorRef::from_array_view((
+                    [1usize, d2_hid_c, d2_hid_h, d2_hid_w],
+                    d2_h.as_slice(),
+                )),
+            ) {
+                let _ = s.run(ort::inputs!["x_t" => tx, "h_prev_warped" => th]);
+            }
         }
-    }
-    if let Some(s) = thermal_sess.as_mut() {
-        if let (Ok(teo), Ok(tlw), Ok(tqe), Ok(tql)) = (
-            TensorRef::from_array_view(([1usize, 3, 256, 320], th_eo.as_slice())),
-            TensorRef::from_array_view(([1usize, 2, 128, 160], th_lw.as_slice())),
-            TensorRef::from_array_view(([1usize], th_qe.as_slice())),
-            TensorRef::from_array_view(([1usize], th_ql.as_slice())),
-        ) {
-            let _ = s.run(ort::inputs!["x_eo" => teo, "x_lwir" => tlw, "q_eo" => tqe, "q_lwir" => tql]);
+        if let Some(s) = thermal_sess.as_mut() {
+            if let (Ok(teo), Ok(tlw), Ok(tqe), Ok(tql)) = (
+                TensorRef::from_array_view(([1usize, 3, 256, 320], th_eo.as_slice())),
+                TensorRef::from_array_view(([1usize, 2, 128, 160], th_lw.as_slice())),
+                TensorRef::from_array_view(([1usize], th_qe.as_slice())),
+                TensorRef::from_array_view(([1usize], th_ql.as_slice())),
+            ) {
+                let _ = s.run(
+                    ort::inputs!["x_eo" => teo, "x_lwir" => tlw, "q_eo" => tqe, "q_lwir" => tql],
+                );
+            }
+        }
+        if let Some((ref mut s, rh, rw, _)) = land_sess {
+            if let Ok(troi) = TensorRef::from_array_view(([1usize, 3, rh, rw], land_roi.as_slice()))
+            {
+                let _ = s.run(ort::inputs!["roi_crop" => troi]);
+            }
+        }
+        if let Some(s) = nav_sess.as_mut() {
+            if let Ok(tin) =
+                TensorRef::from_array_view(([1usize, 3, 224, 224], nav_img.as_slice()))
+            {
+                let _ = s.run(ort::inputs!["img_s1" => tin]);
+            }
+        }
+        if let Some(s) = xfeat_sess.as_mut() {
+            if let Ok(tin) =
+                TensorRef::from_array_view(([1usize, 3, 256, 320], xfeat_img.as_slice()))
+            {
+                let _ = s.run(ort::inputs!["img_s2" => tin]);
+            }
+        }
+        if let Some(s) = lg_sess.as_mut() {
+            if let (Ok(tk0), Ok(tk1), Ok(td0), Ok(td1)) = (
+                TensorRef::from_array_view(([1usize, k, 2], lg_kpts.as_slice())),
+                TensorRef::from_array_view(([1usize, k, 2], lg_kpts.as_slice())),
+                TensorRef::from_array_view(([1usize, k, d], lg_desc.as_slice())),
+                TensorRef::from_array_view(([1usize, k, d], lg_desc.as_slice())),
+            ) {
+                let _ = s.run(
+                    ort::inputs!["kpts0" => tk0, "kpts1" => tk1, "desc0" => td0, "desc1" => td1],
+                );
+            }
         }
     }
 
@@ -2849,10 +3926,13 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
 
         // Fast path: D2 + Thermal + CoordinatedActiveRange + SimplexRta + DualBankEsEkfCusum
         if let Some(s) = d2_sess.as_mut() {
-            let tx = TensorRef::from_array_view(([1usize, 6, 256, 256], d2_x.as_slice()))
+            let tx = TensorRef::from_array_view(([1usize, 6, d2_in_h, d2_in_w], d2_x.as_slice()))
                 .map_err(|e| format!("soak d2 tx: {e}"))?;
-            let th = TensorRef::from_array_view(([1usize, 24, 64, 64], d2_h.as_slice()))
-                .map_err(|e| format!("soak d2 th: {e}"))?;
+            let th = TensorRef::from_array_view((
+                [1usize, d2_hid_c, d2_hid_h, d2_hid_w],
+                d2_h.as_slice(),
+            ))
+            .map_err(|e| format!("soak d2 th: {e}"))?;
             let outs = s
                 .run(ort::inputs!["x_t" => tx, "h_prev_warped" => th])
                 .map_err(|e| format!("soak d2 run: {e}"))?;
@@ -2929,7 +4009,7 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
         fast_ms_samples.push(fast_dt_ms);
 
         // Slow 1 Hz path: Land + Nav S1 + XFeat + LighterGlue + SequenceVprFilter
-        if (fast_ticks - 1) % slow_stride == 0 {
+        if (fast_ticks - 1).is_multiple_of(slow_stride) {
             let slow_t0 = Instant::now();
             slow_ticks += 1;
             if let Some((ref mut s, rh, rw, ref cal)) = land_sess {
@@ -2956,7 +4036,25 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
                 } else {
                     None
                 };
-                if parse_xvs_land_outputs(kpts, kl, cov, kl_sig_opt, cal).is_err() {
+                let rwy_pres_opt = if let Some(rv) = outs.get("runway_present_logit") {
+                    Some(
+                        rv.try_extract_tensor::<f32>()
+                            .map_err(|e| format!("soak land rwy_present: {e}"))?
+                            .1,
+                    )
+                } else {
+                    None
+                };
+                if parse_xvs_land_outputs_with_presence(
+                    kpts,
+                    kl,
+                    cov,
+                    kl_sig_opt,
+                    rwy_pres_opt,
+                    cal,
+                )
+                .is_err()
+                {
                     non_finite_count += 1;
                 }
             }
@@ -3557,7 +4655,9 @@ pub fn verify_and_replay_shadow_ndjson(log_path: &Path) -> EdgeReplayReport {
                 let e = extract_f64_field(src, "east_m")?;
                 Some([n, e])
             });
-            let vis_ne = extract_ne_pair(src, "vis_ne_m").or(gnss_ne);
+            // Fail-closed: NEVER copy `gnss_ne` into `vis_ne` when `vis_ne_m` is absent!
+            // Feeding GNSS into visual Bank-B would mask GNSS spoofing in replay.
+            let vis_ne = extract_ne_pair(src, "vis_ne_m");
             let gnss_down = extract_f64_field(src, "gnss_down_m");
             let ins_accel = extract_ne_pair(src, "ins_accel_ne_mps2").unwrap_or([0.0, 0.0]);
             let vis_gate = src
@@ -3719,6 +4819,12 @@ fn eval_parity_case(case: &serde_json::Value) -> Result<serde_json::Value, Strin
                 let pair = row
                     .as_array()
                     .ok_or_else(|| "gallery row must be [N, E]".to_string())?;
+                if pair.len() != 2 {
+                    return Err(format!(
+                        "gallery row must have exactly 2 elements [N, E], got {}",
+                        pair.len()
+                    ));
+                }
                 gallery.push([parse_parity_f64(&pair[0])?, parse_parity_f64(&pair[1])?]);
             }
             let cfg: SequenceVprConfig = match case.get("config") {
@@ -3801,6 +4907,12 @@ fn eval_parity_case(case: &serde_json::Value) -> Result<serde_json::Value, Strin
                     .get("init_ned_m")
                     .and_then(|v| v.as_array())
                     .map(|a| -> Result<[f64; 3], String> {
+                        if a.len() != 3 {
+                            return Err(format!(
+                                "init_ned_m must have exactly 3 elements [N, E, D], got {}",
+                                a.len()
+                            ));
+                        }
                         Ok([
                             parse_parity_f64(&a[0])?,
                             parse_parity_f64(&a[1])?,
@@ -3813,6 +4925,12 @@ fn eval_parity_case(case: &serde_json::Value) -> Result<serde_json::Value, Strin
                     .get("init_vel_ne_mps")
                     .and_then(|v| v.as_array())
                     .map(|a| -> Result<[f64; 2], String> {
+                        if a.len() != 2 {
+                            return Err(format!(
+                                "init_vel_ne_mps must have exactly 2 elements [vN, vE], got {}",
+                                a.len()
+                            ));
+                        }
                         Ok([parse_parity_f64(&a[0])?, parse_parity_f64(&a[1])?])
                     })
                     .transpose()?
@@ -3835,14 +4953,30 @@ fn eval_parity_case(case: &serde_json::Value) -> Result<serde_json::Value, Strin
                 };
                 let gnss_ne_m = match step.get("gnss_ne_m") {
                     Some(v) if !v.is_null() => {
-                        let a = v.as_array().ok_or_else(|| "gnss_ne_m must be [N, E]".to_string())?;
+                        let a = v
+                            .as_array()
+                            .ok_or_else(|| "gnss_ne_m must be [N, E]".to_string())?;
+                        if a.len() != 2 {
+                            return Err(format!(
+                                "gnss_ne_m must have exactly 2 elements [N, E], got {}",
+                                a.len()
+                            ));
+                        }
                         Some([parse_parity_f64(&a[0])?, parse_parity_f64(&a[1])?])
                     }
                     _ => None,
                 };
                 let vis_ne_m = match step.get("vis_ne_m") {
                     Some(v) if !v.is_null() => {
-                        let a = v.as_array().ok_or_else(|| "vis_ne_m must be [N, E]".to_string())?;
+                        let a = v
+                            .as_array()
+                            .ok_or_else(|| "vis_ne_m must be [N, E]".to_string())?;
+                        if a.len() != 2 {
+                            return Err(format!(
+                                "vis_ne_m must have exactly 2 elements [N, E], got {}",
+                                a.len()
+                            ));
+                        }
                         Some([parse_parity_f64(&a[0])?, parse_parity_f64(&a[1])?])
                     }
                     _ => None,
@@ -3933,14 +5067,57 @@ fn run_parity_eval_mode(path_arg: &str) -> Result<serde_json::Value, String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() || (args.len() == 1 && args[0] == "--self-check") {
+    let is_self_check = args.is_empty()
+        || args[0] == "--self-check"
+        || args[0] == "--require-models"
+        || args[0] == "--model-dir";
+    if is_self_check {
+        let mut require_models = false;
+        let mut model_dir_opt: Option<PathBuf> = None;
+        let mut i = if args.first().map(|s| s.as_str()) == Some("--self-check") {
+            1usize
+        } else {
+            0usize
+        };
+        while i < args.len() {
+            match args[i].as_str() {
+                "--require-models" => {
+                    require_models = true;
+                    i += 1;
+                }
+                "--model-dir" if i + 1 < args.len() => {
+                    model_dir_opt = Some(PathBuf::from(&args[i + 1]));
+                    i += 2;
+                }
+                other => {
+                    eprintln!("Unknown --self-check argument: {other}");
+                    std::process::exit(2);
+                }
+            }
+        }
         eprintln!("[OPENXVS-EDGE v{EDGE_INFER_VERSION}] {NON_FLIGHT_WATERMARK}");
         eprintln!(
             "[OPENXVS-EDGE] NON_FLIGHT_SIM_ONLY={NON_FLIGHT_SIM_ONLY} ACTUATOR_AUTHORITY={ACTUATOR_AUTHORITY}"
         );
-        let report = run_self_check();
+        let (model_dir, explicit_model_dir) = match model_dir_opt {
+            Some(p) => (p, true),
+            None => resolve_default_model_dir(),
+        };
+        let report = run_self_check_with_model_dir(&model_dir, explicit_model_dir);
         let json = serde_json::to_string_pretty(&report).expect("serialize report");
         println!("{json}");
+
+        let any_hard_error = report.models.iter().any(|m| {
+            m.status == "SHA256_MISMATCH_REJECTED"
+                || m.status.starts_with("ERROR:")
+                || m.status.starts_with("INVALID_OUTPUT")
+        });
+        let all_models_loaded = report.ort_dylib_loaded
+            && report.models.len() >= 6
+            && report.models.iter().all(|m| m.loaded);
+        if any_hard_error || ((require_models || explicit_model_dir) && !all_models_loaded) {
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -3953,6 +5130,7 @@ fn main() {
             let mut seconds = 30.0_f64;
             let mut hz = 5.0_f64;
             let mut model_dir: Option<PathBuf> = None;
+            let mut require_models = false;
             let mut i = 1usize;
             while i < args.len() {
                 match args[i].as_str() {
@@ -3968,6 +5146,10 @@ fn main() {
                         model_dir = Some(PathBuf::from(&args[i + 1]));
                         i += 2;
                     }
+                    "--require-models" => {
+                        require_models = true;
+                        i += 1;
+                    }
                     other => {
                         eprintln!("Unknown --soak argument: {other}");
                         std::process::exit(2);
@@ -3976,7 +5158,7 @@ fn main() {
             }
             match run_soak_mode(seconds, hz, model_dir) {
                 Ok(rep) => {
-                    let ok = rep.pass;
+                    let ok = rep.pass && (!require_models || rep.models_loaded.len() >= 6);
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&rep).expect("serialize soak report")
@@ -4027,7 +5209,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "Unknown CLI flag '{other}'. Supported modes: (default/--self-check), --soak --seconds <N> --hz <F>, --replay <shadow.ndjson>, --parity-eval <trace.json | ->"
+                "Unknown CLI flag '{other}'. Supported modes: (default/--self-check [--require-models] [--model-dir <DIR>]), --soak --seconds <N> --hz <F> [--require-models], --replay <shadow.ndjson>, --parity-eval <trace.json | ->"
             );
             std::process::exit(2);
         }
@@ -4423,5 +5605,246 @@ mod tests {
         assert!(!rep_bad.valid, "1-byte payload tamper must fail closed!");
         assert_eq!(rep_bad.first_failed_line, Some(2));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_edge_wave12_sensor_health_parity_and_no_json_null() {
+        // 1. Fresh SensorHealthMonitor must NOT leak NaN / JSON `null` in lwir_last_mad
+        let mut shm = SensorHealthMonitor::new();
+        assert_eq!(shm.lwir_last_mad, -1.0);
+        assert!(shm.lwir_last_mad.is_finite());
+
+        // 2. Cold-sky 2x2 min-filter rescues 3x3 real hot intruder while rejecting 1-px hot spike
+        let w = 160usize;
+        let h = 128usize;
+        let mut cold_sky_target = vec![30u8; w * h];
+        for y in 50..53 {
+            for x in 70..73 {
+                cold_sky_target[y * w + x] = 220;
+            }
+        }
+        let st_target = shm.observe_lwir_plane_with_ffc(&cold_sky_target, w, h, 0);
+        let lwir_json = serde_json::to_string(&st_target).expect("serialize LwirHealthStatus");
+        assert!(
+            !lwir_json.contains("null"),
+            "LwirHealthStatus must never serialize NaN as JSON null: {lwir_json}"
+        );
+        assert_eq!(st_target.last_mad, -1.0);
+        assert!(
+            !st_target.contrast_collapsed && !st_target.mask_lwir_frame,
+            "3x3 hot target over cold sky must NOT falsely collapse contrast: {st_target:?}"
+        );
+
+        let mut shm_spike = SensorHealthMonitor::new();
+        let mut cold_sky_spike = vec![30u8; w * h];
+        cold_sky_spike[51 * w + 71] = 240; // single isolated dead/hot pixel
+        let st_spike = shm_spike.observe_lwir_plane_with_ffc(&cold_sky_spike, w, h, 0);
+        assert!(
+            st_spike.contrast_collapsed && st_spike.mask_lwir_frame,
+            "1-px hot spike on flat cold sky must collapse contrast: {st_spike:?}"
+        );
+
+        // 3. Dead-line FPN detection (>= 10% spaced stuck readout columns -> fail)
+        let mut fpn_frame = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                fpn_frame[y * w + x] = (((x * 7 + y * 13) % 140) + 40) as u8;
+            }
+        }
+        for col in (4..(w - 4)).step_by(6) {
+            for y in 0..h {
+                fpn_frame[y * w + col] = 255;
+            }
+        }
+        let eo_fpn = shm.observe_eo_luma_u8(&fpn_frame, w, h);
+        assert!(
+            eo_fpn.dead_pixel_fpn_fault && eo_fpn.dead_line_fraction >= FPN_DEAD_LINE_FAIL_FRAC,
+            "Spaced dead columns must trip FPN fault: {eo_fpn:?}"
+        );
+
+        // 4. White-noise autocorrelation fault on synthetic LCG white noise
+        let mut lcg: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut noise_frame = vec![0u8; w * h];
+        for px in &mut noise_frame {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *px = ((lcg >> 33) & 0xFF) as u8;
+        }
+        let eo_noise = shm.observe_eo_luma_u8(&noise_frame, w, h);
+        assert!(
+            eo_noise.sensor_noise_fault,
+            "Uncorrelated full-scale white noise must trip sensor_noise_fault: {eo_noise:?}"
+        );
+
+        // 5. BearingTrackBeforeConfirm::observe_with_health fails closed on degraded EO
+        let mut tbc = BearingTrackBeforeConfirm::new_3_of_5();
+        assert!(!tbc.observe_with_health(Some((0.1, 0.0)), 0.95, false).confirmed);
+        assert!(!tbc.observe_with_health(Some((0.101, 0.001)), 0.95, false).confirmed);
+        let degraded = tbc.observe_with_health(Some((0.102, 0.002)), 0.20, true);
+        assert_eq!(degraded.hits_in_window, 2);
+        assert!(!degraded.confirmed);
+        assert!(tbc.observe_with_health(Some((0.102, 0.002)), 0.95, false).confirmed);
+
+        // 6. system32 guard only blocks actual Windows system32/syswow64 directories
+        assert!(!is_forbidden_system_ort_path(Path::new(
+            r"C:\my_system32_backup\onnxruntime.dll"
+        )));
+    }
+
+    #[test]
+    fn test_edge_xvs_land_v53_7th_output_presence_gate() {
+        let cal = StudentTCalibrator::new(V52_LAND_STUDENT_T_NU, V52_LAND_STUDENT_T_SCALE).unwrap();
+        let kpts = vec![100.0_f32; LAND_NUM_KEYPOINTS * 2];
+        let keylines = vec![1.0_f32; LAND_NUM_KEYLINES * 3];
+        let mut cov = vec![0.0_f32; LAND_NUM_KEYPOINTS * 4];
+        for i in 0..LAND_NUM_KEYPOINTS {
+            cov[4 * i] = 1.0;
+            cov[4 * i + 3] = 1.0;
+        }
+        let sigmas = [1.0_f32; LAND_NUM_KEYLINES];
+
+        // Runway strongly present: sigmoid(2.0) ~= 0.8808 >= 0.65 -> NOMINAL
+        let p_ok = parse_xvs_land_outputs_with_presence(
+            &kpts,
+            &keylines,
+            &cov,
+            Some(&sigmas),
+            Some(&[2.0_f32]),
+            &cal,
+        )
+        .expect("extended present parse");
+        assert_eq!(p_ok.contract, LandOutputContract::V53SevenOutputRunwayPresence);
+        assert!(p_ok.runway_present_admitted);
+        assert_eq!(p_ok.runway_gate_mode, "NOMINAL");
+        assert!(p_ok.runway_present_prob.unwrap() > 0.85);
+
+        // Runway absent: sigmoid(-1.0) ~= 0.2689 < 0.65 -> fail-closed P0_INVALID_INHIBIT
+        let p_no = parse_xvs_land_outputs_with_presence(
+            &kpts,
+            &keylines,
+            &cov,
+            Some(&sigmas),
+            Some(&[-1.0_f32]),
+            &cal,
+        )
+        .expect("extended absent parse");
+        assert_eq!(p_no.contract, LandOutputContract::V53SevenOutputRunwayPresence);
+        assert!(!p_no.runway_present_admitted);
+        assert_eq!(p_no.runway_gate_mode, "P0_INVALID_INHIBIT");
+        assert!(p_no.runway_present_prob.unwrap() < LAND_RUNWAY_PRESENT_MIN_PROB);
+
+        // Non-finite logit -> fail-closed P0_INVALID_INHIBIT
+        let p_nan = parse_xvs_land_outputs_with_presence(
+            &kpts,
+            &keylines,
+            &cov,
+            Some(&sigmas),
+            Some(&[f32::NAN]),
+            &cal,
+        )
+        .expect("extended nan logit fails closed");
+        assert!(!p_nan.runway_present_admitted);
+        assert_eq!(p_nan.runway_gate_mode, "P0_INVALID_INHIBIT");
+
+        // Empty 7th tensor -> Err
+        assert!(parse_xvs_land_outputs_with_presence(
+            &kpts,
+            &keylines,
+            &cov,
+            Some(&sigmas),
+            Some(&[]),
+            &cal,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_edge_replay_missing_vis_ne_does_not_fallback_to_gnss() {
+        let tmp = std::env::temp_dir().join("openxvs_edge_replay_no_vis_fallback_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        let path = tmp.join("no_vis_spoof.ndjson");
+        let mut lines: Vec<String> = Vec::new();
+        let mut prev_h = SHADOW_GENESIS_HASH.to_string();
+        for seq in 0u64..12 {
+            // GNSS jumps +250 m North while INS accel stays 0 and `vis_ne_m` is OMITTED.
+            // With fail-closed `vis_ne = None`, Bank-B dead-reckons near 0 while Bank-A tracks
+            // spoofed GNSS -> CUSUM diverges and alarms! (Old `.or(gnss_ne)` hid the spoof.)
+            let gnss_n = if seq >= 2 { 250.0 } else { 0.0 };
+            let mut body = serde_json::json!({
+                "schema": SHADOW_MODE_LOG_SCHEMA,
+                "seq": seq,
+                "timestamp_mono_us": (seq + 1) * 100_000,
+                "trial_phase": "phase3_university_shadow_tx_pin_removed",
+                "hardware_tx_pin_removed": true,
+                "event_type": "rx_mavlink2",
+                "direction": "rx",
+                "tx_inhibited": true,
+                "actuator_authority": false,
+                "outbound_mavlink_frames_emitted": 0,
+                "non_flight_sim_only": true,
+                "watermark": NON_FLIGHT_WATERMARK,
+                "payload": {
+                    "down_m": -120.0,
+                    "gnss_ne_m": [gnss_n, 0.0],
+                    "gnss_down_m": -120.0,
+                },
+                "prev_hash": prev_h,
+            });
+            let canon_body = canonical_json_python_compat(&body).expect("canon body");
+            let dig = Sha256::digest(canon_body.as_bytes());
+            let mut hex = String::with_capacity(64);
+            for b in dig {
+                hex.push_str(&format!("{b:02x}"));
+            }
+            body.as_object_mut()
+                .unwrap()
+                .insert("entry_hash".to_string(), serde_json::Value::String(hex.clone()));
+            lines.push(canonical_json_python_compat(&body).expect("canon line"));
+            prev_h = hex;
+        }
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write log");
+        let rep = verify_and_replay_shadow_ndjson(&path);
+        assert!(rep.valid, "chain must be valid: {:?}", rep.errors);
+        assert!(
+            rep.cusum_max_stat > 1.0 && rep.cusum_alarms > 0,
+            "Missing vis_ne_m must NOT fall back to gnss_ne_m; expected Bank-A/B divergence & alarm: {rep:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_edge_parity_eval_malformed_short_arrays_return_err() {
+        let bad_gallery = serde_json::json!({
+            "kind": "sequence_vpr",
+            "gallery_ne_m": [[10.0]],
+            "steps": [],
+        });
+        assert!(eval_parity_case(&bad_gallery).is_err());
+
+        let bad_init_ned = serde_json::json!({
+            "kind": "dual_bank_cusum",
+            "reset": { "init_ned_m": [1.0, 2.0] },
+            "steps": [],
+        });
+        assert!(eval_parity_case(&bad_init_ned).is_err());
+
+        let bad_init_vel = serde_json::json!({
+            "kind": "dual_bank_cusum",
+            "reset": { "init_vel_ne_mps": [1.0] },
+            "steps": [],
+        });
+        assert!(eval_parity_case(&bad_init_vel).is_err());
+
+        let bad_gnss = serde_json::json!({
+            "kind": "dual_bank_cusum",
+            "steps": [{ "gnss_ne_m": [10.0] }],
+        });
+        assert!(eval_parity_case(&bad_gnss).is_err());
+
+        let bad_vis = serde_json::json!({
+            "kind": "dual_bank_cusum",
+            "steps": [{ "vis_ne_m": [10.0] }],
+        });
+        assert!(eval_parity_case(&bad_vis).is_err());
     }
 }

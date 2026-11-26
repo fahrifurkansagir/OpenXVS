@@ -67,7 +67,10 @@ def test_ffi_header_and_wasm_brotli_budget() -> None:
 
 
 def test_ffi_emergent_missions_m1_and_m2_and_m4() -> None:
-    ffi = XvsCoreFFI()
+    try:
+        ffi = XvsCoreFFI()
+    except FileNotFoundError as exc:
+        pytest.skip(f"xvs-ffi cdylib not built; run cargo build -p xvs-ffi --release ({exc})")
     sim = ffi.sim_create(20261120)
     try:
         # Mission M1: Cam-R +0.020944 rad (+1.2 deg) drift -> ISOLATED_5CAM (mode == 3)
@@ -123,7 +126,10 @@ def test_ffi_emergent_missions_m1_and_m2_and_m4() -> None:
 
 
 def test_ffi_gdl90_and_mavlink_bit_exact_vs_python() -> None:
-    ffi = XvsCoreFFI()
+    try:
+        ffi = XvsCoreFFI()
+    except FileNotFoundError as exc:
+        pytest.skip(f"xvs-ffi cdylib not built; run cargo build -p xvs-ffi --release ({exc})")
 
     # 1. GDL-90 Heartbeat bit-exact vs src/xvs/avionics/gdl90.py
     py_hb = gdl90.encode_heartbeat(

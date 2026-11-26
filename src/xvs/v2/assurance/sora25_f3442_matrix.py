@@ -104,7 +104,7 @@ EASA_SORA_25_OSOS: tuple[dict[str, Any], ...] = (
         "openxvs_coverage": "UNDEVELOPED_GAP",
         "sail_target": "SAIL II-III",
         "gsn_nodes": ["G5_GAP"],
-        "openxvs_artifacts": ["SAFETY_DISCLAIMER.md"],
+        "openxvs_artifacts": ["docs/legal/SAFETY_DISCLAIMER.md"],
         "gap_status": "G5_GAP: Organizational maintenance/CAMO procedures are strictly operator/OEM owned.",
     },
     {
@@ -155,7 +155,7 @@ EASA_SORA_25_OSOS: tuple[dict[str, Any], ...] = (
         "openxvs_coverage": "UNDEVELOPED_GAP",
         "sail_target": "SAIL II-III",
         "gsn_nodes": ["C1", "G5_GAP"],
-        "openxvs_artifacts": ["SAFETY_DISCLAIMER.md", "COMPLIANCE_AND_DUAL_USE.md"],
+        "openxvs_artifacts": ["docs/legal/SAFETY_DISCLAIMER.md", "docs/legal/COMPLIANCE_AND_DUAL_USE.md"],
         "gap_status": "G5_GAP: Flight operations manual and airspace procedures are exclusively operator owned.",
     },
     {
@@ -165,7 +165,7 @@ EASA_SORA_25_OSOS: tuple[dict[str, Any], ...] = (
         "openxvs_coverage": "UNDEVELOPED_GAP",
         "sail_target": "SAIL II-III",
         "gsn_nodes": ["G5_GAP"],
-        "openxvs_artifacts": ["SAFETY_DISCLAIMER.md"],
+        "openxvs_artifacts": ["docs/legal/SAFETY_DISCLAIMER.md"],
         "gap_status": "G5_GAP: Crew licensing, currency, and abnormal-situation training are strictly operator owned.",
     },
     {
@@ -208,7 +208,7 @@ EASA_SORA_25_OSOS: tuple[dict[str, Any], ...] = (
         "openxvs_coverage": "UNDEVELOPED_GAP",
         "sail_target": "SAIL II-III",
         "gsn_nodes": ["G5_GAP"],
-        "openxvs_artifacts": ["SAFETY_DISCLAIMER.md"],
+        "openxvs_artifacts": ["docs/legal/SAFETY_DISCLAIMER.md"],
         "gap_status": "G5_GAP: Crew fitness and fatigue management are strictly operator owned.",
     },
     {
@@ -255,7 +255,7 @@ EASA_SORA_25_OSOS: tuple[dict[str, Any], ...] = (
         "openxvs_coverage": "UNDEVELOPED_GAP",
         "sail_target": "SAIL II-III",
         "gsn_nodes": ["G5_GAP"],
-        "openxvs_artifacts": ["SAFETY_DISCLAIMER.md"],
+        "openxvs_artifacts": ["docs/legal/SAFETY_DISCLAIMER.md"],
         "gap_status": "G5_GAP: Operational validation against NAA/CAA standards is strictly operator owned.",
     },
     {

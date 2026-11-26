@@ -1374,6 +1374,9 @@ def _verify_closed_loop_rx_tx_bridge() -> dict[str, Any]:
                     ekf3_42007_emitted = True
 
         # Inject forbidden #84 frame and corrupted CRC frame -> must be rejected fail-closed with zero TX
+        deadline_tx = time.monotonic() + 0.5
+        while int(mgr.status()["tx_packets"]) < 4 and time.monotonic() < deadline_tx:
+            time.sleep(0.005)
         tx_count_before_bad = int(mgr.status()["tx_packets"])
         fake_84 = (
             bytes([MAVLINK_V2_STX])
@@ -1384,8 +1387,11 @@ def _verify_closed_loop_rx_tx_bridge() -> dict[str, Any]:
         bad_crc[-1] ^= 0xFF
         injector.sendto(fake_84, ("127.0.0.1", rx_port))
         injector.sendto(bytes(bad_crc), ("127.0.0.1", rx_port))
-        time.sleep(0.08)
+        deadline_rej = time.monotonic() + 0.5
         st_mav = mgr.status()
+        while int(st_mav["rejected_packets"]) < 2 and time.monotonic() < deadline_rej:
+            time.sleep(0.01)
+            st_mav = mgr.status()
         mav_bad_rejected = (
             int(st_mav["rejected_packets"]) >= 2
             and int(st_mav["tx_packets"]) == tx_count_before_bad
@@ -1416,10 +1422,16 @@ def _verify_closed_loop_rx_tx_bridge() -> dict[str, Any]:
             and DEFAULT_V_MIN_MPS - 1e-6 <= fg_spd <= DEFAULT_V_MAX_MPS + 1e-6
             and fg_shield == 1
         )
+        deadline_fg_tx = time.monotonic() + 0.5
+        while int(mgr.status()["tx_packets"]) < 1 and time.monotonic() < deadline_fg_tx:
+            time.sleep(0.005)
         fg_tx_before_nan = int(mgr.status()["tx_packets"])
         injector.sendto(fg_csv_nan, ("127.0.0.1", fg_rx_port))
-        time.sleep(0.08)
+        deadline_fg_rej = time.monotonic() + 0.5
         st_fg = mgr.status()
+        while int(st_fg["rejected_packets"]) < 1 and time.monotonic() < deadline_fg_rej:
+            time.sleep(0.01)
+            st_fg = mgr.status()
         fg_nan_rejected = (
             int(st_fg["rejected_packets"]) >= 1
             and int(st_fg["tx_packets"]) == fg_tx_before_nan
@@ -1976,12 +1988,28 @@ class StudioHilBridgeManager:
             if m == "idle":
                 return self._status_locked()
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((clean_bind, rp))
-            sock.settimeout(0.25)
+            sock: socket.socket | None = None
+            tx_sock: socket.socket | None = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((clean_bind, rp))
+                sock.settimeout(0.25)
 
-            tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            except Exception:
+                for s_err in (tx_sock, sock):
+                    if s_err is not None:
+                        try:
+                            s_err.close()
+                        except Exception:
+                            pass
+                self._mode = "idle"
+                self._tx_enabled = False
+                self._sock = None
+                self._tx_sock = None
+                self._thread = None
+                raise
             self._sock = sock
             self._tx_sock = tx_sock
             self._thread = threading.Thread(
@@ -2076,10 +2104,26 @@ class StudioHilBridgeManager:
             self._last_datum_decision = None
             self._datum_inhibited_switches = 0
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((clean_bind, rp))
-            sock.settimeout(0.25)
+            sock: socket.socket | None = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((clean_bind, rp))
+                sock.settimeout(0.25)
+            except Exception:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                self._mode = "idle"
+                self._shadow_mode = False
+                self._shadow_logger = None
+                self._tx_enabled = False
+                self._sock = None
+                self._tx_sock = None
+                self._thread = None
+                raise
 
             self._sock = sock
             self._tx_sock = None
@@ -2097,13 +2141,13 @@ class StudioHilBridgeManager:
         msgid = int(hdr["msgid"])
         if msgid == MSGID_SET_POSITION_TARGET_LOCAL_NED:
             raise ValueError("MAVLink #84 (SET_POSITION_TARGET_LOCAL_NED) is hard-banned on TX")
-        if self._shadow_mode:
-            raise ShadowModeTxInhibitedError(
-                f"Outbound MAVLink TX (msgid={msgid}) blocked in listen-only shadow mode"
-            )
-        if self._is_non_flight_locked():
-            raise NonFlightSimOnlyError(EU_PLD_ART4_7_LOCKOUT_MSG)
         with self._lock:
+            if self._shadow_mode:
+                raise ShadowModeTxInhibitedError(
+                    f"Outbound MAVLink TX (msgid={msgid}) blocked in listen-only shadow mode"
+                )
+            if self._is_non_flight_locked():
+                raise NonFlightSimOnlyError(EU_PLD_ART4_7_LOCKOUT_MSG)
             sock = self._sock if self._send_from_rx_sock else self._tx_sock
             if sock is None or self._mode == "idle":
                 raise RuntimeError("StudioHilBridgeManager is not connected")
@@ -2113,11 +2157,12 @@ class StudioHilBridgeManager:
                     f"(>{self._stale_telemetry_timeout_s:.2f} s without valid RX)"
                 )
             dest = (self._tx_host, self._tx_port)
-            sent = sock.sendto(frame_bytes, dest)
+        sent = sock.sendto(frame_bytes, dest)
+        with self._lock:
             self._tx_packets += 1
             prev = self._tx_msgids_emitted[msgid] if msgid in self._tx_msgids_emitted else 0
             self._tx_msgids_emitted[msgid] = prev + 1
-            return int(sent)
+        return int(sent)
 
     def _next_seq_locked(self) -> int:
         seq = self._tx_seq & 0xFF
@@ -2456,9 +2501,12 @@ class StudioHilBridgeManager:
                         self._rejected_packets += 1
                     continue
 
+                fg_shadow_rec: tuple[ShadowModeTelemetryLogger, int, dict[str, Any]] | None = None
+                fg_tx_req: tuple[socket.socket, bytes, tuple[str, int], dict[str, Any]] | None = None
                 with self._lock:
                     self._rx_packets += 1
                     self._last_rx_mono_s = now_mono
+                    fg_dict = asdict(fg)
                     self._state_ned.update(
                         {
                             "lat_deg": fg.lat_deg,
@@ -2476,45 +2524,61 @@ class StudioHilBridgeManager:
                             "vd_mps": fg.vd_mps,
                         }
                     )
-                    self._last_telemetry_ned = asdict(fg)
+                    self._last_telemetry_ned = fg_dict
                     if self._shadow_mode and self._shadow_logger is not None:
                         ts_us = self._next_shadow_mono_us_locked(now_mono)
-                        self._shadow_logger.record_event(
+                        fg_shadow_rec = (self._shadow_logger, ts_us, fg_dict)
+                    else:
+                        tx_now_mono = time.monotonic()
+                        if self._can_emit_autonomous_tx_locked(tx_sock, tx_now_mono):
+                            autonomy = self._compute_autonomy_step_locked(tx_now_mono)
+                            tx_bytes = encode_flightgear_control_csv(
+                                bank_cmd_deg=math.degrees(float(autonomy["cmd_bank_rad"])),
+                                pitch_cmd_deg=math.degrees(float(autonomy["cmd_pitch_rad"])),
+                                airspeed_cmd_mps=float(autonomy["cmd_airspeed_mps"]),
+                                shield_active=bool(autonomy["shield_active"]),
+                            )
+                            tx_dest = (self._tx_host, self._tx_port)
+                            active_tx_sock = sock if self._send_from_rx_sock else tx_sock
+                            if active_tx_sock is not None:
+                                fg_cmd_meta = {
+                                    "protocol": "flightgear_csv",
+                                    "bank_cmd_deg": round(math.degrees(float(autonomy["cmd_bank_rad"])), 3),
+                                    "pitch_cmd_deg": round(math.degrees(float(autonomy["cmd_pitch_rad"])), 3),
+                                    "airspeed_cmd_mps": round(float(autonomy["cmd_airspeed_mps"]), 3),
+                                    "shield_active": bool(autonomy["shield_active"]),
+                                    "active_range_mode": str(autonomy["active_range_mode"]),
+                                    "wire_bytes": len(tx_bytes),
+                                }
+                                fg_tx_req = (active_tx_sock, tx_bytes, tx_dest, fg_cmd_meta)
+                                self._tx_packets += 1
+                                self._last_tx_command = fg_cmd_meta
+
+                if fg_shadow_rec is not None:
+                    logger_ref, ts_us, fg_payload = fg_shadow_rec
+                    try:
+                        logger_ref.record_event(
                             timestamp_mono_us=ts_us,
                             event_type="rx_flightgear_csv",
-                            payload={"telemetry_ned": asdict(fg)},
+                            payload={"telemetry_ned": fg_payload},
                             direction="rx",
                             outbound_mavlink_frames=0,
                         )
-                        continue
-                    tx_now_mono = time.monotonic()
-                    if not self._can_emit_autonomous_tx_locked(tx_sock, tx_now_mono):
-                        continue
-                    autonomy = self._compute_autonomy_step_locked(tx_now_mono)
-                    tx_bytes = encode_flightgear_control_csv(
-                        bank_cmd_deg=math.degrees(float(autonomy["cmd_bank_rad"])),
-                        pitch_cmd_deg=math.degrees(float(autonomy["cmd_pitch_rad"])),
-                        airspeed_cmd_mps=float(autonomy["cmd_airspeed_mps"]),
-                        shield_active=bool(autonomy["shield_active"]),
-                    )
-                    tx_dest = (self._tx_host, self._tx_port)
-                    active_tx_sock = sock if self._send_from_rx_sock else tx_sock
-                    assert active_tx_sock is not None
+                    except Exception:
+                        with self._lock:
+                            self._rejected_packets += 1
+                    continue
+
+                if fg_tx_req is not None:
+                    active_tx_sock, tx_bytes, tx_dest, fg_cmd_meta = fg_tx_req
                     try:
                         active_tx_sock.sendto(tx_bytes, tx_dest)
                     except OSError:
+                        with self._lock:
+                            self._tx_packets = max(0, self._tx_packets - 1)
                         continue
-                    self._tx_packets += 1
-                    self._last_tx_latency_ms = round((time.perf_counter() - t_start) * 1000.0, 3)
-                    self._last_tx_command = {
-                        "protocol": "flightgear_csv",
-                        "bank_cmd_deg": round(math.degrees(float(autonomy["cmd_bank_rad"])), 3),
-                        "pitch_cmd_deg": round(math.degrees(float(autonomy["cmd_pitch_rad"])), 3),
-                        "airspeed_cmd_mps": round(float(autonomy["cmd_airspeed_mps"]), 3),
-                        "shield_active": bool(autonomy["shield_active"]),
-                        "active_range_mode": str(autonomy["active_range_mode"]),
-                        "wire_bytes": len(tx_bytes),
-                    }
+                    with self._lock:
+                        self._last_tx_latency_ms = round((time.perf_counter() - t_start) * 1000.0, 3)
 
             elif mode == "mavlink2_udp":
                 raw_frames, _ = extract_mavlink_v2_frames(data)
@@ -2524,7 +2588,8 @@ class StudioHilBridgeManager:
                         self._rejected_packets += 1
                     continue
 
-                secret_key = self._secret_key
+                with self._lock:
+                    secret_key = self._secret_key
                 for raw_frame in raw_frames:
                     try:
                         hdr = peek_mavlink_v2_header(raw_frame)
@@ -2577,7 +2642,16 @@ class StudioHilBridgeManager:
 
                     tx_batch: list[tuple[int, bytes, dict[str, Any]]] = []
                     tx_dest: tuple[str, int] = ("127.0.0.1", DEFAULT_MAV_TX_PORT)
-                    active_tx_sock = tx_sock
+                    active_tx_sock: socket.socket | None = None
+                    mav_shadow_rec: tuple[
+                        ShadowModeTelemetryLogger,
+                        int,
+                        int,
+                        int,
+                        bytes,
+                        dict[str, Any],
+                        DatumSwitchDecision | None,
+                    ] | None = None
 
                     with self._lock:
                         self._rx_packets += 1
@@ -2707,40 +2781,78 @@ class StudioHilBridgeManager:
                             else:
                                 frame_summary = {"msgid": int(dec.msgid)}
                             ts_us = self._next_shadow_mono_us_locked(now_mono)
-                            self._shadow_logger.record_rx_mavlink_frame(
-                                timestamp_mono_us=ts_us,
-                                msgid=int(dec.msgid),
-                                seq=int(dec.seq),
-                                raw_frame=raw_frame,
-                                summary_ned=frame_summary,
-                                datum_decision=datum_dec,
+                            mav_shadow_rec = (
+                                self._shadow_logger,
+                                ts_us,
+                                int(dec.msgid),
+                                int(dec.seq),
+                                raw_frame,
+                                frame_summary,
+                                datum_dec,
                             )
-                            continue
+                        else:
+                            tx_now_mono = time.monotonic()
+                            if should_emit_tx and self._can_emit_autonomous_tx_locked(tx_sock, tx_now_mono):
+                                autonomy = self._compute_autonomy_step_locked(tx_now_mono)
+                                raw_tx_batch = self._build_mavlink_tx_packets_locked(autonomy, tx_now_mono)
+                                # Absolute fail-closed barrier: #84 can never be transmitted
+                                tx_batch = [
+                                    item
+                                    for item in raw_tx_batch
+                                    if item[0] != MSGID_SET_POSITION_TARGET_LOCAL_NED
+                                ]
+                                tx_dest = (self._tx_host, self._tx_port)
+                                active_tx_sock = sock if self._send_from_rx_sock else tx_sock
+                                if tx_batch and active_tx_sock is not None:
+                                    for tx_msgid, _tx_wire, tx_summary in tx_batch:
+                                        self._tx_packets += 1
+                                        prev_c = (
+                                            self._tx_msgids_emitted[tx_msgid]
+                                            if tx_msgid in self._tx_msgids_emitted
+                                            else 0
+                                        )
+                                        self._tx_msgids_emitted[tx_msgid] = prev_c + 1
+                                        self._last_tx_command = tx_summary
 
-                        tx_now_mono = time.monotonic()
-                        if should_emit_tx and self._can_emit_autonomous_tx_locked(tx_sock, tx_now_mono):
-                            autonomy = self._compute_autonomy_step_locked(tx_now_mono)
-                            tx_batch = self._build_mavlink_tx_packets_locked(autonomy, tx_now_mono)
-                            tx_dest = (self._tx_host, self._tx_port)
-                            active_tx_sock = sock if self._send_from_rx_sock else tx_sock
-                            assert active_tx_sock is not None
-                            for tx_msgid, tx_wire, tx_summary in tx_batch:
-                                if tx_msgid == MSGID_SET_POSITION_TARGET_LOCAL_NED:
-                                    # Absolute fail-closed barrier: #84 can never be transmitted
-                                    continue
-                                try:
-                                    active_tx_sock.sendto(tx_wire, tx_dest)
-                                except OSError:
-                                    continue
-                                self._tx_packets += 1
-                                prev_c = (
-                                    self._tx_msgids_emitted[tx_msgid]
-                                    if tx_msgid in self._tx_msgids_emitted
-                                    else 0
-                                )
-                                self._tx_msgids_emitted[tx_msgid] = prev_c + 1
-                                self._last_tx_command = tx_summary
-                                self._last_tx_latency_ms = round((time.perf_counter() - t_start) * 1000.0, 3)
+                    # Execute disk logging and UDP sendto strictly OUTSIDE self._lock
+                    if mav_shadow_rec is not None:
+                        logger_ref, ts_us, mid_val, seq_val, frame_b, f_summary, d_dec = mav_shadow_rec
+                        try:
+                            logger_ref.record_rx_mavlink_frame(
+                                timestamp_mono_us=ts_us,
+                                msgid=mid_val,
+                                seq=seq_val,
+                                raw_frame=frame_b,
+                                summary_ned=f_summary,
+                                datum_decision=d_dec,
+                            )
+                        except Exception:
+                            with self._lock:
+                                self._rejected_packets += 1
+                        continue
+
+                    if tx_batch and active_tx_sock is not None:
+                        failed_msgids: list[int] = []
+                        last_lat_ms: float | None = None
+                        for tx_msgid, tx_wire, _tx_summary in tx_batch:
+                            try:
+                                active_tx_sock.sendto(tx_wire, tx_dest)
+                            except OSError:
+                                failed_msgids.append(tx_msgid)
+                                continue
+                            last_lat_ms = round((time.perf_counter() - t_start) * 1000.0, 3)
+                        if failed_msgids or last_lat_ms is not None:
+                            with self._lock:
+                                for f_mid in failed_msgids:
+                                    self._tx_packets = max(0, self._tx_packets - 1)
+                                    if f_mid in self._tx_msgids_emitted:
+                                        rem = self._tx_msgids_emitted[f_mid] - 1
+                                        if rem > 0:
+                                            self._tx_msgids_emitted[f_mid] = rem
+                                        else:
+                                            del self._tx_msgids_emitted[f_mid]
+                                if last_lat_ms is not None:
+                                    self._last_tx_latency_ms = last_lat_ms
 
     def run_loopback_test(self) -> dict[str, Any]:
         """Run 1-click loopback self-test and cache result on manager."""

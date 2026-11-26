@@ -1,4 +1,4 @@
-OpenXVS v1.1.0 — Autonomous Aviation Perception, GNSS-Denied Integrity & Formal Runtime Assurance
+OpenXVS v1.1.1 — Autonomous Aviation Perception, GNSS-Denied Integrity & Formal Runtime Assurance
 Copyright (c) 2025-2026 Fahri Furkan Sağır (@fahrifurkansagir)
 
 Architected and authored by Fahri Furkan Sağır. Under Section 4(d) of the Apache License 2.0,
@@ -18,8 +18,8 @@ Third-Party & Clean-Room Engineering Disclosures:
   - All internal coordinate frames strictly use WGS-84 ECEF, Local NED, Body FRD, and
     Camera RDF conventions (zero internal ENU).
   - Hybrid database-referenced navigation Python source is excluded from this clean-room
-    snapshot under applicable export-control guardrails (`EXPORTS.md`).
+    snapshot under applicable export-control guardrails (`docs/legal/EXPORTS.md`).
   - OpenXVS is NOT a certified flight-control or civil airworthiness product
     (`NON_FLIGHT_SIM_ONLY=1`, `ACTUATOR_AUTHORITY=false`). See `docs/LIMITATIONS.md`,
-    `SAFETY_DISCLAIMER.md`, `SECURITY.md`, `EXPORTS.md`, `TRADEMARK.md`, and
-    `COMPLIANCE_AND_DUAL_USE.md`.
+    `SECURITY.md`, and `docs/legal/` (`SAFETY_DISCLAIMER.md`, `EXPORTS.md`,
+    `TRADEMARK.md`, `COMPLIANCE_AND_DUAL_USE.md`).

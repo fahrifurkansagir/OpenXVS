@@ -660,11 +660,16 @@ def _build_real_thermal_curriculum_item(
     if is_hit_uav_neg or (sample.q_eo <= 0.05 and sample.q_lwir <= 0.05):
         hm_target = torch.zeros((1, fh, fw), dtype=torch.float32)
     else:
-        hm_target = F.interpolate(
-            real_sample.mask.unsqueeze(0).float(),
-            size=(fh, fw),
-            mode="area",
-        )[0].clamp(0.0, 1.0)
+        m_src = real_sample.mask.unsqueeze(0).float()
+        mh, mw = int(m_src.shape[-2]), int(m_src.shape[-1])
+        if mh >= fh and mw >= fw:
+            # Peak-preserving max-pool downscale so tiny 2-4 px IRSTD-1k targets never vanish
+            hm_target = F.adaptive_max_pool2d(m_src, output_size=(fh, fw))[0].clamp(0.0, 1.0)
+        else:
+            mid_h, mid_w = max(mh, fh), max(mw, fw)
+            if (mid_h, mid_w) != (mh, mw):
+                m_src = F.interpolate(m_src, size=(mid_h, mid_w), mode="nearest")
+            hm_target = F.adaptive_max_pool2d(m_src, output_size=(fh, fw))[0].clamp(0.0, 1.0)
     cls_target = (hm_target[0] > 0.20).to(dtype=torch.long)
 
     return (
@@ -698,6 +703,7 @@ class ThermalCurriculumDataset(Dataset[tuple[torch.Tensor, ...]]):
         real_samples: list[ThermalSample] | None = None,
         seed: int = 20261121,
         v53_mode: bool = False,
+        real_frac: float = 0.60,
         parallax_aug_prob: float = 0.35,
         parallax_max_shift_lwir_px: float = 12.0,
         parallax_max_roll_deg: float = 5.0,
@@ -712,12 +718,21 @@ class ThermalCurriculumDataset(Dataset[tuple[torch.Tensor, ...]]):
         real_pool: list[ThermalSample] = [] if real_samples is None else list(real_samples)
         self.real_samples_loaded: int = len(real_pool)
         self.real_items_count: int = 0
+        self.physics_items_count: int = 0
         self.hit_uav_hot_neg_count: int = 0
         self.parallax_conflict_count: int = 0
         self.items: list[tuple[torch.Tensor, ...]] = []
+        n_total = len(self.curriculum_samples)
+        clamped_real_frac = max(0.0, min(1.0, float(real_frac)))
+        n_real_target = int(round(n_total * clamped_real_frac)) if real_pool else 0
         for idx, csample in enumerate(self.curriculum_samples):
-            # Ensure >= 50% (60%) of training items use real thermal frames when available
-            if real_pool and ((idx % 5) in (0, 1, 2) or idx < len(real_pool)):
+            # Exact ratio mixing (default 60% real / 40% physics) so large real pools never starve physics curriculum
+            use_real = bool(
+                real_pool
+                and n_real_target > 0
+                and (((idx + 1) * n_real_target) // max(1, n_total) > (idx * n_real_target) // max(1, n_total))
+            )
+            if use_real:
                 rs = real_pool[self.real_items_count % len(real_pool)]
                 base_item = _build_real_thermal_curriculum_item(
                     rs, csample, eo_hw, rng, v53_mode=self.v53_mode
@@ -730,12 +745,19 @@ class ThermalCurriculumDataset(Dataset[tuple[torch.Tensor, ...]]):
                 base_item = _synthesize_eo_lwir_pair(
                     csample, eo_hw, lwir_hw, rng, hot_ground_negative=hot_neg
                 )
+                self.physics_items_count += 1
             if self.v53_mode:
                 eo_t, lw_t, qe_t, ql_t, hm_t, cls_t = base_item
                 eo_hm = hm_t.clone()
                 lw_hm = hm_t.clone()
                 conflict_f = 0.0
-                if float(rng.random()) < float(parallax_aug_prob) and float(qe_t.item()) >= 0.5 and float(ql_t.item()) >= 0.5:
+                has_fg_target = bool(float(hm_t.max().item()) > 0.05)
+                if (
+                    has_fg_target
+                    and float(rng.random()) < float(parallax_aug_prob)
+                    and float(qe_t.item()) >= 0.5
+                    and float(ql_t.item()) >= 0.5
+                ):
                     lw_t, lw_hm, _shift_px, conflict_f = _apply_v53_parallax_and_roll(
                         lw_t,
                         hm_t,
@@ -1067,6 +1089,10 @@ def convert_xvs_thermal_onnx_selective_fp16(fp32_model: Any) -> Any:
         "Sqrt",
         "ReduceSum",
         "ReduceMean",
+        "ReduceMax",
+        "Softmax",
+        "Max",
+        "Exp",
         "Clip",
         "BatchNormalization",
         "Resize",
@@ -1673,7 +1699,7 @@ def run_xvs_thermal_g4_training(cfg: XvsThermalG4Config) -> dict[str, Any]:
 
 
 def _parse_args(argv: list[str] | None = None) -> XvsThermalG4Config:
-    p = argparse.ArgumentParser(description="OpenXVS v1.1.0 XVS-ThermalNet + XVS-VRAIM GPU trainer")
+    p = argparse.ArgumentParser(description="OpenXVS v1.1.1 XVS-ThermalNet + XVS-VRAIM Colab L4/G4 trainer")
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--drive-ckpt-dir", type=Path, default=None)
     p.add_argument("--data-cache-dir", type=Path, default=None)

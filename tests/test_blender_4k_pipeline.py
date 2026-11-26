@@ -360,6 +360,8 @@ def test_gpu_failfast_persistent_data_volumetrics_and_visual_polish(monkeypatch:
 
 def test_blender_4k_notebook_crash_telemetry_resume_and_stage_ortho_tiers(tmp_path: Path) -> None:
     """BUG-2 & BUG-5 regression: notebook crash logs, resume, ffmpeg hardening, and 3-tier ortho stage."""
+    if not BLENDER_NOTEBOOK.is_file():
+        pytest.skip(f"Clean-room checkout omits optional notebook: {BLENDER_NOTEBOOK.name}")
     nb = json.loads(BLENDER_NOTEBOOK.read_text(encoding="utf-8"))
     code_cells = ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
     assert len(code_cells) == 2

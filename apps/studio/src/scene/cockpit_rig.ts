@@ -310,7 +310,7 @@ function drawSafetyMfdCanvas(ctx: CanvasRenderingContext2D, snap: StudioSimSnaps
   ctx.fillRect(0, 0, w, 40);
   ctx.fillStyle = "#38bdf8";
   ctx.font = "800 12px monospace";
-  ctx.fillText("OPENXVS v5.2 SAFETY MFD · 26/26 KANI", 20, 27);
+  ctx.fillText("OPENXVS SAFETY MFD · 26/26 KANI", 20, 27);
 
   ctx.fillStyle = "rgba(6, 12, 24, 0.94)";
   ctx.fillRect(0, h - 62, w, 40);
@@ -394,17 +394,17 @@ export function createCockpitInteriorRig(): CockpitInteriorRig {
 
   // 1. Fully Enclosed Matte-Charcoal Cockpit Shell (ZERO ocean bleed or gaps anywhere!)
   // Sculpted anti-glare glareshield brow overhang
-  const glareshield = new THREE.Mesh(new THREE.BoxGeometry(2.55, 0.06, 0.58), leatherMat);
-  glareshield.position.set(0, 0.42, -4.02);
+  const glareshield = new THREE.Mesh(new THREE.BoxGeometry(2.55, 0.055, 0.58), leatherMat);
+  glareshield.position.set(0, 0.445, -4.02);
   group.add(glareshield);
 
-  const browLip = new THREE.Mesh(new THREE.BoxGeometry(2.50, 0.022, 0.05), trimMat);
-  browLip.position.set(0, 0.445, -3.73);
+  const browLip = new THREE.Mesh(new THREE.BoxGeometry(2.50, 0.020, 0.05), trimMat);
+  browLip.position.set(0, 0.470, -3.73);
   group.add(browLip);
 
   // Full sealed instrument bulkhead extending all the way down to floor pan
-  const instrBulkhead = new THREE.Mesh(new THREE.BoxGeometry(2.75, 1.35, 0.16), panelMat);
-  instrBulkhead.position.set(0, -0.24, -4.22);
+  const instrBulkhead = new THREE.Mesh(new THREE.BoxGeometry(2.75, 1.38, 0.16), panelMat);
+  instrBulkhead.position.set(0, -0.22, -4.22);
   group.add(instrBulkhead);
 
   // Lower knee bolster & sealed floor pan (prevents any sky/ocean bleed beneath dashboard)
@@ -419,23 +419,27 @@ export function createCockpitInteriorRig(): CockpitInteriorRig {
     group.add(sideWall);
 
     const sillTrim = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.045, 1.80), trimMat);
-    sillTrim.position.set(side * 1.12, 0.40, -3.48);
+    sillTrim.position.set(side * 1.12, 0.42, -3.48);
     group.add(sillTrim);
   }
 
-  // Overhead roof liner & slim windshield pillars
+  // Overhead roof liner & panoramic windshield framing (unobstructed forward boresight at x=0!)
   const roofLiner = new THREE.Mesh(new THREE.BoxGeometry(2.50, 0.14, 1.65), leatherMat);
   roofLiner.position.set(0, 1.24, -3.35);
   group.add(roofLiner);
 
-  const pillarGeo = new THREE.BoxGeometry(0.032, 0.92, 0.045);
-  const centerPost = new THREE.Mesh(pillarGeo, leatherMat);
-  centerPost.position.set(0, 0.82, -4.32);
-  centerPost.rotation.x = 0.42;
-  group.add(centerPost);
-
+  // Ultra-slim offset canopy quarter-mullions (leaves forward target centerline 100% clear)
+  const mullionGeo = new THREE.BoxGeometry(0.015, 0.90, 0.026);
   for (const side of [-1, 1] as const) {
-    const sidePost = new THREE.Mesh(pillarGeo, leatherMat);
+    const mullion = new THREE.Mesh(mullionGeo, leatherMat);
+    mullion.position.set(side * 0.64, 0.83, -4.26);
+    mullion.rotation.set(0.42, side * -0.06, side * 0.04);
+    group.add(mullion);
+  }
+
+  const sidePillarGeo = new THREE.BoxGeometry(0.028, 0.92, 0.042);
+  for (const side of [-1, 1] as const) {
+    const sidePost = new THREE.Mesh(sidePillarGeo, leatherMat);
     sidePost.position.set(side * 1.06, 0.80, -3.98);
     sidePost.rotation.set(0.38, side * -0.18, side * 0.14);
     group.add(sidePost);
@@ -484,21 +488,21 @@ export function createCockpitInteriorRig(): CockpitInteriorRig {
     [0.37, mfdTex],
   ] as const) {
     const bezel = new THREE.Mesh(outerBezelGeo, bezelMat);
-    bezel.position.set(xPos, 0.17, -4.12);
-    bezel.rotation.x = -0.09;
+    bezel.position.set(xPos, 0.20, -4.12);
+    bezel.rotation.x = -0.08;
     group.add(bezel);
 
     const recess = new THREE.Mesh(innerRecessGeo, leatherMat);
-    recess.position.set(xPos, 0.17, -4.102);
-    recess.rotation.x = -0.09;
+    recess.position.set(xPos, 0.20, -4.102);
+    recess.rotation.x = -0.08;
     group.add(recess);
 
     const screen = new THREE.Mesh(
       screenGeo,
       new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff }),
     );
-    screen.position.set(xPos, 0.17, -4.088);
-    screen.rotation.x = -0.09;
+    screen.position.set(xPos, 0.20, -4.088);
+    screen.rotation.x = -0.08;
     group.add(screen);
   }
 
@@ -530,36 +534,37 @@ export function createCockpitInteriorRig(): CockpitInteriorRig {
   yokePivot.add(yokeWheel);
   group.add(yokePivot);
 
-  // 4. Deep Center Console Pedestal + Brushed-Metal Twin Throttle & Prop Levers
-  const consoleBase = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.62, 0.85), leatherMat);
-  consoleBase.position.set(0.0, -0.34, -3.72);
+  // 4. Recessed Center Console Pedestal + Brushed-Metal Twin Throttle & Prop Levers
+  // Seated cleanly below both G1000 display sightlines so softkeys & annunciators stay 100% unobstructed.
+  const consoleBase = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.56, 0.85), leatherMat);
+  consoleBase.position.set(0.0, -0.46, -3.72);
   group.add(consoleBase);
 
-  const consoleTop = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.035, 0.72), bezelMat);
-  consoleTop.position.set(0.0, -0.02, -3.75);
+  const consoleTop = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.032, 0.72), bezelMat);
+  consoleTop.position.set(0.0, -0.17, -3.75);
   group.add(consoleTop);
 
   const makeThrottleLever = (xOff: number, heightM: number, knobHex: number): THREE.Group => {
     const piv = new THREE.Group();
-    piv.position.set(xOff, -0.01, -3.78);
-    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, heightM, 10), brushedMetalMat);
+    piv.position.set(xOff, -0.16, -3.74);
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, heightM, 10), brushedMetalMat);
     stem.position.y = heightM * 0.5;
     piv.add(stem);
     const knob = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.021, 0.021, 0.046, 12),
+      new THREE.CylinderGeometry(0.018, 0.018, 0.038, 12),
       new THREE.MeshStandardMaterial({ color: knobHex, roughness: 0.45, metalness: 0.35 }),
     );
     knob.rotation.z = Math.PI * 0.5;
-    knob.position.y = heightM + 0.006;
+    knob.position.y = heightM + 0.005;
     piv.add(knob);
     group.add(piv);
     return piv;
   };
-  const leftThrottle = makeThrottleLever(-0.065, 0.16, 0x111827);
-  const rightThrottle = makeThrottleLever(-0.015, 0.16, 0x111827);
+  const leftThrottle = makeThrottleLever(-0.052, 0.105, 0x111827);
+  const rightThrottle = makeThrottleLever(-0.016, 0.105, 0x111827);
   // Blue-knobbed prop RPM levers beside throttles
-  makeThrottleLever(0.042, 0.14, 0x1d4ed8);
-  makeThrottleLever(0.082, 0.14, 0x1d4ed8);
+  makeThrottleLever(0.022, 0.090, 0x1d4ed8);
+  makeThrottleLever(0.056, 0.090, 0x1d4ed8);
 
   let frameCounter = 0;
 
@@ -590,7 +595,7 @@ export function createCockpitInteriorRig(): CockpitInteriorRig {
       }
 
       frameCounter++;
-      if (frameCounter % 2 === 0 || frameCounter <= 2) {
+      if (frameCounter >= 1) {
         if (pfdCanvas && pfdTex) {
           const ctx = pfdCanvas.getContext("2d");
           if (ctx) {

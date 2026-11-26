@@ -9,7 +9,7 @@
  *   - Zero-Allocation M-of-N (`3-of-5`) Bearing Track-Before-Confirm (`bearing_track_confirmed`,
  *     `bearing_track_hits_in_window`, optional alias `bearing_tbc_confirmed_tracks`)
  *   - Formal & Bare-Metal Assurance Badges: `26/26 Kani CBMC (5,228 checks)`, `Apalache N=2/N=3`,
- *     `Cortex-M7 thumbv7em (188 KB Flash / 0 B RAM)`, `Sequence-VPR (0 HMI)`
+ *     `Cortex-M7 thumbv7em (88 KB Flash / 0 B RAM)`, `Sequence-VPR (0 HMI)`
  *
  * Backward Compatibility & Fail-Closed Guarantee:
  *   - Absent optional v5.2 fields fall back gracefully to legacy v5.0 fields / standby indicators.
@@ -718,10 +718,10 @@ export function getFormalAssuranceBadges(locale: StudioLocale): readonly FormalA
     },
     {
       id: "mcu",
-      text: "Cortex-M7 thumbv7em · 188KB/0B",
+      text: "Cortex-M7 thumbv7em · 88KB/0B",
       title: tr
-        ? "Bare-metal ARM Cortex-M7 (thumbv7em-none-eabi) Ring-0 kanıtı: 188 KB Flash (%8,96 STM32H7), 0 B statik RAM, 0 heap"
-        : "Bare-metal ARM Cortex-M7 (thumbv7em-none-eabi) Ring-0 proof: 188 KB Flash (8.96% of 2 MiB STM32H7), 0 B static RAM, 0 heap",
+        ? "Bare-metal ARM Cortex-M7 (thumbv7em-none-eabi) Ring-0 kanıtı: 88 KB Flash (%4,3 STM32H7), 0 B statik RAM, 0 heap"
+        : "Bare-metal ARM Cortex-M7 (thumbv7em-none-eabi) Ring-0 proof: 88 KB Flash (4.3% of 2 MiB STM32H7), 0 B static RAM, 0 heap",
       tone: "cyan",
     },
     {

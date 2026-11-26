@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Reproducible Clean-Room Release Builder for OpenXVS Studio v5.0 (REL1 / REL2 / REL3 / REL4).
 .DESCRIPTION
@@ -89,18 +89,20 @@ if ($HostTriple -like "*-msvc") {
 $OldRustFlags = $env:RUSTFLAGS
 $OldIncremental = $env:CARGO_INCREMENTAL
 $OldNonFlight = $env:OPENXVS_NON_FLIGHT_SIM_ONLY
+$OldNonFlightSimOnly = $env:NON_FLIGHT_SIM_ONLY
 try {
     $env:CARGO_INCREMENTAL = "0"
     $env:OPENXVS_NON_FLIGHT_SIM_ONLY = "1"
     $env:NON_FLIGHT_SIM_ONLY = "1"
     $env:RUSTFLAGS = "$RemapFlags $LinkFlags"
 
-    cargo build --manifest-path $ManifestPath --release --features "non_flight_sim_only,custom-protocol"
-    if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed with exit code $LASTEXITCODE" }
+    cargo build --manifest-path $ManifestPath --release --locked --features "non_flight_sim_only,custom-protocol"
+    if ($LASTEXITCODE -ne 0) { throw "cargo build --release --locked failed with exit code $LASTEXITCODE" }
 } finally {
     $env:RUSTFLAGS = $OldRustFlags
     $env:CARGO_INCREMENTAL = $OldIncremental
     $env:OPENXVS_NON_FLIGHT_SIM_ONLY = $OldNonFlight
+    $env:NON_FLIGHT_SIM_ONLY = $OldNonFlightSimOnly
 }
 
 if (-not (Test-Path $ReleaseExe)) {
@@ -133,12 +135,15 @@ $Bytes = [System.IO.File]::ReadAllBytes($ReleaseExe)
 $AsciiText = [System.Text.Encoding]::ASCII.GetString($Bytes)
 $Utf16Text = [System.Text.Encoding]::Unicode.GetString($Bytes)
 
+$BuildUser = if ($env:USERNAME) { $env:USERNAME } elseif ($env:USER) { $env:USER } else { "" }
 $ForbiddenTokens = @(
-    ("C:\PROJ" + "ECTS\OPENXVS"),
-    ("C:/PROJ" + "ECTS/OPENXVS"),
-    ("C:" + "\Users\" + "onera"),
-    ("C:" + "/Users/" + "onera"),
+    $RepoRoot,
+    $RepoRoot.Replace("\", "/"),
     $UserHome,
+    $(if ($UserHome) { $UserHome.Replace("\", "/") } else { "" }),
+    $(if ($BuildUser) { "Users\$BuildUser" } else { "" }),
+    $(if ($BuildUser) { "Users/$BuildUser" } else { "" }),
+    $(if ($BuildUser) { "home/$BuildUser" } else { "" }),
     ("Anti" + "gravity"),
     ("Anti" + "gravity Project"),
     ("fire_" + "control"),
@@ -200,11 +205,91 @@ if ($FoundBannedCrypto.Count -gt 0) {
 }
 Write-Host "[REL3-OK]   5D002 Cargo.lock audit: 0 TLS/AES/confidentiality crypto crates" -ForegroundColor Green
 
-$MetaJson = cargo metadata --manifest-path $ManifestPath --format-version 1 | ConvertFrom-Json
+function Test-SpdxExpressionGplFree([string]$Expr) {
+    if ([string]::IsNullOrWhiteSpace($Expr)) { return $true }
+    $s = $Expr.Trim()
+
+    # Strip matching outer parentheses
+    while ($s.StartsWith("(") -and $s.EndsWith(")")) {
+        $depth = 0
+        $wrapsAll = $true
+        for ($i = 0; $i -lt $s.Length; $i++) {
+            $ch = $s[$i]
+            if ($ch -eq '(') { $depth++ }
+            elseif ($ch -eq ')') { $depth-- }
+            if ($depth -eq 0 -and $i -lt ($s.Length - 1)) {
+                $wrapsAll = $false
+                break
+            }
+        }
+        if ($wrapsAll -and $depth -eq 0) {
+            $s = $s.Substring(1, $s.Length - 2).Trim()
+        } else {
+            break
+        }
+    }
+
+    # Split at top-level OR (or legacy Cargo '/' disjunct) — lowest precedence: ANY branch GPL-free passes
+    $orParts = New-Object System.Collections.Generic.List[string]
+    $depth = 0
+    $start = 0
+    for ($i = 0; $i -lt $s.Length; $i++) {
+        $ch = $s[$i]
+        if ($ch -eq '(') { $depth++; continue }
+        if ($ch -eq ')') { $depth--; continue }
+        if ($depth -eq 0) {
+            if ($ch -eq '/') {
+                $orParts.Add($s.Substring($start, $i - $start).Trim())
+                $start = $i + 1
+            } elseif ($i + 4 -le $s.Length -and $s.Substring($i, 4) -match '^\sOR\s$' -and $s.Substring($i, 4).ToUpper() -eq $s.Substring($i, 4)) {
+                $orParts.Add($s.Substring($start, $i - $start).Trim())
+                $start = $i + 4
+                $i += 3
+            }
+        }
+    }
+    if ($orParts.Count -gt 0) {
+        $orParts.Add($s.Substring($start).Trim())
+        foreach ($part in $orParts) {
+            if (Test-SpdxExpressionGplFree $part) { return $true }
+        }
+        return $false
+    }
+
+    # Split at top-level AND — ALL branches MUST be GPL-free (rejects e.g. "GPL-3.0 AND MIT")
+    $andParts = New-Object System.Collections.Generic.List[string]
+    $depth = 0
+    $start = 0
+    for ($i = 0; $i -lt $s.Length; $i++) {
+        $ch = $s[$i]
+        if ($ch -eq '(') { $depth++; continue }
+        if ($ch -eq ')') { $depth--; continue }
+        if ($depth -eq 0 -and $i + 5 -le $s.Length -and $s.Substring($i, 5) -match '^\sAND\s$' -and $s.Substring($i, 5).ToUpper() -eq $s.Substring($i, 5)) {
+            $andParts.Add($s.Substring($start, $i - $start).Trim())
+            $start = $i + 5
+            $i += 4
+        }
+    }
+    if ($andParts.Count -gt 0) {
+        $andParts.Add($s.Substring($start).Trim())
+        foreach ($part in $andParts) {
+            if (-not (Test-SpdxExpressionGplFree $part)) { return $false }
+        }
+        return $true
+    }
+
+    # Atomic license identifier (e.g. "MIT", "GPL-3.0-only", "LGPL-2.1-only WITH ...")
+    if ($s -match '(?i)\b(A?GPL|GPLv[23]|LGPL-[23]\.[01]-only|LGPL-[23]\.0-only)\b') {
+        return $false
+    }
+    return $true
+}
+
+$MetaJson = cargo metadata --manifest-path $ManifestPath --locked --format-version 1 | ConvertFrom-Json
 $BadLicenses = @()
 foreach ($pkg in $MetaJson.packages) {
     $lic = if ($pkg.license) { [string]$pkg.license } else { "" }
-    if ($lic -match "\b(A?GPL|GPLv[23]|LGPL-[23]\.0-only)\b" -and $lic -notmatch "\b(MIT|Apache-2\.0|BSD|ISC|Zlib|MPL-2\.0)\b") {
+    if (-not (Test-SpdxExpressionGplFree $lic)) {
         $BadLicenses += "$($pkg.name)@$($pkg.version) ($lic)"
     }
 }

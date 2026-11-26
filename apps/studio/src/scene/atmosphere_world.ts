@@ -42,6 +42,37 @@ export interface AtmosphereRig {
 
 const DEG_TO_RAD = Math.PI / 180.0;
 
+// Hoisted module-level color constants (zero per-frame allocations)
+const COL_NIGHT_SUN = new THREE.Color(0x64748b);
+const COL_GOLD_SUN = new THREE.Color(0xffd29d);
+const COL_NOON_SUN = new THREE.Color(0xfffaf2);
+const COL_NIGHT_SKY = new THREE.Color(0x13294b);
+const COL_DAY_SKY = new THREE.Color(0x9bd0ff);
+const COL_NIGHT_GND = new THREE.Color(0x0b1526);
+const COL_DAY_GND = new THREE.Color(0x3b4d5e);
+const COL_NIGHT_FOG = new THREE.Color(0x091628);
+const COL_DAY_FOG = new THREE.Color(0xc9e0f2);
+const COL_GOLD_FOG = new THREE.Color(0xdccbb8);
+const COL_OVERCAST_FOG = new THREE.Color(0xb8c7d4);
+const COL_CLOUD_NIGHT_TOP = new THREE.Color(0x6c85a6);
+const COL_CLOUD_DAY_TOP = new THREE.Color(0xffffff);
+const COL_CLOUD_GOLD_TOP = new THREE.Color(0xfff1de);
+const COL_CLOUD_NIGHT_BOT = new THREE.Color(0x0c1729);
+const COL_CLOUD_DAY_BOT = new THREE.Color(0x8ea9c7);
+
+interface MutableAtmosphereLightingState {
+  sunDir: THREE.Vector3;
+  sunElevationDeg: number;
+  daylightFactor: number;
+  goldenFactor: number;
+  sunColor: THREE.Color;
+  sunIntensity: number;
+  hemiSkyColor: THREE.Color;
+  hemiGroundColor: THREE.Color;
+  hemiIntensity: number;
+  fogColor: THREE.Color;
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -51,11 +82,11 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
   return t * t * (3.0 - 2.0 * t);
 }
 
-/** Computes realistic San Francisco (37.6°N) solar vector and crisp coastal daylight/golden-hour lighting. */
-export function computeSolarAtmosphere(
+function computeSolarAtmosphereInto(
   timeOfDayH: number,
   mode: VisualWorldMode,
   cloudCover: number,
+  out: MutableAtmosphereLightingState,
 ): AtmosphereLightingState {
   const h = clamp(timeOfDayH, 5.0, 22.0);
   // San Francisco (37.6°N) solar elevation curve: noon ~52°, golden afternoon 16.5h ~18.5°, sunset ~18.4h
@@ -64,14 +95,17 @@ export function computeSolarAtmosphere(
   const azRad = (84.0 + ((h - 6.4) / 12.0) * 196.0) * DEG_TO_RAD;
 
   const elevRad = mode === "obsidian" ? 6.0 * DEG_TO_RAD : rawElevRad;
-  const sunDir =
-    mode === "obsidian"
-      ? new THREE.Vector3(-0.82, 0.12, -0.55).normalize()
-      : new THREE.Vector3(
-          Math.cos(elevRad) * Math.sin(azRad),
-          Math.sin(elevRad),
-          -Math.cos(elevRad) * Math.cos(azRad),
-        ).normalize();
+  if (mode === "obsidian") {
+    out.sunDir.set(-0.82, 0.12, -0.55).normalize();
+  } else {
+    out.sunDir
+      .set(
+        Math.cos(elevRad) * Math.sin(azRad),
+        Math.sin(elevRad),
+        -Math.cos(elevRad) * Math.cos(azRad),
+      )
+      .normalize();
+  }
 
   const elevDeg = elevRad / DEG_TO_RAD;
   const daylightFactor =
@@ -83,57 +117,59 @@ export function computeSolarAtmosphere(
 
   const overcastDamp = 1.0 - 0.28 * clamp(cloudCover, 0.0, 1.0);
 
-  const sunColor = new THREE.Color();
-  const hemiSkyColor = new THREE.Color();
-  const hemiGroundColor = new THREE.Color();
-  const fogColor = new THREE.Color();
-
   if (mode === "obsidian") {
-    sunColor.setHex(0xffedd5);
-    hemiSkyColor.setHex(0x7dd3fc);
-    hemiGroundColor.setHex(0x0b1526);
-    fogColor.setHex(0x091628);
+    out.sunColor.setHex(0xffedd5);
+    out.hemiSkyColor.setHex(0x7dd3fc);
+    out.hemiGroundColor.setHex(0x0b1526);
+    out.fogColor.setHex(0x091628);
   } else {
-    const nightSun = new THREE.Color(0x64748b);
-    const goldSun = new THREE.Color(0xffd29d);
-    const noonSun = new THREE.Color(0xfffaf2);
-    sunColor.copy(nightSun).lerp(noonSun, daylightFactor).lerp(goldSun, goldenFactor * 0.55);
+    out.sunColor
+      .copy(COL_NIGHT_SUN)
+      .lerp(COL_NOON_SUN, daylightFactor)
+      .lerp(COL_GOLD_SUN, goldenFactor * 0.55);
 
-    const nightSky = new THREE.Color(0x13294b);
-    const daySky = new THREE.Color(0x9bd0ff);
-    hemiSkyColor.copy(nightSky).lerp(daySky, daylightFactor);
-
-    const nightGnd = new THREE.Color(0x0b1526);
-    const dayGnd = new THREE.Color(0x3b4d5e);
-    hemiGroundColor.copy(nightGnd).lerp(dayGnd, daylightFactor);
+    out.hemiSkyColor.copy(COL_NIGHT_SKY).lerp(COL_DAY_SKY, daylightFactor);
+    out.hemiGroundColor.copy(COL_NIGHT_GND).lerp(COL_DAY_GND, daylightFactor);
 
     // Sunlit coastal horizon fog (#c9e0f2) warming subtly toward #e8cfb4 at golden hour
-    const nightFog = new THREE.Color(0x091628);
-    const dayFog = new THREE.Color(0xc9e0f2);
-    const goldFog = new THREE.Color(0xdccbb8);
-    fogColor.copy(nightFog).lerp(dayFog, daylightFactor).lerp(goldFog, goldenFactor * 0.34);
-    fogColor.lerp(new THREE.Color(0xb8c7d4), cloudCover * 0.25 * daylightFactor);
+    out.fogColor
+      .copy(COL_NIGHT_FOG)
+      .lerp(COL_DAY_FOG, daylightFactor)
+      .lerp(COL_GOLD_FOG, goldenFactor * 0.34)
+      .lerp(COL_OVERCAST_FOG, cloudCover * 0.25 * daylightFactor);
   }
 
-  const sunIntensity =
+  out.sunElevationDeg = elevDeg;
+  out.daylightFactor = daylightFactor;
+  out.goldenFactor = goldenFactor;
+  out.sunIntensity =
     mode === "obsidian"
       ? 2.25
       : (0.45 + 2.75 * daylightFactor) * overcastDamp;
-  const hemiIntensity =
+  out.hemiIntensity =
     mode === "obsidian" ? 0.92 : 0.45 + 0.85 * daylightFactor;
 
-  return {
-    sunDir,
-    sunElevationDeg: elevDeg,
-    daylightFactor,
-    goldenFactor,
-    sunColor,
-    sunIntensity,
-    hemiSkyColor,
-    hemiGroundColor,
-    hemiIntensity,
-    fogColor,
-  };
+  return out;
+}
+
+/** Computes realistic San Francisco (37.6°N) solar vector and crisp coastal daylight/golden-hour lighting. */
+export function computeSolarAtmosphere(
+  timeOfDayH: number,
+  mode: VisualWorldMode,
+  cloudCover: number,
+): AtmosphereLightingState {
+  return computeSolarAtmosphereInto(timeOfDayH, mode, cloudCover, {
+    sunDir: new THREE.Vector3(),
+    sunElevationDeg: 0,
+    daylightFactor: 0,
+    goldenFactor: 0,
+    sunColor: new THREE.Color(),
+    sunIntensity: 0,
+    hemiSkyColor: new THREE.Color(),
+    hemiGroundColor: new THREE.Color(),
+    hemiIntensity: 0,
+    fogColor: new THREE.Color(),
+  });
 }
 
 /** Rich Coastal California Rayleigh + Mie Physical Sky Dome (zero milky washout). */
@@ -378,8 +414,27 @@ export function createAtmosphereRig(): AtmosphereRig {
   group.add(clouds.mesh);
 
   const dummy = new THREE.Object3D();
+  const scratchSunTop = new THREE.Color();
+  const scratchShadeBot = new THREE.Color();
+  const lightingScratch: MutableAtmosphereLightingState = {
+    sunDir: new THREE.Vector3(),
+    sunElevationDeg: 0,
+    daylightFactor: 0,
+    goldenFactor: 0,
+    sunColor: new THREE.Color(),
+    sunIntensity: 0,
+    hemiSkyColor: new THREE.Color(),
+    hemiGroundColor: new THREE.Color(),
+    hemiIntensity: 0,
+    fogColor: new THREE.Color(),
+  };
+
   let driftX = 0.0;
   let driftZ = 0.0;
+  let cloudsInitialized = false;
+  let lastCloudDriftX = 0.0;
+  let lastCloudDriftZ = 0.0;
+  let lastCloudCover = -1.0;
 
   return {
     group,
@@ -395,7 +450,12 @@ export function createAtmosphereRig(): AtmosphereRig {
       weather: WeatherState,
       mode: VisualWorldMode,
     ): AtmosphereLightingState {
-      const lit = computeSolarAtmosphere(weather.timeOfDayH, mode, weather.cloudCover);
+      const lit = computeSolarAtmosphereInto(
+        weather.timeOfDayH,
+        mode,
+        weather.cloudCover,
+        lightingScratch,
+      );
       const isObsidian = mode === "obsidian";
 
       sky.mesh.position.copy(cameraPos);
@@ -413,20 +473,23 @@ export function createAtmosphereRig(): AtmosphereRig {
       const showClouds = weather.cloudCover > 0.02 && (!isObsidian || weather.cloudCover > 0.35);
       clouds.mesh.visible = showClouds;
       if (showClouds) {
-        // Pure crisp sunlit white tops (#ffffff) + cool sky-blue undersides (#9ab2cc) — NEVER brown ovals!
-        const sunTop = new THREE.Color(0x6c85a6)
-          .lerp(new THREE.Color(0xffffff), lit.daylightFactor)
-          .lerp(new THREE.Color(0xfff1de), lit.goldenFactor * 0.25);
-        const shadeBot = new THREE.Color(0x0c1729)
-          .lerp(new THREE.Color(0x8ea9c7), lit.daylightFactor);
+        // Pure crisp sunlit white tops (#ffffff) + cool sky-blue undersides (#9ab2cc)
         if (isObsidian) {
-          sunTop.setHex(0x1f3554);
-          shadeBot.setHex(0x07101f);
+          scratchSunTop.setHex(0x1f3554);
+          scratchShadeBot.setHex(0x07101f);
+        } else {
+          scratchSunTop
+            .copy(COL_CLOUD_NIGHT_TOP)
+            .lerp(COL_CLOUD_DAY_TOP, lit.daylightFactor)
+            .lerp(COL_CLOUD_GOLD_TOP, lit.goldenFactor * 0.25);
+          scratchShadeBot
+            .copy(COL_CLOUD_NIGHT_BOT)
+            .lerp(COL_CLOUD_DAY_BOT, lit.daylightFactor);
         }
 
         clouds.mat.uniforms.uSunDir.value.copy(lit.sunDir);
-        clouds.mat.uniforms.uSunCol.value.copy(sunTop);
-        clouds.mat.uniforms.uShadowCol.value.copy(shadeBot);
+        clouds.mat.uniforms.uSunCol.value.copy(scratchSunTop);
+        clouds.mat.uniforms.uShadowCol.value.copy(scratchShadeBot);
         clouds.mat.uniforms.uFogColor.value.copy(lit.fogColor);
         clouds.mat.uniforms.uFogDensity.value = clamp(
           0.95 / Math.max(500, weather.visibilityKm * 1000),
@@ -437,23 +500,37 @@ export function createAtmosphereRig(): AtmosphereRig {
           ? 0.24 * weather.cloudCover
           : 0.56 + 0.36 * weather.cloudCover;
 
-        const activeLimit = clamp(weather.cloudCover * 1.05, 0.0, 1.0);
-        const wrapSpan = 30000.0;
-        let visibleCount = 0;
-        for (let i = 0; i < clouds.seeds.length; i++) {
-          const s = clouds.seeds[i];
-          if (s.densityThreshold > activeLimit) continue;
-          const wx = (((s.x + driftX + wrapSpan * 0.5) % wrapSpan) + wrapSpan) % wrapSpan - wrapSpan * 0.5;
-          const wz = (((s.z + driftZ + wrapSpan * 0.5) % wrapSpan) + wrapSpan) % wrapSpan - wrapSpan * 0.5;
+        // Throttle 342-instance matrix buffer upload (~22 KB) until drift or cover changes meaningfully
+        const needsCloudUpload =
+          !cloudsInitialized ||
+          Math.abs(driftX - lastCloudDriftX) >= 3.0 ||
+          Math.abs(driftZ - lastCloudDriftZ) >= 3.0 ||
+          Math.abs(weather.cloudCover - lastCloudCover) >= 0.005;
+
+        if (needsCloudUpload) {
+          cloudsInitialized = true;
+          lastCloudDriftX = driftX;
+          lastCloudDriftZ = driftZ;
+          lastCloudCover = weather.cloudCover;
+
+          const activeLimit = clamp(weather.cloudCover * 1.05, 0.0, 1.0);
+          const wrapSpan = 30000.0;
           const coverScale = 0.78 + 0.36 * weather.cloudCover;
-          dummy.position.set(wx, s.y, wz);
-          dummy.rotation.set(0, s.rotY, 0);
-          dummy.scale.set(s.sx * coverScale, s.sy * coverScale, s.sz * coverScale);
-          dummy.updateMatrix();
-          clouds.mesh.setMatrixAt(visibleCount++, dummy.matrix);
+          let visibleCount = 0;
+          for (let i = 0; i < clouds.seeds.length; i++) {
+            const s = clouds.seeds[i];
+            if (s.densityThreshold > activeLimit) continue;
+            const wx = (((s.x + driftX + wrapSpan * 0.5) % wrapSpan) + wrapSpan) % wrapSpan - wrapSpan * 0.5;
+            const wz = (((s.z + driftZ + wrapSpan * 0.5) % wrapSpan) + wrapSpan) % wrapSpan - wrapSpan * 0.5;
+            dummy.position.set(wx, s.y, wz);
+            dummy.rotation.set(0, s.rotY, 0);
+            dummy.scale.set(s.sx * coverScale, s.sy * coverScale, s.sz * coverScale);
+            dummy.updateMatrix();
+            clouds.mesh.setMatrixAt(visibleCount++, dummy.matrix);
+          }
+          clouds.mesh.count = visibleCount;
+          clouds.mesh.instanceMatrix.needsUpdate = true;
         }
-        clouds.mesh.count = visibleCount;
-        clouds.mesh.instanceMatrix.needsUpdate = true;
       }
 
       return lit;

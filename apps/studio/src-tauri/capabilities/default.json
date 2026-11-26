@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal default capability for OpenXVS Studio v4.0 main window.",
+  "description": "Minimal default capability for OpenXVS Studio main window.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

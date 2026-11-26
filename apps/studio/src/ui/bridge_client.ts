@@ -224,9 +224,17 @@ export function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
+const STRICT_IMAGE_DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=\s]+$/i;
+const RAW_BASE64_RE = /^[A-Za-z0-9+/=\s]+$/;
+
 export function normalizeBase64DataUrl(b64: unknown): string | null {
-  if (typeof b64 !== "string" || b64.length < 32) return null;
-  return b64.startsWith("data:") ? b64 : `data:image/jpeg;base64,${b64}`;
+  if (typeof b64 !== "string") return null;
+  const trimmed = b64.trim();
+  if (trimmed.length < 32) return null;
+  if (trimmed.startsWith("data:")) {
+    return STRICT_IMAGE_DATA_URL_RE.test(trimmed) ? trimmed : null;
+  }
+  return RAW_BASE64_RE.test(trimmed) ? `data:image/jpeg;base64,${trimmed}` : null;
 }
 
 export function stampNonFlightExport<T extends Record<string, unknown>>(
@@ -417,6 +425,7 @@ export class StudioBridgeClient {
         return null;
       }
     }
+    if (!this.online) return null;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 3000);
     try {
@@ -509,7 +518,7 @@ export class StudioBridgeClient {
           device: String(
             data.host_gpu_name ??
               data.compute_device ??
-              "6/6 Pure-Rust ORT v5.2 + XFeat + LighterGlue + MultiShipCoord",
+              "6/6 Pure-Rust ORT + XFeat + LighterGlue + MultiShipCoord",
           ),
           vramMb: typeof data.vram_mb === "number" ? data.vram_mb : 0,
           modelsLoaded: modelsObj
@@ -758,19 +767,33 @@ export class StudioBridgeClient {
     sampleFps: number,
     maxFrames: number,
   ): Promise<{ readonly job_id: string; readonly status: string } | null> {
+    this.lastError = null;
     if (this.isNativeTauriIpc()) {
       this.lastError =
         "Standalone .exe uses Pure-Rust ORT sequential frame analysis via native IPC.";
       return null;
     }
     const qs = `channel=${encodeURIComponent(channel)}&sample_fps=${Math.round(sampleFps)}&max_frames=${Math.round(maxFrames)}`;
-    const res = await fetch(`${this.baseUrl}/api/analyze_video?${qs}`, {
-      method: "POST",
-      headers: { "Content-Type": file.type || "video/mp4" },
-      body: file,
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as { readonly job_id: string; readonly status: string };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60000);
+    try {
+      const res = await fetch(`${this.baseUrl}/api/analyze_video?${qs}`, {
+        method: "POST",
+        headers: { "Content-Type": file.type || "video/mp4" },
+        body: file,
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        this.lastError = `HTTP ${res.status}`;
+        return null;
+      }
+      return (await res.json()) as { readonly job_id: string; readonly status: string };
+    } catch (err) {
+      clearTimeout(timer);
+      this.lastError = err instanceof Error ? err.message : String(err);
+      return null;
+    }
   }
 
   async startBuiltinVideoAnalysis(
@@ -779,29 +802,108 @@ export class StudioBridgeClient {
     sampleFps = 10,
     maxFrames = 60,
   ): Promise<{ readonly job_id: string; readonly status: string } | null> {
+    this.lastError = null;
     if (this.isNativeTauriIpc()) {
       this.lastError =
         "Standalone .exe runs built-in flight sequences natively via native_video_sequence_tick.";
       return null;
     }
     const qs = `channel=${encodeURIComponent(channel)}&clip=${encodeURIComponent(clip)}&sample_fps=${Math.round(sampleFps)}&max_frames=${Math.round(maxFrames)}`;
-    const res = await fetch(`${this.baseUrl}/api/analyze_builtin_video?${qs}`, {
-      method: "POST",
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as { readonly job_id: string; readonly status: string };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    try {
+      const res = await fetch(`${this.baseUrl}/api/analyze_builtin_video?${qs}`, {
+        method: "POST",
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        this.lastError = `HTTP ${res.status}`;
+        return null;
+      }
+      return (await res.json()) as { readonly job_id: string; readonly status: string };
+    } catch (err) {
+      clearTimeout(timer);
+      this.lastError = err instanceof Error ? err.message : String(err);
+      return null;
+    }
   }
 
   async pollVideoJob(jobId: string): Promise<VideoJobStatus | null> {
     if (this.isNativeTauriIpc()) return null;
-    const res = await fetch(`${this.baseUrl}/api/video_job/${encodeURIComponent(jobId)}`);
-    if (!res.ok) return null;
-    return (await res.json()) as VideoJobStatus;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(`${this.baseUrl}/api/video_job/${encodeURIComponent(jobId)}`, {
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) return null;
+      return (await res.json()) as VideoJobStatus;
+    } catch {
+      clearTimeout(timer);
+      return null;
+    }
   }
+}
+
+interface FallbackGradientCache {
+  readonly w: number;
+  readonly h: number;
+  readonly d2Sky: CanvasGradient;
+  readonly lwir: CanvasGradient;
+}
+
+const fallbackGradientMap = new WeakMap<CanvasRenderingContext2D, FallbackGradientCache>();
+
+function getFallbackGradients(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+): FallbackGradientCache {
+  const cached = fallbackGradientMap.get(ctx);
+  if (cached && cached.w === w && cached.h === h) {
+    return cached;
+  }
+  const d2Sky = ctx.createLinearGradient(0, 0, 0, h);
+  d2Sky.addColorStop(0, "#071326");
+  d2Sky.addColorStop(0.62, "#133154");
+  d2Sky.addColorStop(0.75, "#3a4f6b");
+  d2Sky.addColorStop(1, "#0a111c");
+
+  const splitX = Math.floor(w * 0.44);
+  const lwir = ctx.createLinearGradient(splitX, 0, w, h);
+  lwir.addColorStop(0, "#120726");
+  lwir.addColorStop(0.55, "#4c1d95");
+  lwir.addColorStop(1, "#f59e0b");
+
+  const next: FallbackGradientCache = { w, h, d2Sky, lwir };
+  fallbackGradientMap.set(ctx, next);
+  return next;
+}
+
+/** Formats crisp HTML/CSS overlay telemetry captions for the 4 fallback sensor cards (never cropped). */
+export function formatFallbackChannelCaption(
+  channel: SensorChannelId,
+  snap: StudioSimSnapshot,
+): string {
+  if (channel === "d2") {
+    return `CBDR-1 ${Math.round(snap.activeRange.rHatM)}m ±${Math.round(snap.activeRange.sigmaRM)}m`;
+  }
+  if (channel === "land") {
+    return "28L 12-KPT · SimCC 3.41px · HMI 0";
+  }
+  if (channel === "thermal") {
+    return `EO | LWIR · EASA 5/5 · V=${snap.thermalVacuity.toFixed(2)}`;
+  }
+  return snap.spoofAlarm
+    ? "SPOOF ISOLATED · 8-ARM CUSUM · R@5 96.7%"
+    : "MNV4 · KSFO R@1 91.4% · 13.1ms P50";
 }
 
 /**
  * Renders crisp live avionics synthetic sensor thumbnails when native/dev AI backend is offline.
+ * Telemetry text is rendered in HTML `.studio-channel-caption` so zero pixels are ever cropped.
  */
 export function renderFallbackSensorCanvas(
   canvas: HTMLCanvasElement,
@@ -813,121 +915,91 @@ export function renderFallbackSensorCanvas(
   const w = canvas.width;
   const h = canvas.height;
   const t = snap.simTimeS;
+  const grads = getFallbackGradients(ctx, w, h);
 
   ctx.clearRect(0, 0, w, h);
 
   if (channel === "d2") {
-    const sky = ctx.createLinearGradient(0, 0, 0, h);
-    sky.addColorStop(0, "#071326");
-    sky.addColorStop(0.62, "#133154");
-    sky.addColorStop(0.75, "#3a4f6b");
-    sky.addColorStop(1, "#0a111c");
-    ctx.fillStyle = sky;
+    ctx.fillStyle = grads.d2Sky;
     ctx.fillRect(0, 0, w, h);
 
     ctx.strokeStyle = "rgba(56, 189, 248, 0.35)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, h * 0.72);
-    ctx.lineTo(w, h * 0.72);
+    ctx.moveTo(0, h * 0.74);
+    ctx.lineTo(w, h * 0.74);
     ctx.stroke();
 
-    const tx = w * (0.5 + 0.14 * Math.sin(t * 0.8));
-    const ty = h * (0.44 + 0.04 * Math.cos(t * 1.1));
+    const tx = w * (0.52 + 0.14 * Math.sin(t * 0.8));
+    const ty = h * (0.56 + 0.04 * Math.cos(t * 1.1));
     ctx.fillStyle = "#e2e8f0";
     ctx.fillRect(tx - 5, ty - 2, 10, 4);
     ctx.strokeStyle = snap.activeRange.sigmaRM < 100 ? "#34d399" : "#22d3ee";
     ctx.lineWidth = 1.6;
-    ctx.strokeRect(tx - 16, ty - 12, 32, 24);
-    ctx.fillStyle = "#22d3ee";
-    ctx.font = "600 9px monospace";
-    ctx.fillText(
-      `CBDR-1 ${Math.round(snap.activeRange.rHatM)}m ±${Math.round(snap.activeRange.sigmaRM)}m`,
-      8,
-      14,
-    );
+    ctx.strokeRect(tx - 16, ty - 11, 32, 22);
   } else if (channel === "land") {
     ctx.fillStyle = "#080f1d";
     ctx.fillRect(0, 0, w, h);
     ctx.strokeStyle = "rgba(56, 189, 248, 0.2)";
-    for (let i = 1; i < 6; i++) {
+    for (let i = 1; i < 5; i++) {
       ctx.beginPath();
-      ctx.moveTo(0, (h * i) / 6);
-      ctx.lineTo(w, (h * i) / 6);
+      ctx.moveTo(0, (h * i) / 5);
+      ctx.lineTo(w, (h * i) / 5);
       ctx.stroke();
     }
     const cx = w * 0.5 + Math.sin(t * 0.5) * 6;
     ctx.strokeStyle = "#38bdf8";
     ctx.lineWidth = 1.8;
     ctx.beginPath();
-    ctx.moveTo(cx - 12, h * 0.3);
-    ctx.lineTo(cx + 12, h * 0.3);
-    ctx.lineTo(cx + 56, h * 0.92);
-    ctx.lineTo(cx - 56, h * 0.92);
+    ctx.moveTo(cx - 12, h * 0.34);
+    ctx.lineTo(cx + 12, h * 0.34);
+    ctx.lineTo(cx + 54, h * 0.94);
+    ctx.lineTo(cx - 54, h * 0.94);
     ctx.closePath();
     ctx.stroke();
     ctx.fillStyle = "#34d399";
     for (let k = 0; k < 6; k++) {
       const f = k / 5;
-      const y = h * (0.3 + 0.62 * f);
-      const hw = 12 + 44 * f;
+      const y = h * (0.34 + 0.6 * f);
+      const hw = 12 + 42 * f;
       ctx.fillRect(cx - hw - 2, y - 2, 4, 4);
       ctx.fillRect(cx + hw - 2, y - 2, 4, 4);
     }
-    ctx.fillStyle = "#34d399";
-    ctx.font = "600 9px monospace";
-    ctx.fillText("28L 12-KPT · SimCC 3.41px · HMI 0", 8, 14);
   } else if (channel === "thermal") {
     const splitX = Math.floor(w * 0.44);
     ctx.fillStyle = snap.weather.visibilityKm < 4.0 ? "#94a3b8" : "#1e293b";
     ctx.fillRect(0, 0, splitX, h);
-    const lwir = ctx.createLinearGradient(splitX, 0, w, h);
-    lwir.addColorStop(0, "#120726");
-    lwir.addColorStop(0.55, "#4c1d95");
-    lwir.addColorStop(1, "#f59e0b");
-    ctx.fillStyle = lwir;
+    ctx.fillStyle = grads.lwir;
     ctx.fillRect(splitX, 0, w - splitX, h);
     ctx.strokeStyle = "#fde68a";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(splitX + 26, h * 0.32);
-    ctx.lineTo(splitX + 64, h * 0.9);
-    ctx.moveTo(splitX + 42, h * 0.32);
-    ctx.lineTo(splitX + 94, h * 0.9);
+    ctx.moveTo(splitX + 26, h * 0.34);
+    ctx.lineTo(splitX + 64, h * 0.92);
+    ctx.moveTo(splitX + 42, h * 0.34);
+    ctx.lineTo(splitX + 94, h * 0.92);
     ctx.stroke();
     ctx.strokeStyle = "#a78bfa";
     ctx.beginPath();
     ctx.moveTo(splitX, 0);
     ctx.lineTo(splitX, h);
     ctx.stroke();
-    ctx.fillStyle = "#f8fafc";
-    ctx.font = "600 9px monospace";
-    ctx.fillText(`EO | LWIR · EASA 5/5 · V=${snap.thermalVacuity.toFixed(2)}`, 8, 14);
   } else {
     ctx.fillStyle = "#06101c";
     ctx.fillRect(0, 0, w, h);
     const mid = w * 0.5;
     ctx.strokeStyle = "rgba(148, 163, 184, 0.25)";
-    ctx.strokeRect(4, 20, mid - 8, h - 26);
-    ctx.strokeRect(mid + 4, 20, mid - 8, h - 26);
+    ctx.strokeRect(4, 24, mid - 8, h - 29);
+    ctx.strokeRect(mid + 4, 24, mid - 8, h - 29);
     ctx.strokeStyle = snap.spoofAlarm ? "#f59e0b" : "#34d399";
-    ctx.lineWidth = 1.1;
-    for (let i = 0; i < 6; i++) {
-      const y1 = 30 + i * 14 + Math.sin(t + i) * 2;
-      const y2 = 30 + i * 14 + (snap.spoofAlarm ? 4 : 0);
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < 5; i++) {
+      const y1 = 30 + i * 9 + Math.sin(t + i) * 1.8;
+      const y2 = 30 + i * 9 + (snap.spoofAlarm ? 3 : 0);
       ctx.beginPath();
       ctx.moveTo(18 + (i % 3) * 18, y1);
       ctx.lineTo(mid + 18 + (i % 3) * 18, y2);
       ctx.stroke();
     }
-    ctx.fillStyle = snap.spoofAlarm ? "#fbbf24" : "#34d399";
-    ctx.font = "600 9px monospace";
-    ctx.fillText(
-      snap.spoofAlarm
-        ? "SPOOF ISOLATED · 8-ARM CUSUM · R@5 96.7%"
-        : "MNV4 v5.0 · KSFO R@1 91.4% · 13.1ms P50",
-      8,
-      14,
-    );
   }
 }

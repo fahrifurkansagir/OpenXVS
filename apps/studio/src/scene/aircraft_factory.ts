@@ -59,11 +59,13 @@ export function countMeshTriangles(root: THREE.Object3D): number {
   return tris;
 }
 
-/** Smooth dynamic world-space ribbon trail (wingtip vortex / contrail). */
+/** Smooth dynamic world-space ribbon trail (wingtip vortex / contrail) using zero-alloc ring buffer. */
 export class RibbonTrail {
   readonly mesh: THREE.Mesh;
   private readonly maxPoints: number;
-  private readonly points: THREE.Vector3[] = [];
+  private readonly ringCoords: Float32Array;
+  private head = 0;
+  private count = 0;
   private readonly positions: Float32Array;
   private readonly alphas: Float32Array;
   private readonly halfWidthM: number;
@@ -71,6 +73,7 @@ export class RibbonTrail {
   constructor(maxPoints = 72, halfWidthM = 0.24, colorHex = 0x7dd3fc) {
     this.maxPoints = maxPoints;
     this.halfWidthM = halfWidthM;
+    this.ringCoords = new Float32Array(maxPoints * 3);
     this.positions = new Float32Array(maxPoints * 2 * 3);
     this.alphas = new Float32Array(maxPoints * 2);
 
@@ -119,33 +122,50 @@ export class RibbonTrail {
   }
 
   reset(): void {
-    this.points.length = 0;
+    this.head = 0;
+    this.count = 0;
     this.mesh.geometry.setDrawRange(0, 0);
   }
 
   pushPoint(worldPos: THREE.Vector3, sideDir: THREE.Vector3): void {
-    if (this.points.length > 0 && this.points[0].distanceToSquared(worldPos) > 16000) {
-      // Scenario reset teleport — clear ribbon cleanly so no streak spans the sky
-      this.reset();
+    if (this.count > 0) {
+      const hOff = this.head * 3;
+      const dx = this.ringCoords[hOff] - worldPos.x;
+      const dy = this.ringCoords[hOff + 1] - worldPos.y;
+      const dz = this.ringCoords[hOff + 2] - worldPos.z;
+      if (dx * dx + dy * dy + dz * dz > 16000) {
+        // Scenario reset teleport — clear ribbon cleanly so no streak spans the sky
+        this.reset();
+      }
     }
-    this.points.unshift(worldPos.clone());
-    if (this.points.length > this.maxPoints) {
-      this.points.pop();
+    this.head = (this.head - 1 + this.maxPoints) % this.maxPoints;
+    const hOff = this.head * 3;
+    this.ringCoords[hOff] = worldPos.x;
+    this.ringCoords[hOff + 1] = worldPos.y;
+    this.ringCoords[hOff + 2] = worldPos.z;
+    if (this.count < this.maxPoints) {
+      this.count++;
     }
-    const n = this.points.length;
+    const n = this.count;
     if (n < 2) return;
 
+    const sx = sideDir.x;
+    const sy = sideDir.y;
+    const sz = sideDir.z;
     for (let i = 0; i < n; i++) {
-      const p = this.points[i];
+      const rOff = ((this.head + i) % this.maxPoints) * 3;
+      const px = this.ringCoords[rOff];
+      const py = this.ringCoords[rOff + 1];
+      const pz = this.ringCoords[rOff + 2];
       const frac = 1.0 - i / (n - 1);
       const w = this.halfWidthM * (0.28 + 1.35 * (1.0 - frac));
       const idx = i * 6;
-      this.positions[idx + 0] = p.x - sideDir.x * w;
-      this.positions[idx + 1] = p.y - sideDir.y * w;
-      this.positions[idx + 2] = p.z - sideDir.z * w;
-      this.positions[idx + 3] = p.x + sideDir.x * w;
-      this.positions[idx + 4] = p.y + sideDir.y * w;
-      this.positions[idx + 5] = p.z + sideDir.z * w;
+      this.positions[idx + 0] = px - sx * w;
+      this.positions[idx + 1] = py - sy * w;
+      this.positions[idx + 2] = pz - sz * w;
+      this.positions[idx + 3] = px + sx * w;
+      this.positions[idx + 4] = py + sy * w;
+      this.positions[idx + 5] = pz + sz * w;
       this.alphas[i * 2] = frac * frac;
       this.alphas[i * 2 + 1] = frac * frac;
     }

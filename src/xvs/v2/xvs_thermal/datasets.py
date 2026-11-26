@@ -19,6 +19,7 @@ from typing import Any, Literal
 import numpy as np
 from PIL import Image
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from xvs.sensor.lwir import build_lwir_two_channel_input
@@ -126,6 +127,25 @@ class ThermalSample:
     boxes_xyxy: torch.Tensor  # [N, 4] float32 pixel boxes (x1, y1, x2, y2)
 
 
+def _resize_binary_mask_peak_preserving(
+    mask_2d: torch.Tensor,
+    target_hw: tuple[int, int],
+) -> torch.Tensor:
+    """Resize a 2D binary mask while strictly preserving tiny 2-4 px targets via max-pooling."""
+    m = (mask_2d.float() > 0.5).to(dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    th, tw = int(target_hw[0]), int(target_hw[1])
+    nh, nw = int(m.shape[-2]), int(m.shape[-1])
+    if (nh, nw) == (th, tw):
+        return m[0]
+    if nh >= th and nw >= tw:
+        return F.adaptive_max_pool2d(m, output_size=(th, tw))[0]
+    mid_h = max(nh, th)
+    mid_w = max(nw, tw)
+    if (mid_h, mid_w) != (nh, nw):
+        m = F.interpolate(m, size=(mid_h, mid_w), mode="nearest")
+    return F.adaptive_max_pool2d(m, output_size=(th, tw))[0]
+
+
 def _load_grayscale_tensor(path: Path, target_hw: tuple[int, int] | None = None) -> torch.Tensor:
     with Image.open(path) as im:
         arr = np.asarray(im)
@@ -199,8 +219,8 @@ class Irstd1kDataset(Dataset[ThermalSample]):
         if not mask_path.is_file():
             mask_path = self._mask_by_stem[img_path.stem] if img_path.stem in self._mask_by_stem else None
         if mask_path is not None and mask_path.is_file():
-            m_raw = _load_grayscale_tensor(mask_path, target_hw=self.target_hw)
-            mask = (m_raw > 0.5).to(dtype=torch.float32).unsqueeze(0)
+            m_raw = _load_grayscale_tensor(mask_path, target_hw=None)
+            mask = _resize_binary_mask_peak_preserving(m_raw, self.target_hw)
         else:
             mask = torch.zeros((1, self.target_hw[0], self.target_hw[1]), dtype=torch.float32)
 

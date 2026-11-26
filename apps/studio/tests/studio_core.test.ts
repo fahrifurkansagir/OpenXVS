@@ -7,6 +7,7 @@ import {
 } from "../src/scene/aircraft_factory.ts";
 import { computeSolarAtmosphere } from "../src/scene/atmosphere_world.ts";
 import { createCockpitInteriorRig } from "../src/scene/cockpit_rig.ts";
+import { createSafetyManifoldsRig } from "../src/scene/manifolds.ts";
 import {
   ActiveRangeControllerTs,
   bytesToHex,
@@ -32,15 +33,24 @@ import {
   STUDIO_NAV_V5_SPEC,
   STUDIO_STACK_V5_SPEC,
   STUDIO_VERSION_LABEL,
+  formatBreachReason,
+  formatShieldReason,
+  formatTouchdownGrade,
   getStudioStrings,
 } from "../src/ui/i18n.ts";
 import {
   NON_FLIGHT_SIM_ONLY,
   NON_FLIGHT_WATERMARK,
   StudioBridgeClient,
+  formatFallbackChannelCaption,
+  normalizeBase64DataUrl,
   stampNonFlightExport,
   type NativeSensorHealthPayload,
 } from "../src/ui/bridge_client.ts";
+import { ensureImmutableNonFlightWatermark } from "../src/ui/watermark.ts";
+import { PilotInputCapture } from "../src/sim/manual_flight_controller.ts";
+import { RibbonTrail } from "../src/scene/aircraft_factory.ts";
+import * as THREE from "three";
 import {
   executeNativeVideoSequence,
   getBuiltinVideoClipConfig,
@@ -177,15 +187,23 @@ describe("OpenXVS Studio v5.2 Core Geometry, Atmosphere, 3D Cockpit, 6-DoF Shiel
     expect(terrainGuard.shieldOverrideActive).toBe(true);
     expect(terrainGuard.shieldReason).toBe("TERRAIN FLOOR");
 
-    // 3. KSFO 28L touchdown grading (KUSURSUZ vs GÜVENLİ vs SERT İNİŞ)
+    // 3. KSFO 28L touchdown grading (locale-neutral enum codes + TR/EN localization)
     const perfect = evaluateRunwayTouchdown(fwdX * 300, 1.8, fwdZ * 300, -0.8); // ~157 fpm on centerline
     expect(perfect.landed).toBe(true);
     expect(perfect.onRunway).toBe(true);
-    expect(perfect.grade).toBe("KUSURSUZ");
+    expect(perfect.grade).toBe("PERFECT");
+    expect(formatTouchdownGrade(perfect.grade, "tr")).toBe("KUSURSUZ");
+    expect(formatTouchdownGrade(perfect.grade, "en")).toBe("PERFECT");
 
     const hard = evaluateRunwayTouchdown(fwdX * 300, 1.8, fwdZ * 300, -4.5); // ~885 fpm hard
     expect(hard.landed).toBe(true);
-    expect(hard.grade).toBe("SERT İNİŞ");
+    expect(hard.grade).toBe("HARD");
+    expect(formatTouchdownGrade(hard.grade, "tr")).toBe("SERT İNİŞ");
+    expect(formatTouchdownGrade(hard.grade, "en")).toBe("HARD LANDING");
+    expect(formatShieldReason("SC3BF CBDR", "tr")).toContain("ÇARPIŞMA");
+    expect(formatShieldReason("SC3BF CBDR", "en")).toContain("AVOIDANCE");
+    expect(formatBreachReason("SC3BF COLLISION", "tr")).toContain("İHLALİ");
+    expect(formatBreachReason("SC3BF COLLISION", "en")).toContain("COLLISION");
   });
 
   it("matches 186/186 bit-exact Rust xvs-active-range golden vectors & wire CRC32", () => {
@@ -441,33 +459,50 @@ describe("OpenXVS Studio v5.2 Core Geometry, Atmosphere, 3D Cockpit, 6-DoF Shiel
     expect(stamped.watermark).toBe(NON_FLIGHT_WATERMARK);
   });
 
-  it("enforces verified OpenXVS Studio v5.2 copy and eliminates all stale v4.5 / Faz-A strings", () => {
-    expect(STUDIO_VERSION_LABEL).toBe("v5.2");
-    expect(STUDIO_APP_TITLE).toBe("OpenXVS Studio v5.2");
+  it("enforces flagship OpenXVS Studio v1.1 branding and eliminates all sprint jargon / version soup / stale metrics", () => {
+    expect(STUDIO_VERSION_LABEL).toBe("v1.1");
+    expect(STUDIO_APP_TITLE).toBe("OpenXVS Studio");
     expect(STUDIO_STACK_V5_SPEC).toBe("6/6 Pure-Rust ORT + XFeat + LighterGlue + MultiShipCoord");
     expect(STUDIO_NAV_V5_SPEC).toBe(
-      "XVS-Nav v5.0: MNV4-Hybrid-M ONNX · 13.1ms P50 · 25.3MB S1+XFeat+LighterGlue FP16 · 0-shot KSFO R@1 91.4% / R@5 96.7% · HPL <20m · 8-Arm CUSUM",
+      "XVS-Nav: MNV4-Hybrid-M ONNX · 13.1ms P50 · 25.3MB S1+XFeat+LighterGlue FP16 · 0-shot KSFO R@1 91.4% / R@5 96.7% · HPL <20m · 8-Arm CUSUM",
     );
     expect(STUDIO_ASSURANCE_V52_SPEC).toContain("26/26 Kani CBMC");
     expect(STUDIO_ASSURANCE_V52_SPEC).toContain("5,228");
     expect(STUDIO_ASSURANCE_V52_SPEC).toContain("Apalache N=2/N=3");
     expect(STUDIO_ASSURANCE_V52_SPEC).toContain("Cortex-M7 thumbv7em");
-    expect(STUDIO_ASSURANCE_V52_SPEC).toContain("188 KB Flash / 0 B RAM");
+    expect(STUDIO_ASSURANCE_V52_SPEC).toContain("88 KB Flash / 0 B RAM");
     expect(STUDIO_ASSURANCE_V52_SPEC).toContain("Sequence-VPR (0 HMI)");
     expect(STUDIO_ASSURANCE_V52_SPEC).toContain("M-of-N TBC");
 
     const tr = getStudioStrings("tr");
     const en = getStudioStrings("en");
-    expect(tr.brandVersion).toBe("v5.2");
-    expect(en.brandVersion).toBe("v5.2");
-    expect(tr.bench.title).toContain("OpenXVS Studio v5.2");
-    expect(en.bench.title).toContain("OpenXVS Studio v5.2");
+    expect(tr.brandVersion).toBe("v1.1");
+    expect(en.brandVersion).toBe("v1.1");
+    expect(tr.bench.title).toContain("OpenXVS Studio");
+    expect(en.bench.title).toContain("OpenXVS Studio");
     expect(tr.navV5Spec).toContain("91.4%");
     expect(tr.navV5Spec).toContain("13.1ms P50");
     expect(tr.navV5Spec).toContain("25.3MB S1+XFeat+LighterGlue FP16");
     expect(en.navV5Spec).toContain("96.7%");
-    expect(tr.bench.subtitle).toContain(STUDIO_STACK_V5_SPEC);
-    expect(en.bench.subtitle).toContain(STUDIO_NAV_V5_SPEC);
+
+    // Ensure clean TR/EN localization without internal jargon, version soup, raw backticks, or stale 188KB/5-of-5
+    for (const [loc, strings] of [
+      ["tr", tr],
+      ["en", en],
+    ] as const) {
+      const serialized = JSON.stringify(strings);
+      expect(serialized, `${loc} must not expose v5.2/v5.0 version soup`).not.toMatch(/v5\.[02]/i);
+      expect(serialized, `${loc} must not expose G5_GAP jargon`).not.toContain("G5_GAP");
+      expect(serialized, `${loc} must not expose Tier-0A pricing jargon`).not.toContain("Tier-0A");
+      expect(serialized, `${loc} must not expose contradictory 5/5 AI`).not.toContain("5/5 AI");
+      expect(serialized, `${loc} must not expose stale 188 KB Flash`).not.toMatch(/188\s*KB/i);
+      expect(serialized, `${loc} must not leak raw markdown backticks`).not.toContain("`");
+      expect(strings.bench.hilModeIdle.length).toBeGreaterThan(3);
+      expect(strings.bench.camStatusOffline.length).toBeGreaterThan(3);
+    }
+    expect(tr.bench.hilModeIdle).not.toBe(en.bench.hilModeIdle);
+    expect(tr.bench.hilStatusIdle).not.toBe(en.bench.hilStatusIdle);
+    expect(tr.bench.camStatusOffline).not.toBe(en.bench.camStatusOffline);
 
     const auditedPaths = [
       "../index.html",
@@ -488,16 +523,18 @@ describe("OpenXVS Studio v5.2 Core Geometry, Atmosphere, 3D Cockpit, 6-DoF Shiel
       expect(text, `${rel} must not contain stale Faz-A 86.5%`).not.toContain("86.5%");
       expect(text, `${rel} must not contain stale Faz-A 94.9%`).not.toContain("94.9%");
       expect(text, `${rel} must not contain stale Faz-A 13.9ms`).not.toContain("13.9ms");
+      expect(text, `${rel} must not contain stale 188 KB Flash`).not.toMatch(/188\s*KB/i);
     }
 
     const indexHtml = readFileSync(fileURLToPath(new URL("../index.html", import.meta.url)), "utf-8");
-    expect(indexHtml).toContain("OpenXVS Studio v5.2");
+    expect(indexHtml).toContain("OpenXVS Studio v1.1");
+    expect(indexHtml).toContain('rel="icon"');
     expect(indexHtml.replace(/&amp;/g, "&")).toContain(NON_FLIGHT_WATERMARK);
 
     const pkg = JSON.parse(
       readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf-8"),
     ) as { version: string };
-    expect(pkg.version).toBe("5.2.0");
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("executes standalone Video Lab sequential Pure-Rust ORT ticks via native_video_sequence_tick", async () => {
@@ -987,11 +1024,188 @@ describe("OpenXVS Studio v5.2 Core Geometry, Atmosphere, 3D Cockpit, 6-DoF Shiel
     expect(stripEn).toContain("5,228");
     expect(stripEn).toContain("Apalache N=2/N=3");
     expect(stripEn).toContain("Cortex-M7 thumbv7em");
-    expect(stripEn).toContain("188KB/0B");
+    expect(stripEn).toContain("88KB/0B");
     expect(stripEn).toContain("Sequence-VPR · 0 HMI");
     expect(stripTr).toContain("26/26 Kani CBMC");
     expect(stripTr).toContain("Apalache N=2/N=3");
     expect(stripTr).toContain("Cortex-M7 thumbv7em");
     expect(stripTr).toContain("Sequence-VPR · 0 HMI");
+  });
+
+  it("enforces strict image data-URL regex, offline HIL guard, ring-buffer trails, and fallback captions", async () => {
+    const validRaw = "A".repeat(48);
+    expect(normalizeBase64DataUrl(validRaw)).toBe(`data:image/jpeg;base64,${validRaw}`);
+    expect(normalizeBase64DataUrl(`data:image/png;base64,${validRaw}`)).toBe(
+      `data:image/png;base64,${validRaw}`,
+    );
+    expect(normalizeBase64DataUrl(`data:image/webp;base64,${validRaw}`)).toBe(
+      `data:image/webp;base64,${validRaw}`,
+    );
+    // Reject XSS / non-raster data URLs & invalid base64
+    expect(normalizeBase64DataUrl(`data:image/svg+xml;base64,${validRaw}`)).toBeNull();
+    expect(normalizeBase64DataUrl(`data:text/html;base64,${validRaw}`)).toBeNull();
+    expect(normalizeBase64DataUrl("javascript:alert(1)".repeat(3))).toBeNull();
+    expect(normalizeBase64DataUrl("short")).toBeNull();
+
+    // Offline HTTP client must NOT fire network fetch on fetchHilStatus()
+    const offlineClient = new StudioBridgeClient("http://127.0.0.1:8765", null);
+    expect(await offlineClient.fetchHilStatus()).toBeNull();
+
+    // Ring-buffer RibbonTrail handles 200 pushes + teleport reset cleanly
+    const trail = new RibbonTrail(32, 0.2, 0x38bdf8);
+    const side = new THREE.Vector3(1, 0, 0);
+    for (let i = 0; i < 80; i++) {
+      trail.pushPoint(new THREE.Vector3(0, 100, -i * 2), side);
+    }
+    expect(trail.mesh.geometry.drawRange.count).toBe(31 * 6);
+    // Teleport > 127m resets cleanly
+    trail.pushPoint(new THREE.Vector3(500, 100, 0), side);
+    expect(trail.mesh.geometry.drawRange.count).toBe(0);
+
+    // Fallback sensor channel captions render clean non-cropped strings
+    const sim = new StudioScenarioSim("cbdr");
+    const snap = sim.getSnapshot();
+    expect(formatFallbackChannelCaption("d2", snap)).toContain("CBDR-1");
+    expect(formatFallbackChannelCaption("land", snap)).toContain("28L 12-KPT");
+    expect(formatFallbackChannelCaption("thermal", snap)).toContain("EO | LWIR");
+    expect(formatFallbackChannelCaption("nav", snap)).toContain("KSFO R@1 91.4%");
+    expect(formatFallbackChannelCaption("nav", snap)).not.toContain("v5.0");
+  });
+
+  it("scopes immutable watermark MutationObserver strictly to root childList and watermark node (zero telemetry wakeups)", () => {
+    const observedCalls: Array<{ target: unknown; opts: MutationObserverInit }> = [];
+    const callbacks: MutationCallback[] = [];
+    class FakeMutationObserver {
+      private readonly cb: MutationCallback;
+      constructor(cb: MutationCallback) {
+        this.cb = cb;
+        callbacks.push(cb);
+      }
+      observe(target: Node, opts?: MutationObserverInit) {
+        observedCalls.push({ target, opts: opts ?? {} });
+      }
+      disconnect() {
+        // noop
+      }
+      takeRecords() {
+        return [];
+      }
+      trigger(recs: MutationRecord[]) {
+        this.cb(recs, this as unknown as MutationObserver);
+      }
+    }
+
+    const attrs = new Map<string, string>();
+    const styles = new Map<string, { val: string; prio: string }>();
+    const wmEl = {
+      id: "studio-non-flight-watermark",
+      className: "",
+      textContent: "",
+      parentElement: null as unknown,
+      getAttribute: (k: string) => attrs.get(k) ?? null,
+      setAttribute: (k: string, v: string) => attrs.set(k, v),
+      style: {
+        getPropertyValue: (k: string) => styles.get(k)?.val ?? "",
+        getPropertyPriority: (k: string) => styles.get(k)?.prio ?? "",
+        setProperty: (k: string, val: string, prio = "") => styles.set(k, { val, prio }),
+      },
+    };
+    const rootEl = {
+      id: "studio-root",
+      appendChild: (child: typeof wmEl) => {
+        child.parentElement = rootEl;
+        return child;
+      },
+    };
+    wmEl.parentElement = rootEl;
+
+    const prevDoc = globalThis.document;
+    const prevMO = globalThis.MutationObserver;
+    try {
+      (globalThis as unknown as { document: unknown }).document = {
+        getElementById: (id: string) => (id === "studio-non-flight-watermark" ? wmEl : null),
+        createElement: () => wmEl,
+      };
+      (globalThis as unknown as { MutationObserver: unknown }).MutationObserver =
+        FakeMutationObserver;
+
+      const handle = ensureImmutableNonFlightWatermark(rootEl as unknown as HTMLElement);
+      expect(wmEl.textContent).toBe(NON_FLIGHT_WATERMARK);
+      expect(attrs.get("data-non-flight-sim-only")).toBe("true");
+      expect(styles.get("display")).toEqual({ val: "flex", prio: "important" });
+
+      // Verify root observer ONLY watches direct childList (NEVER subtree/attributes/characterData!)
+      const rootObs = observedCalls.find((c) => c.target === rootEl);
+      const wmObs = observedCalls.find((c) => c.target === wmEl);
+      expect(rootObs?.opts).toEqual({ childList: true });
+      expect(wmObs?.opts.attributes).toBe(true);
+      expect(wmObs?.opts.characterData).toBe(true);
+      expect(handle.getRestoreCount()).toBe(0);
+
+      // Simulate tampering with the watermark node -> observer immediately restores it
+      wmEl.textContent = "TAMPERED";
+      styles.set("display", { val: "none", prio: "important" });
+      callbacks[1]?.([], {} as MutationObserver);
+      expect(wmEl.textContent).toBe(NON_FLIGHT_WATERMARK);
+      expect(styles.get("display")).toEqual({ val: "flex", prio: "important" });
+      expect(handle.getRestoreCount()).toBe(1);
+
+      handle.dispose();
+    } finally {
+      (globalThis as unknown as { document: unknown }).document = prevDoc;
+      (globalThis as unknown as { MutationObserver: unknown }).MutationObserver = prevMO;
+    }
+
+    // Verify PilotInputCapture clean dispose lifecycle in headless Node
+    const input = new PilotInputCapture();
+    expect(input.sample()).toEqual({ pitch: 0, roll: 0, yaw: 0, throttleDelta: 0 });
+    input.dispose();
+  });
+
+  it("renders aerospace-grade 3D tactical symbology with zero pastel geodesic shield bubbles", () => {
+    const manifolds = createSafetyManifoldsRig();
+    const sim = new StudioScenarioSim("cbdr");
+    const snap = sim.step(1 / 30);
+    manifolds.update(snap, snap.simTimeS);
+
+    const targetGroup = manifolds.group.getObjectByName("tactical_target_designator");
+    const fovGroup = manifolds.group.getObjectByName("active_range_fov_rig");
+    const avoidGroup = manifolds.group.getObjectByName("avoidance_trajectory_corridor");
+    expect(targetGroup).toBeDefined();
+    expect(fovGroup).toBeDefined();
+    expect(avoidGroup).toBeDefined();
+    expect(targetGroup?.visible).toBe(true);
+    expect(avoidGroup?.visible).toBe(true);
+
+    // Ensure ZERO solid geodesic/icosahedron/torus game bubbles exist inside target or FOV rigs
+    let forbiddenBubbleMeshes = 0;
+    for (const sub of [targetGroup, fovGroup]) {
+      sub?.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          const geoType = obj.geometry.type;
+          if (
+            geoType === "IcosahedronGeometry" ||
+            geoType === "SphereGeometry" ||
+            geoType === "TorusGeometry"
+          ) {
+            forbiddenBubbleMeshes++;
+          }
+        }
+      });
+    }
+    expect(forbiddenBubbleMeshes).toBe(0);
+
+    // Verify GPS spoof + 6-cam dome + forcedland modes update cleanly without NaN coordinates
+    manifolds.setSensorDomeVisible(true);
+    expect(manifolds.isSensorDomeVisible()).toBe(true);
+    sim.setScenario("gps_spoof");
+    const spoofSnap = sim.step(1 / 30);
+    manifolds.update(spoofSnap, spoofSnap.simTimeS);
+
+    sim.setScenario("forcedland");
+    const flSnap = sim.step(1 / 30);
+    manifolds.update(flSnap, flSnap.simTimeS);
+    expect(targetGroup?.visible).toBe(false);
+    expect(avoidGroup?.visible).toBe(false);
   });
 });

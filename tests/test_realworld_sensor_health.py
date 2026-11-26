@@ -424,19 +424,21 @@ def test_studio_inference_engine_wires_sensor_health_non_breaking_and_enforced()
     json.dumps(res_eo, allow_nan=False)
 
     # 2. Cross-view Nav channel emits `sensor_health` + supports Brown-Conrady `camera_intrinsics`
-    intr = PinholeIntrinsics(fx=320.0, fy=320.0, cx=160.0, cy=120.0, k1=-0.12, k2=0.02, p1=0.001, p2=-0.001)
-    res_nav = engine.infer_crossview_nav(
-        eo_frame,
-        ref_bgr=eo_frame,
-        return_jpeg=False,
-        frame_ts_ms=200.0,
-        imu_ts_ms=190.0,
-        camera_intrinsics=intr,
-    )
-    assert "sensor_health" in res_nav
-    assert res_nav["sensor_health"]["camera_rectified"] is True
-    assert res_nav["sensor_health"]["timestamp_valid"] is True
-    json.dumps(res_nav, allow_nan=False)
+    import importlib.util
+    if importlib.util.find_spec("xvs.v2.xvs_nav") is not None:
+        intr = PinholeIntrinsics(fx=320.0, fy=320.0, cx=160.0, cy=120.0, k1=-0.12, k2=0.02, p1=0.001, p2=-0.001)
+        res_nav = engine.infer_crossview_nav(
+            eo_frame,
+            ref_bgr=eo_frame,
+            return_jpeg=False,
+            frame_ts_ms=200.0,
+            imu_ts_ms=190.0,
+            camera_intrinsics=intr,
+        )
+        assert "sensor_health" in res_nav
+        assert res_nav["sensor_health"]["camera_rectified"] is True
+        assert res_nav["sensor_health"]["timestamp_valid"] is True
+        json.dumps(res_nav, allow_nan=False)
 
     # 3. Thermal DVE channel with `enforce_sensor_health_gate=True`: frozen LWIR forces fail-closed!
     iso_sh = engine.new_sensor_health_monitor()
@@ -460,8 +462,9 @@ def test_studio_inference_engine_wires_sensor_health_non_breaking_and_enforced()
     assert last_th["simplex_mode"] in ("LWIR_DEGRADED_EO_PRIMARY", "DUAL_DVE_SVS_FALLBACK")
     json.dumps(last_th, allow_nan=False)
 
-    # 4. analyze_frame_fast forwards `sensor_health` for d2, thermal, nav
-    for ch in ("d2", "thermal", "nav"):
+    # 4. analyze_frame_fast forwards `sensor_health` for d2, thermal (and nav when present)
+    fast_channels = ("d2", "thermal", "nav") if importlib.util.find_spec("xvs.v2.xvs_nav") is not None else ("d2", "thermal")
+    for ch in fast_channels:
         fast_out = engine.analyze_frame_fast(eo_frame, channel=ch, return_jpeg=False)
         assert "sensor_health" in fast_out
         json.dumps(fast_out, allow_nan=False)

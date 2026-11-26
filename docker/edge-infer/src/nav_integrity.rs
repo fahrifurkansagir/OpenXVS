@@ -865,11 +865,10 @@ impl SequenceVprFilter {
 
             // Exact Bayesian Forward sum-product recursion: pred[j] = sum_i alpha[i] * tp[i, j]
             let mut pred = vec![0.0_f64; n];
-            for i in 0..n {
-                let ai = alpha[i];
-                let row_off = i * n;
-                for j in 0..n {
-                    pred[j] += ai * tp[row_off + j];
+            for (i, &ai) in alpha.iter().enumerate() {
+                let row = &tp[i * n..(i + 1) * n];
+                for (p, &t) in pred.iter_mut().zip(row.iter()) {
+                    *p += ai * t;
                 }
             }
             let mut a_sum = 0.0_f64;
@@ -1054,14 +1053,22 @@ fn symmetrize_spd_2x2(m: [[f64; 2]; 2], jitter: f64) -> [[f64; 2]; 2] {
     let a = m[0][0];
     let b = 0.5 * (m[0][1] + m[1][0]);
     let d = m[1][1];
+    let safe_j = if jitter.is_finite() && jitter > 0.0 {
+        jitter
+    } else {
+        1e-9
+    };
+    if !(a.is_finite() && b.is_finite() && d.is_finite()) {
+        return [[safe_j, 0.0], [0.0, safe_j]];
+    }
     if b.abs() <= 1e-15 * (a.abs() + d.abs() + 1.0) {
-        return [[a.max(jitter), 0.0], [0.0, d.max(jitter)]];
+        return [[a.max(safe_j), 0.0], [0.0, d.max(safe_j)]];
     }
     let tr = a + d;
     let diff = a - d;
     let disc = diff.hypot(2.0 * b);
-    let lam1 = (0.5 * (tr + disc)).max(jitter);
-    let lam2 = (0.5 * (tr - disc)).max(jitter);
+    let lam1 = (0.5 * (tr + disc)).max(safe_j);
+    let lam2 = (0.5 * (tr - disc)).max(safe_j);
     let theta = 0.5 * (2.0 * b).atan2(diff);
     let c = theta.cos();
     let s = theta.sin();
@@ -1087,10 +1094,10 @@ fn symmetrize_spd_nxn<const N: usize>(m: [[f64; N]; N], jitter: f64) -> [[f64; N
     for _sweep in 0..64 {
         let mut max_off = 0.0_f64;
         let mut diag_scale = 0.0_f64;
-        for i in 0..N {
-            diag_scale = diag_scale.max(a[i][i].abs());
-            for j in (i + 1)..N {
-                max_off = max_off.max(a[i][j].abs());
+        for (i, row) in a.iter().enumerate() {
+            diag_scale = diag_scale.max(row[i].abs());
+            for &val in row.iter().skip(i + 1) {
+                max_off = max_off.max(val.abs());
             }
         }
         if max_off <= 1e-15 * diag_scale.max(1e-30) {
@@ -1767,52 +1774,62 @@ impl DualBankEsEkfCusum {
         let mut rg_obs = self.r_gnss_obs_default;
         if let Some(yg) = input.gnss_ne_m {
             if yg[0].is_finite() && yg[1].is_finite() {
-                let rg = match input.r_gnss {
-                    None => {
-                        rg_obs = self.r_gnss_obs_default;
-                        self.r_gnss_default
-                    }
+                let rg_pair = match input.r_gnss {
+                    None => Some((self.r_gnss_default, self.r_gnss_obs_default)),
                     Some(raw_rg) => {
-                        let scaled = [
-                            [raw_rg[0][0] * self.r_mult, raw_rg[0][1] * self.r_mult],
-                            [raw_rg[1][0] * self.r_mult, raw_rg[1][1] * self.r_mult],
-                        ];
-                        let ratio = self.cfg.sigma_gnss_obs_white_m
-                            / self.cfg.sigma_gnss_ne_m.max(1e-6);
-                        let r2 = ratio * ratio;
-                        rg_obs = [
-                            [scaled[0][0] * r2, scaled[0][1] * r2],
-                            [scaled[1][0] * r2, scaled[1][1] * r2],
-                        ];
-                        scaled
+                        if raw_rg.iter().flatten().all(|v| v.is_finite()) {
+                            let scaled = [
+                                [raw_rg[0][0] * self.r_mult, raw_rg[0][1] * self.r_mult],
+                                [raw_rg[1][0] * self.r_mult, raw_rg[1][1] * self.r_mult],
+                            ];
+                            let ratio = self.cfg.sigma_gnss_obs_white_m
+                                / self.cfg.sigma_gnss_ne_m.max(1e-6);
+                            let r2 = ratio * ratio;
+                            let obs = [
+                                [scaled[0][0] * r2, scaled[0][1] * r2],
+                                [scaled[1][0] * r2, scaled[1][1] * r2],
+                            ];
+                            if scaled.iter().flatten().all(|v| v.is_finite())
+                                && obs.iter().flatten().all(|v| v.is_finite())
+                            {
+                                Some((scaled, obs))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     }
                 };
-                let hp_a = matmul(&self.h_mat, &self.p_a);
-                let s_a = symmetrize_spd_2x2(
-                    matadd(&matmul_t(&hp_a, &self.h_mat), &rg),
-                    1e-9,
-                );
-                let p_ht = matmul_t(&self.p_a, &self.h_mat);
-                k_a = matmul(&p_ht, &inv_2x2(s_a));
-                let kh = matmul(&k_a, &self.h_mat);
-                for r in 0..4 {
-                    for c in 0..4 {
-                        i_a[r][c] = self.i4[r][c] - kh[r][c];
+                if let Some((rg, obs_mat)) = rg_pair {
+                    rg_obs = obs_mat;
+                    let hp_a = matmul(&self.h_mat, &self.p_a);
+                    let s_a = symmetrize_spd_2x2(
+                        matadd(&matmul_t(&hp_a, &self.h_mat), &rg),
+                        1e-9,
+                    );
+                    let p_ht = matmul_t(&self.p_a, &self.h_mat);
+                    k_a = matmul(&p_ht, &inv_2x2(s_a));
+                    let kh = matmul(&k_a, &self.h_mat);
+                    for r in 0..4 {
+                        for c in 0..4 {
+                            i_a[r][c] = self.i4[r][c] - kh[r][c];
+                        }
                     }
+                    let hx_a = matvec(&self.h_mat, &self.x_a);
+                    let innov_g = [yg[0] - hx_a[0], yg[1] - hx_a[1]];
+                    let dx_a = matvec(&k_a, &innov_g);
+                    for r in 0..4 {
+                        self.x_a[r] += dx_a[r];
+                    }
+                    let ia_pa = matmul(&i_a, &self.p_a);
+                    let ia_pa_iat = matmul_t(&ia_pa, &i_a);
+                    let ka_rg = matmul(&k_a, &rg);
+                    let ka_rg_kat = matmul_t(&ka_rg, &k_a);
+                    self.p_a = symmetrize_spd_nxn(matadd(&ia_pa_iat, &ka_rg_kat), 1e-9);
+                    self.p_ab = matmul(&i_a, &self.p_ab);
+                    gnss_used = true;
                 }
-                let hx_a = matvec(&self.h_mat, &self.x_a);
-                let innov_g = [yg[0] - hx_a[0], yg[1] - hx_a[1]];
-                let dx_a = matvec(&k_a, &innov_g);
-                for r in 0..4 {
-                    self.x_a[r] += dx_a[r];
-                }
-                let ia_pa = matmul(&i_a, &self.p_a);
-                let ia_pa_iat = matmul_t(&ia_pa, &i_a);
-                let ka_rg = matmul(&k_a, &rg);
-                let ka_rg_kat = matmul_t(&ka_rg, &k_a);
-                self.p_a = symmetrize_spd_nxn(matadd(&ia_pa_iat, &ka_rg_kat), 1e-9);
-                self.p_ab = matmul(&i_a, &self.p_ab);
-                gnss_used = true;
             }
         }
 
@@ -1825,55 +1842,65 @@ impl DualBankEsEkfCusum {
         if input.vis_gate_admitted {
             if let Some(yv) = input.vis_ne_m {
                 if yv[0].is_finite() && yv[1].is_finite() {
-                    let rv = match input.r_vis {
-                        None => {
-                            rv_obs = self.r_vis_obs_default;
-                            self.r_vis_default
-                        }
+                    let rv_pair = match input.r_vis {
+                        None => Some((self.r_vis_default, self.r_vis_obs_default)),
                         Some(raw_rv) => {
-                            let scaled = [
-                                [raw_rv[0][0] * self.r_mult, raw_rv[0][1] * self.r_mult],
-                                [raw_rv[1][0] * self.r_mult, raw_rv[1][1] * self.r_mult],
-                            ];
-                            let ratio = self.cfg.sigma_vis_obs_white_m
-                                / self.cfg.sigma_vis_ne_m.max(1e-6);
-                            let r2 = ratio * ratio;
-                            rv_obs = [
-                                [scaled[0][0] * r2, scaled[0][1] * r2],
-                                [scaled[1][0] * r2, scaled[1][1] * r2],
-                            ];
-                            scaled
-                        }
-                    };
-                    let hp_b = matmul(&self.h_mat, &self.p_b);
-                    let s_b = symmetrize_spd_2x2(
-                        matadd(&matmul_t(&hp_b, &self.h_mat), &rv),
-                        1e-9,
-                    );
-                    let hx_b = matvec(&self.h_mat, &self.x_b);
-                    let innov_v = [yv[0] - hx_b[0], yv[1] - hx_b[1]];
-                    let sol_v = solve_2x2(s_b, innov_v);
-                    q_vis = innov_v[0] * sol_v[0] + innov_v[1] * sol_v[1];
-                    if q_vis.is_finite() && q_vis <= self.cfg.max_q_vis {
-                        let p_ht = matmul_t(&self.p_b, &self.h_mat);
-                        k_b = matmul(&p_ht, &inv_2x2(s_b));
-                        let kh = matmul(&k_b, &self.h_mat);
-                        for r in 0..4 {
-                            for c in 0..4 {
-                                i_b[r][c] = self.i4[r][c] - kh[r][c];
+                            if raw_rv.iter().flatten().all(|v| v.is_finite()) {
+                                let scaled = [
+                                    [raw_rv[0][0] * self.r_mult, raw_rv[0][1] * self.r_mult],
+                                    [raw_rv[1][0] * self.r_mult, raw_rv[1][1] * self.r_mult],
+                                ];
+                                let ratio = self.cfg.sigma_vis_obs_white_m
+                                    / self.cfg.sigma_vis_ne_m.max(1e-6);
+                                let r2 = ratio * ratio;
+                                let obs = [
+                                    [scaled[0][0] * r2, scaled[0][1] * r2],
+                                    [scaled[1][0] * r2, scaled[1][1] * r2],
+                                ];
+                                if scaled.iter().flatten().all(|v| v.is_finite())
+                                    && obs.iter().flatten().all(|v| v.is_finite())
+                                {
+                                    Some((scaled, obs))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
                             }
                         }
-                        let dx_b = matvec(&k_b, &innov_v);
-                        for r in 0..4 {
-                            self.x_b[r] += dx_b[r];
+                    };
+                    if let Some((rv, obs_mat)) = rv_pair {
+                        rv_obs = obs_mat;
+                        let hp_b = matmul(&self.h_mat, &self.p_b);
+                        let s_b = symmetrize_spd_2x2(
+                            matadd(&matmul_t(&hp_b, &self.h_mat), &rv),
+                            1e-9,
+                        );
+                        let hx_b = matvec(&self.h_mat, &self.x_b);
+                        let innov_v = [yv[0] - hx_b[0], yv[1] - hx_b[1]];
+                        let sol_v = solve_2x2(s_b, innov_v);
+                        q_vis = innov_v[0] * sol_v[0] + innov_v[1] * sol_v[1];
+                        if q_vis.is_finite() && q_vis <= self.cfg.max_q_vis {
+                            let p_ht = matmul_t(&self.p_b, &self.h_mat);
+                            k_b = matmul(&p_ht, &inv_2x2(s_b));
+                            let kh = matmul(&k_b, &self.h_mat);
+                            for r in 0..4 {
+                                for c in 0..4 {
+                                    i_b[r][c] = self.i4[r][c] - kh[r][c];
+                                }
+                            }
+                            let dx_b = matvec(&k_b, &innov_v);
+                            for r in 0..4 {
+                                self.x_b[r] += dx_b[r];
+                            }
+                            let ib_pb = matmul(&i_b, &self.p_b);
+                            let ib_pb_ibt = matmul_t(&ib_pb, &i_b);
+                            let kb_rv = matmul(&k_b, &rv);
+                            let kb_rv_kbt = matmul_t(&kb_rv, &k_b);
+                            self.p_b = symmetrize_spd_nxn(matadd(&ib_pb_ibt, &kb_rv_kbt), 1e-9);
+                            self.p_ab = matmul_t(&self.p_ab, &i_b);
+                            vis_used = true;
                         }
-                        let ib_pb = matmul(&i_b, &self.p_b);
-                        let ib_pb_ibt = matmul_t(&ib_pb, &i_b);
-                        let kb_rv = matmul(&k_b, &rv);
-                        let kb_rv_kbt = matmul_t(&kb_rv, &k_b);
-                        self.p_b = symmetrize_spd_nxn(matadd(&ib_pb_ibt, &kb_rv_kbt), 1e-9);
-                        self.p_ab = matmul_t(&self.p_ab, &i_b);
-                        vis_used = true;
                     }
                 }
             }
@@ -2179,9 +2206,9 @@ mod tests {
     #[test]
     fn test_jacobi_symmetrize_spd_reconstruction_and_floor() {
         let mut m = [[0.0_f64; 4]; 4];
-        for i in 0..4 {
-            for j in 0..4 {
-                m[i][j] = if i == j {
+        for (i, row) in m.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell = if i == j {
                     5.0 + (i as f64)
                 } else {
                     0.35 / ((i.abs_diff(j) + 1) as f64)
@@ -2189,13 +2216,11 @@ mod tests {
             }
         }
         let spd = symmetrize_spd_nxn(m, 1e-9);
-        for i in 0..4 {
-            for j in 0..4 {
+        for (i, (spd_row, m_row)) in spd.iter().zip(m.iter()).enumerate() {
+            for (j, (&s_val, &m_val)) in spd_row.iter().zip(m_row.iter()).enumerate() {
                 assert!(
-                    (spd[i][j] - m[i][j]).abs() < 1e-12,
-                    "Jacobi SPD reconstruction error at ({i},{j}): {} vs {}",
-                    spd[i][j],
-                    m[i][j]
+                    (s_val - m_val).abs() < 1e-12,
+                    "Jacobi SPD reconstruction error at ({i},{j}): {s_val} vs {m_val}"
                 );
             }
         }
@@ -2239,13 +2264,13 @@ mod tests {
             coords[path[7]][1] - coords[path[6]][1],
         ];
         // Blind all-zero fails closed without polluting window
-        let dec_zero = flt.step(&vec![0.0; 16], delta_next, 20.0, None, None);
+        let dec_zero = flt.step(&[0.0; 16], delta_next, 20.0, None, None);
         assert!(!dec_zero.admitted && dec_zero.final_top1_idx == -1 && dec_zero.window_len == 7);
         assert!(dec_zero.reason_codes.iter().any(|r| r == "LOW_SIMILARITY_SIGNAL"));
         assert!(dec_zero.reason_codes.iter().any(|r| r == "FLAT_SIMILARITY_VECTOR"));
 
         // Constant 0.50 fails closed
-        let dec_flat = flt.step(&vec![0.50; 16], delta_next, 20.0, None, None);
+        let dec_flat = flt.step(&[0.50; 16], delta_next, 20.0, None, None);
         assert!(!dec_flat.admitted && dec_flat.window_len == 7);
         assert!(dec_flat.reason_codes.iter().any(|r| r == "FLAT_SIMILARITY_VECTOR"));
 
@@ -2315,5 +2340,34 @@ mod tests {
             ..DualBankStepInput::default()
         });
         assert!(out_nan.vertical_spoof_alarm && out_nan.spoof_alarm && out_nan.gnss_quarantined);
+    }
+
+    #[test]
+    fn test_dual_bank_cusum_nonfinite_r_gnss_and_r_vis_fail_safe() {
+        let mut flt = DualBankEsEkfCusum::new(DualBankConfig::default()).expect("valid cusum");
+        // Non-finite measurement covariances must NEVER poison Bank-A/Bank-B state or covariances
+        let out1 = flt.step(&DualBankStepInput {
+            gnss_ne_m: Some([10.0, -5.0]),
+            vis_ne_m: Some([10.0, -5.0]),
+            vis_gate_admitted: true,
+            r_gnss: Some([[f64::NAN, 0.0], [0.0, 4.0]]),
+            r_vis: Some([[f64::INFINITY, 0.0], [0.0, 9.0]]),
+            ..DualBankStepInput::default()
+        });
+        assert!(out1.bank_a_p_ne_m.iter().all(|v| v.is_finite()));
+        assert!(out1.bank_b_p_ne_m.iter().all(|v| v.is_finite()));
+        assert!(out1.p_diff_ne.iter().flatten().all(|v| v.is_finite()));
+        assert!(out1.max_cusum_stat.is_finite());
+
+        // Subsequent nominal step remains finite and tracks cleanly
+        let out2 = flt.step(&DualBankStepInput {
+            gnss_ne_m: Some([12.0, -4.0]),
+            vis_ne_m: Some([12.0, -4.0]),
+            vis_gate_admitted: true,
+            ..DualBankStepInput::default()
+        });
+        assert!(out2.bank_a_p_ne_m.iter().all(|v| v.is_finite()));
+        assert!(out2.bank_b_p_ne_m.iter().all(|v| v.is_finite()));
+        assert!(out2.p_diff_ne.iter().flatten().all(|v| v.is_finite()));
     }
 }

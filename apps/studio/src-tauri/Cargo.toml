@@ -2,8 +2,8 @@
 
 [package]
 name = "openxvs-studio"
-version = "5.0.0"
-description = "OpenXVS Studio v5.0 — Real-World Autonomy Simulator & AI Proof Bench (Tauri v2, Pure-Rust ORT, MultiShipCoord, NON_FLIGHT_SIM_ONLY)"
+version = "1.1.1"
+description = "OpenXVS Studio — Real-World Autonomy Simulator & AI Proof Bench (Tauri v2, Pure-Rust ORT, MultiShipCoord, NON_FLIGHT_SIM_ONLY)"
 authors = ["OpenXVS Contributors"]
 license = "Apache-2.0 OR MIT"
 edition = "2021"

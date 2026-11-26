@@ -205,23 +205,54 @@ class _Mp4StreamWriter:
         )
         self.codec_used = "mp4v"
 
+    def _kill_proc(self) -> None:
+        if self._proc is not None:
+            try:
+                if self._proc.stdin is not None:
+                    try:
+                        self._proc.stdin.close()
+                    except Exception:
+                        pass
+                self._proc.kill()
+                self._proc.wait(timeout=5.0)
+            except Exception:
+                pass
+            finally:
+                self._proc = None
+
     def write(self, frame_bgr: np.ndarray) -> None:
         if frame_bgr.shape[1] != self.width or frame_bgr.shape[0] != self.height:
             frame_bgr = cv2.resize(frame_bgr, (self.width, self.height), interpolation=cv2.INTER_AREA)
         if self._proc is not None and self._proc.stdin is not None:
-            self._proc.stdin.write(np.ascontiguousarray(frame_bgr).tobytes())
+            try:
+                self._proc.stdin.write(np.ascontiguousarray(frame_bgr).tobytes())
+            except (BrokenPipeError, OSError) as exc:
+                self._kill_proc()
+                raise RuntimeError(f"ffmpeg pipe write failed: {exc}") from exc
         elif self._cv_writer is not None:
             self._cv_writer.write(frame_bgr)
 
     def close(self) -> None:
         if self._proc is not None:
+            proc = self._proc
             try:
-                if self._proc.stdin is not None:
-                    self._proc.stdin.close()
-                _, stderr_bytes = self._proc.communicate(timeout=30.0)
-                if self._proc.returncode != 0:
+                if proc.stdin is not None:
+                    try:
+                        proc.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+                try:
+                    _, stderr_bytes = proc.communicate(timeout=30.0)
+                except subprocess.TimeoutExpired as exc:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5.0)
+                    except Exception:
+                        pass
+                    raise RuntimeError("ffmpeg timed out during finalize and was killed") from exc
+                if proc.returncode != 0:
                     err = stderr_bytes.decode("utf-8", errors="replace").strip()
-                    raise RuntimeError(f"ffmpeg exited with code {self._proc.returncode}: {err}")
+                    raise RuntimeError(f"ffmpeg exited with code {proc.returncode}: {err}")
             finally:
                 self._proc = None
         if self._cv_writer is not None:
@@ -249,9 +280,18 @@ class VideoJobManager:
             self._owns_root = False
         self._max_retained = max(2, int(max_retained_jobs))
         self._lock = threading.Lock()
+        self._builtin_cache_lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._workers: dict[str, threading.Thread] = {}
 
     def shutdown(self) -> None:
+        self._stop_event.set()
+        with self._lock:
+            threads = list(self._workers.values())
+        for th in threads:
+            if th.is_alive():
+                th.join(timeout=5.0)
         if self._owns_root and self._work_root.exists():
             shutil.rmtree(self._work_root, ignore_errors=True)
 
@@ -286,24 +326,31 @@ class VideoJobManager:
         cache_dir = (self._work_root / "_builtin_cache").resolve()
         cache_dir.mkdir(parents=True, exist_ok=True)
         cached_mp4 = cache_dir / f"{clip_name}.mp4"
-        if cached_mp4.is_file() and cached_mp4.stat().st_size > 1000:
-            return cached_mp4
+        with self._builtin_cache_lock:
+            if cached_mp4.is_file() and cached_mp4.stat().st_size > 1000:
+                return cached_mp4
 
-        first = cv2.imread(str(src_frames[0]), cv2.IMREAD_COLOR)
-        if first is None:
-            raise RuntimeError(f"Failed to read built-in raw frame {src_frames[0]}")
-        ow, oh = _clamp_even_dims(first.shape[1], first.shape[0], max_w=max_w, max_h=max_h)
-        tmp_mp4 = cache_dir / f"{clip_name}_{secrets.token_hex(4)}.mp4"
-        writer = _Mp4StreamWriter(tmp_mp4, ow, oh, fps=fps)
-        try:
-            for p in src_frames:
-                img = cv2.imread(str(p), cv2.IMREAD_COLOR)
-                if img is not None:
-                    writer.write(img)
-        finally:
+            first = cv2.imread(str(src_frames[0]), cv2.IMREAD_COLOR)
+            if first is None:
+                raise RuntimeError(f"Failed to read built-in raw frame {src_frames[0]}")
+            ow, oh = _clamp_even_dims(first.shape[1], first.shape[0], max_w=max_w, max_h=max_h)
+            tmp_mp4 = cache_dir / f"{clip_name}_{secrets.token_hex(6)}.mp4"
+            writer = _Mp4StreamWriter(tmp_mp4, ow, oh, fps=fps)
+            try:
+                for p in src_frames:
+                    img = cv2.imread(str(p), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        writer.write(img)
+            except Exception:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                tmp_mp4.unlink(missing_ok=True)
+                raise
             writer.close()
-        tmp_mp4.replace(cached_mp4)
-        return cached_mp4
+            tmp_mp4.replace(cached_mp4)
+            return cached_mp4
 
     def _materialize_builtin_clip(self, clip: str) -> Path:
         """Assemble and cache a clean RAW (zero-prebaked-overlay) real airborne clip."""
@@ -365,7 +412,7 @@ class VideoJobManager:
         job_id = secrets.token_hex(6)  # exact 12-char lowercase hex
         job_dir = (self._work_root / job_id).resolve()
         job_dir.mkdir(parents=True, exist_ok=True)
-        out_mp4 = job_dir / "annotated.mp4"
+        out_mp4 = job_dir / f"annotated_{job_id}.mp4"
 
         record: dict[str, Any] = {
             "job_id": job_id,
@@ -382,15 +429,16 @@ class VideoJobManager:
             "summary": None,
             "_out_mp4": str(out_mp4),
         }
-        with self._lock:
-            self._jobs[job_id] = record
-            self._evict_if_needed_locked()
-
         worker = threading.Thread(
             target=self._run_job,
             args=(job_id, input_path, out_mp4, channel, sample_fps, max_frames),
             daemon=True,
         )
+        with self._lock:
+            self._jobs[job_id] = record
+            self._workers[job_id] = worker
+            self._evict_if_needed_locked()
+
         worker.start()
 
         resp: dict[str, Any] = {
@@ -401,6 +449,38 @@ class VideoJobManager:
         if clip_label is not None:
             resp["clip"] = clip_label
         return resp
+
+    def allocate_upload_path(self) -> Path:
+        """Allocate a unique per-upload staging path for chunked streaming writes."""
+        staging_dir = self._work_root / f"in_{secrets.token_hex(6)}"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        return staging_dir / "input_video.mp4"
+
+    def start_upload_file_job(
+        self,
+        input_path: Path,
+        *,
+        channel: str = "d2",
+        sample_fps: int = 10,
+        max_frames: int = 120,
+    ) -> dict[str, Any]:
+        """Validate a streamed uploaded video file on disk (<= 150 MiB) and enqueue background job."""
+        p = Path(input_path)
+        if not p.is_file():
+            raise ValueError("Uploaded video file missing")
+        sz = int(p.stat().st_size)
+        if sz <= 0:
+            raise ValueError("Empty video payload")
+        if sz > MAX_VIDEO_UPLOAD_BYTES:
+            raise ValueError(f"Video payload exceeds {MAX_VIDEO_UPLOAD_BYTES} bytes (150 MiB) limit")
+        ch, sfps, mframes = self._validate_params(channel, sample_fps, max_frames)
+        return self._spawn_job(
+            input_path=p,
+            channel=ch,
+            sample_fps=sfps,
+            max_frames=mframes,
+            clip_label=None,
+        )
 
     def start_upload_job(
         self,
@@ -418,9 +498,7 @@ class VideoJobManager:
         ch, sfps, mframes = self._validate_params(channel, sample_fps, max_frames)
 
         # Save raw bytes to job-scoped temp file before spawning worker
-        staging_dir = self._work_root / f"in_{secrets.token_hex(6)}"
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        in_path = staging_dir / "input_video.mp4"
+        in_path = self.allocate_upload_path()
         in_path.write_bytes(video_bytes)
         return self._spawn_job(
             input_path=in_path,
@@ -496,7 +574,7 @@ class VideoJobManager:
             max_conf = 0.0
             raw_idx = 0
 
-            while frames_processed < max_frames:
+            while frames_processed < max_frames and not self._stop_event.is_set():
                 ok, frame_bgr = cap.read()
                 if not ok or frame_bgr is None:
                     break
@@ -604,6 +682,8 @@ class VideoJobManager:
                     rec["error"] = f"{type(exc).__name__}: {exc}"
         finally:
             cap.release()
+            with self._lock:
+                self._workers.pop(job_id, None)
             # Clean up per-upload staging dir ONLY (preserve cached _builtin_cache & shared files)
             try:
                 if (

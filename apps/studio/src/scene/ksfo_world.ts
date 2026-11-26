@@ -411,12 +411,13 @@ function createSfBayWaterMesh(): { readonly mesh: THREE.Mesh; readonly mat: THRE
   return { mesh, mat };
 }
 
-/** Builds the real 3D KSFO Airport Complex (runways, ALSF-2 strobes, PAPI, ATC Tower, Terminals, Hangars, Beacon). */
+/** Builds the real 3D KSFO Airport Complex (runways, instanced ALSF-2 strobes, PAPI, ATC Tower, Terminals, Jetbridges, Hangars). */
 function buildKsfoAirportComplex(): {
   readonly group: THREE.Group;
   readonly radarBar: THREE.Object3D;
   readonly airportBeaconRig: THREE.Object3D;
-  readonly alsfMatArray: THREE.MeshStandardMaterial[];
+  readonly alsfStrobeInst: THREE.InstancedMesh;
+  readonly alsfStrobeCount: number;
   readonly towerBeaconMat: THREE.MeshStandardMaterial;
 } {
   const group = new THREE.Group();
@@ -525,77 +526,100 @@ function buildKsfoAirportComplex(): {
   });
   group.add(edgeInst);
 
-  // Green threshold light bar on 28L
+  // Green threshold light bar on 28L (InstancedMesh -> 1 draw call)
   const greenThrMat = new THREE.MeshStandardMaterial({
     color: 0x34d399,
     emissive: 0x10b981,
     emissiveIntensity: 3.4,
     toneMapped: false,
   });
-  for (let s = -28; s <= 28; s += 8) {
-    const bulb = new THREE.Mesh(edgeBulbGeo, greenThrMat);
-    bulb.position.set(rightX * s, 1.2, rightZ * s);
-    group.add(bulb);
+  const greenThrInst = new THREE.InstancedMesh(edgeBulbGeo, greenThrMat, 8);
+  for (let idx = 0; idx < 8; idx++) {
+    const s = -28 + idx * 8;
+    dummy.position.set(rightX * s, 1.2, rightZ * s);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    greenThrInst.setMatrixAt(idx, dummy.matrix);
   }
+  greenThrInst.instanceMatrix.needsUpdate = true;
+  group.add(greenThrInst);
 
-  // Animated Blooming ALSF-2 Approach Lighting System ("The Rabbit") over SF Bay!
-  const alsfMatArray: THREE.MeshStandardMaterial[] = [];
+  // Animated Blooming ALSF-2 Approach Lighting System ("The Rabbit") over SF Bay (3 InstancedMeshes instead of 54 meshes!)
+  const alsfStrobeCount = 18;
   const pilingMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.7, metalness: 0.4 });
+  const alsfPylonGeo = new THREE.BoxGeometry(1.8, 4.8, 1.8);
   const alsfBarGeo = new THREE.BoxGeometry(16, 1.3, 1.6);
   const alsfStrobeGeo = new THREE.SphereGeometry(1.6, 10, 8);
-  for (let i = 0; i < 18; i++) {
+
+  const alsfPylonInst = new THREE.InstancedMesh(alsfPylonGeo, pilingMat, alsfStrobeCount);
+  const alsfBarMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
+  const alsfBarInst = new THREE.InstancedMesh(alsfBarGeo, alsfBarMat, alsfStrobeCount);
+  const alsfStrobeMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
+  const alsfStrobeInst = new THREE.InstancedMesh(alsfStrobeGeo, alsfStrobeMat, alsfStrobeCount);
+
+  const barRedHdr = new THREE.Color(2.4, 0.55, 0.55);
+  const barWarmHdr = new THREE.Color(2.1, 1.95, 1.45);
+  const strobeBaseHdr = new THREE.Color(0.9, 1.15, 1.35);
+
+  for (let i = 0; i < alsfStrobeCount; i++) {
     const distBack = 55 + i * 48;
     const bx = -fwdX * distBack;
     const bz = -fwdZ * distBack;
 
     // Pier support pylon over SF Bay water
-    const pylon = new THREE.Mesh(new THREE.BoxGeometry(1.8, 4.8, 1.8), pilingMat);
-    pylon.position.set(bx, -1.6, bz);
-    group.add(pylon);
+    dummy.position.set(bx, -1.6, bz);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    alsfPylonInst.setMatrixAt(i, dummy.matrix);
 
-    // Crossbar steady glow
-    const barMat = new THREE.MeshStandardMaterial({
-      color: i === 6 ? 0xf87171 : 0xfef3c7,
-      emissive: i === 6 ? 0xef4444 : 0xfde68a,
-      emissiveIntensity: 2.0,
-      toneMapped: false,
-    });
-    const bar = new THREE.Mesh(alsfBarGeo, barMat);
-    bar.position.set(bx, 0.85, bz);
-    bar.rotation.y = -RWY_28_HDG_RAD;
-    if (i === 6) bar.scale.x = 2.4; // 1000-ft red decision bar
-    group.add(bar);
+    // Crossbar steady glow (1000-ft red decision bar at i === 6)
+    dummy.position.set(bx, 0.85, bz);
+    dummy.rotation.set(0, -RWY_28_HDG_RAD, 0);
+    dummy.scale.set(i === 6 ? 2.4 : 1.0, 1.0, 1.0);
+    dummy.updateMatrix();
+    alsfBarInst.setMatrixAt(i, dummy.matrix);
+    alsfBarInst.setColorAt(i, i === 6 ? barRedHdr : barWarmHdr);
 
     // Sequential running white strobe rabbit
-    const sMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      emissive: 0x7dd3fc,
-      emissiveIntensity: 1.0,
-      toneMapped: false,
-    });
-    alsfMatArray.push(sMat);
-    const strobe = new THREE.Mesh(alsfStrobeGeo, sMat);
-    strobe.position.set(bx, 1.6, bz);
-    group.add(strobe);
+    dummy.position.set(bx, 1.6, bz);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    alsfStrobeInst.setMatrixAt(i, dummy.matrix);
+    alsfStrobeInst.setColorAt(i, strobeBaseHdr);
   }
+  alsfPylonInst.instanceMatrix.needsUpdate = true;
+  alsfBarInst.instanceMatrix.needsUpdate = true;
+  if (alsfBarInst.instanceColor) alsfBarInst.instanceColor.needsUpdate = true;
+  alsfStrobeInst.instanceMatrix.needsUpdate = true;
+  if (alsfStrobeInst.instanceColor) alsfStrobeInst.instanceColor.needsUpdate = true;
+  group.add(alsfPylonInst);
+  group.add(alsfBarInst);
+  group.add(alsfStrobeInst);
 
-  // Live 4-Light PAPI on port side of 28L (310 m down runway)
+  // Live 4-Light PAPI on port side of 28L (310 m down runway, 1 InstancedMesh)
+  const papiGeo = new THREE.BoxGeometry(3.4, 1.8, 3.4);
+  const papiMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
+  const papiInst = new THREE.InstancedMesh(papiGeo, papiMat, 4);
+  const papiWhiteHdr = new THREE.Color(3.6, 3.5, 2.8);
+  const papiRedHdr = new THREE.Color(3.6, 0.55, 0.45);
   for (let p = 0; p < 4; p++) {
-    const isWhite = p < 2;
-    const papiMat = new THREE.MeshStandardMaterial({
-      color: isWhite ? 0xffffff : 0xff3b30,
-      emissive: isWhite ? 0xfef9c3 : 0xef4444,
-      emissiveIntensity: 3.8,
-      toneMapped: false,
-    });
-    const lamp = new THREE.Mesh(new THREE.BoxGeometry(3.4, 1.8, 3.4), papiMat);
-    lamp.position.set(
+    dummy.position.set(
       fwdX * 310 - rightX * (54 + p * 8.5),
       1.6,
       fwdZ * 310 - rightZ * (54 + p * 8.5),
     );
-    group.add(lamp);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    papiInst.setMatrixAt(p, dummy.matrix);
+    papiInst.setColorAt(p, p < 2 ? papiWhiteHdr : papiRedHdr);
   }
+  papiInst.instanceMatrix.needsUpdate = true;
+  if (papiInst.instanceColor) papiInst.instanceColor.needsUpdate = true;
+  group.add(papiInst);
 
   // Iconic 3D KSFO Air Traffic Control Tower (south-west of terminal core, ~72 m tall!)
   const towerGroup = new THREE.Group();
@@ -726,10 +750,27 @@ function buildKsfoAirportComplex(): {
     [1020, -880, 290, 16, 52, -16, true], // Terminal 1 concourse
   ];
 
+  // Sculpted passenger boarding jetbridges batched into a single InstancedMesh (15 -> 1 draw call)
+  const jetbridgeGeo = new THREE.BoxGeometry(9.5, 4.2, 34);
+  const jetbridgeInst = new THREE.InstancedMesh(jetbridgeGeo, termRoofMat, terminalSpecs.length * 3);
+  const jbParentMat = new THREE.Matrix4();
+  const jbLocalMat = new THREE.Matrix4();
+  const jbFinalMat = new THREE.Matrix4();
+  const jbQuat = new THREE.Quaternion();
+  const jbPos = new THREE.Vector3();
+  const jbScale = new THREE.Vector3(1, 1, 1);
+  const jbLocalPos = new THREE.Vector3();
+  const jbIdentityQ = new THREE.Quaternion();
+  let jbIdx = 0;
+
   for (const [along, rightOff, len, h, wid, rotDeg, isWarm] of terminalSpecs) {
     const tGroup = new THREE.Group();
-    tGroup.position.set(fwdX * along + rightX * rightOff, h * 0.5, fwdZ * along + rightZ * rightOff);
-    tGroup.rotation.y = -RWY_28_HDG_RAD + Math.PI * 0.5 + rotDeg * DEG_TO_RAD;
+    const tx = fwdX * along + rightX * rightOff;
+    const ty = h * 0.5;
+    const tz = fwdZ * along + rightZ * rightOff;
+    const rotY = -RWY_28_HDG_RAD + Math.PI * 0.5 + rotDeg * DEG_TO_RAD;
+    tGroup.position.set(tx, ty, tz);
+    tGroup.rotation.y = rotY;
 
     const mainBox = new THREE.Mesh(new THREE.BoxGeometry(len, h, wid), termBodyMat);
     mainBox.castShadow = true;
@@ -748,15 +789,20 @@ function buildKsfoAirportComplex(): {
     glassBand.position.y = h * 0.1;
     tGroup.add(glassBand);
 
-    // Sculpted passenger boarding jetbridges extending from each pier
+    jbPos.set(tx, ty, tz);
+    jbQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+    jbParentMat.compose(jbPos, jbQuat, jbScale);
     for (let j = -1; j <= 1; j++) {
-      const bridge = new THREE.Mesh(new THREE.BoxGeometry(9.5, 4.2, 34), termRoofMat);
-      bridge.position.set(j * (len * 0.28), -h * 0.12, wid * 0.5 + 16);
-      tGroup.add(bridge);
+      jbLocalPos.set(j * (len * 0.28), -h * 0.12, wid * 0.5 + 16);
+      jbLocalMat.compose(jbLocalPos, jbIdentityQ, jbScale);
+      jbFinalMat.multiplyMatrices(jbParentMat, jbLocalMat);
+      jetbridgeInst.setMatrixAt(jbIdx++, jbFinalMat);
     }
 
     group.add(tGroup);
   }
+  jetbridgeInst.instanceMatrix.needsUpdate = true;
+  group.add(jetbridgeInst);
 
   // 3D Aircraft Maintenance Hangars (arched steel roofs south of Taxiway C)
   const hangarMat = new THREE.MeshStandardMaterial({
@@ -784,7 +830,7 @@ function buildKsfoAirportComplex(): {
     group.add(hGroup);
   }
 
-  return { group, radarBar, airportBeaconRig, alsfMatArray, towerBeaconMat };
+  return { group, radarBar, airportBeaconRig, alsfStrobeInst, alsfStrobeCount, towerBeaconMat };
 }
 
 /** Builds 3D San Francisco Downtown Skyline + Bay Bridge suspension towers on the horizon. */
@@ -895,23 +941,37 @@ function buildSfSkylineAndBridge(): THREE.Group {
   deck.rotation.y = 0.24;
   group.add(deck);
 
+  const pylonInst = new THREE.InstancedMesh(new THREE.BoxGeometry(14, 185, 14), bridgeMat, 10);
+  const crossInst = new THREE.InstancedMesh(new THREE.BoxGeometry(12, 10, 44), bridgeMat, 5);
+  const lampInst = new THREE.InstancedMesh(new THREE.SphereGeometry(3.2, 8, 6), bridgeLightMat, 5);
   for (let t = 0; t < 5; t++) {
     const tx = 650 + t * 1750;
     const tz = -11650 + t * 420;
-    const pylonL = new THREE.Mesh(new THREE.BoxGeometry(14, 185, 14), bridgeMat);
-    pylonL.position.set(tx, 90, tz - 16);
-    group.add(pylonL);
-    const pylonR = new THREE.Mesh(new THREE.BoxGeometry(14, 185, 14), bridgeMat);
-    pylonR.position.set(tx, 90, tz + 16);
-    group.add(pylonR);
-    const cross = new THREE.Mesh(new THREE.BoxGeometry(12, 10, 44), bridgeMat);
-    cross.position.set(tx, 165, tz);
-    group.add(cross);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
 
-    const lamp = new THREE.Mesh(new THREE.SphereGeometry(3.2, 8, 6), bridgeLightMat);
-    lamp.position.set(tx, 186, tz);
-    group.add(lamp);
+    dummy.position.set(tx, 90, tz - 16);
+    dummy.updateMatrix();
+    pylonInst.setMatrixAt(t * 2, dummy.matrix);
+
+    dummy.position.set(tx, 90, tz + 16);
+    dummy.updateMatrix();
+    pylonInst.setMatrixAt(t * 2 + 1, dummy.matrix);
+
+    dummy.position.set(tx, 165, tz);
+    dummy.updateMatrix();
+    crossInst.setMatrixAt(t, dummy.matrix);
+
+    dummy.position.set(tx, 186, tz);
+    dummy.updateMatrix();
+    lampInst.setMatrixAt(t, dummy.matrix);
   }
+  pylonInst.instanceMatrix.needsUpdate = true;
+  crossInst.instanceMatrix.needsUpdate = true;
+  lampInst.instanceMatrix.needsUpdate = true;
+  group.add(pylonInst);
+  group.add(crossInst);
+  group.add(lampInst);
 
   return group;
 }
@@ -948,6 +1008,8 @@ export function createKsfoWorld(initialPack: KsfoTerrainPack | null = null): Ksf
   // 3D SF Downtown Skyline + Bay Bridge
   const skyline = buildSfSkylineAndBridge();
   group.add(skyline);
+
+  const alsfStrobeCol = new THREE.Color();
 
   return {
     group,
@@ -999,12 +1061,17 @@ export function createKsfoWorld(initialPack: KsfoTerrainPack | null = null): Ksf
       airport.towerBeaconMat.emissiveIntensity =
         1.2 + 3.4 * Math.pow(0.5 + 0.5 * Math.sin(simTimeS * 3.8), 4.0);
 
-      // Animate ALSF-2 running white strobe rabbit racing from outer bay -> 28L threshold at 2 Hz!
-      const rabbitPos = (1.0 - ((simTimeS * 1.85) % 1.0)) * (airport.alsfMatArray.length - 1);
-      for (let i = 0; i < airport.alsfMatArray.length; i++) {
+      // Animate instanced ALSF-2 running white strobe rabbit racing from outer bay -> 28L threshold at 2 Hz!
+      const rabbitPos = (1.0 - ((simTimeS * 1.85) % 1.0)) * (airport.alsfStrobeCount - 1);
+      for (let i = 0; i < airport.alsfStrobeCount; i++) {
         const d = Math.abs(i - rabbitPos);
         const flash = Math.exp(-d * d * 1.6);
-        airport.alsfMatArray[i].emissiveIntensity = 0.45 + 5.8 * flash;
+        const intensity = 0.55 + 4.8 * flash;
+        alsfStrobeCol.setRGB(intensity * 0.85, intensity * 0.96, intensity);
+        airport.alsfStrobeInst.setColorAt(i, alsfStrobeCol);
+      }
+      if (airport.alsfStrobeInst.instanceColor) {
+        airport.alsfStrobeInst.instanceColor.needsUpdate = true;
       }
     },
   };

@@ -15,11 +15,17 @@ export default defineConfig({
   build: {
     target: "es2022",
     sourcemap: false,
-    chunkSizeWarningLimit: 900,
+    chunkSizeWarningLimit: 550,
     rollupOptions: {
       output: {
-        manualChunks: {
-          three: ["three"],
+        manualChunks(id) {
+          if (id.includes("node_modules/three/examples/jsm")) {
+            return "three-addons";
+          }
+          if (id.includes("node_modules/three")) {
+            return "three";
+          }
+          return undefined;
         },
       },
     },

@@ -54,9 +54,9 @@ LIVE_SUPPLEMENTARY_ARTIFACTS: tuple[tuple[str, bool], ...] = (
     ("xvs-active-range/src/lib.rs", True),
     ("xvs-active-range/src/kani_proofs.rs", True),
     ("tests/golden/active_range_vectors.json", True),
-    ("TRADEMARK.md", True),
-    ("SAFETY_DISCLAIMER.md", True),
-    ("EXPORTS.md", True),
+    ("docs/legal/TRADEMARK.md", True),
+    ("docs/legal/SAFETY_DISCLAIMER.md", True),
+    ("docs/legal/EXPORTS.md", True),
 )
 
 KANI_PROOF_CRATES: tuple[tuple[str, str, int], ...] = (

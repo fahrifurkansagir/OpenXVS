@@ -402,12 +402,14 @@ class StudioModelsBundle:
     nav_lighterglue_onnx_path: Path | None = None
     nav_lighterglue_sha256: str = ""
     land_has_keyline_sigma: bool = False
+    land_has_runway_present: bool = False
+    d2_input_hw: tuple[int, int] = (256, 256)
 
     def health_summary(self) -> dict[str, Any]:
         """Return JSON-serializable `/api/health` summary."""
         return {
             "status": "ok",
-            "kani_proofs": "18/18",
+            "kani_proofs": "26/26",
             "host_gpu_name": self.host_gpu_name,
             "compute_device": self.compute_device,
             "cuda_available": bool(torch.cuda.is_available()),
@@ -695,21 +697,22 @@ def _verify_v5_nav_artifact(
     return artifact_path, actual_sha
 
 
-def _validate_land_ort_io(sess: ort.InferenceSession) -> tuple[bool, bool]:
-    """Verify dual-contract XVS-Land ONNX IO: 5-output (v4.5/v5.1) OR 6-output (v5.2 + `keyline_sigma_px`)."""
+def _validate_land_ort_io(sess: ort.InferenceSession) -> tuple[bool, bool, bool]:
+    """Verify XVS-Land ONNX IO: 5-output (v4.5/v5.1), 6-output (v5.2), OR 7-output (extended + `runway_present_logit`)."""
     inps = sess.get_inputs()
     outs = sess.get_outputs()
     if len(inps) != 1 or inps[0].name != "roi_crop":
-        return False, False
+        return False, False, False
     in_shape = list(inps[0].shape)
     if len(in_shape) != 4 or in_shape[1] != 3:
-        return False, False
+        return False, False, False
     out_names = {o.name for o in outs}
     required = {"keypoints_xy", "keylines_hesse", "cov_2x2"}
     if not required.issubset(out_names):
-        return False, False
+        return False, False, False
     has_keyline_sigma = "keyline_sigma_px" in out_names
-    return True, has_keyline_sigma
+    has_runway_present = "runway_present_logit" in out_names
+    return True, has_keyline_sigma, has_runway_present
 
 
 def _validate_nav_v5_ort_io(sess: ort.InferenceSession) -> bool:
@@ -866,6 +869,7 @@ def load_studio_models(
     d2_x_dtype: Any = np.float32
     d2_h_dtype: Any = np.float32
     d2_hid_c = 24
+    d2_input_hw: tuple[int, int] = (256, 256)
     d2_sha = ""
     if d2_onnx_path.is_file():
         d2_sha = compute_file_sha256(d2_onnx_path)
@@ -882,8 +886,18 @@ def load_studio_models(
                 d2_hid_c = int(h_shape[1])
             if inps["h_prev_warped"].type == "tensor(float16)":
                 d2_h_dtype = np.float16
-        if "x_t" in inps and inps["x_t"].type == "tensor(float16)":
-            d2_x_dtype = np.float16
+        if "x_t" in inps:
+            x_shape = inps["x_t"].shape
+            if (
+                len(x_shape) == 4
+                and isinstance(x_shape[2], int)
+                and isinstance(x_shape[3], int)
+                and x_shape[2] > 0
+                and x_shape[3] > 0
+            ):
+                d2_input_hw = (int(x_shape[2]), int(x_shape[3]))
+            if inps["x_t"].type == "tensor(float16)":
+                d2_x_dtype = np.float16
         meta["xvs_d2"] = ModelCheckpointMeta(
             name="XVS-D2",
             loaded=True,
@@ -919,12 +933,12 @@ def load_studio_models(
         real_weights=True,
         device="cpu",
         dtype="fp64",
-        sha256="rust-kani-18-18-bitexact",
+        sha256="rust-kani-26-26-bitexact",
         source_path="src/xvs/v2/xvs_active_range/filter.py",
         tensor_count=6,
         param_count=0,
         backend="rust-parity",
-        tier="kani_18_18",
+        tier="kani_26_26",
     )
 
     # Extract Colab L4 NB2 fallback checkpoints once (unless smoke_fast requested)
@@ -953,6 +967,7 @@ def load_studio_models(
     land_tensor_count = 0
     land_param_count = XVS_LAND_PARAM_COUNT
     land_has_keyline_sigma = False
+    land_has_runway_present = False
 
     if not smoke_fast:
         wave_c_land_root = Path(wave_c_land_dir)
@@ -980,7 +995,7 @@ def load_studio_models(
             if chosen.backend == "onnxruntime":
                 try:
                     sess, ort_dev = _create_ort_session(chosen.path, base_dev_str)
-                    io_ok, has_kl_sig = _validate_land_ort_io(sess)
+                    io_ok, has_kl_sig, has_rwy_pres = _validate_land_ort_io(sess)
                     if not io_ok:
                         continue
                 except Exception:
@@ -1006,9 +1021,10 @@ def load_studio_models(
                 land_dtype_label = "fp16" if "fp16" in chosen.path.name.lower() else "fp32"
                 land_tensor_count = len(sess.get_inputs()) + len(sess.get_outputs())
                 land_param_count = (
-                    XVS_LAND_V52_PARAM_COUNT if chosen.tier.startswith("v52_") else XVS_LAND_PARAM_COUNT
+                    XVS_LAND_V52_PARAM_COUNT if chosen.tier.startswith(("v52_", "v53_")) else XVS_LAND_PARAM_COUNT
                 )
                 land_has_keyline_sigma = bool(has_kl_sig)
+                land_has_runway_present = bool(has_rwy_pres)
                 break
 
             pt_model = XvsLandModel(in_channels=3, roi_width=256, roi_height=256, split_ratio=2.0)
@@ -1353,4 +1369,6 @@ def load_studio_models(
         nav_lighterglue_onnx_path=nav_lighterglue_onnx_path,
         nav_lighterglue_sha256=nav_lighterglue_sha256,
         land_has_keyline_sigma=land_has_keyline_sigma,
+        land_has_runway_present=land_has_runway_present,
+        d2_input_hw=d2_input_hw,
     )

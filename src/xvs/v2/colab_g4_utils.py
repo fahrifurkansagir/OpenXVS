@@ -19,6 +19,7 @@ import gc
 import importlib.machinery
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import types
@@ -216,21 +217,25 @@ def _atomic_torch_save(path: Path, state: dict[str, Any]) -> Path:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp_path, path)
-    if hasattr(os, "sync"):
-        os.sync()
     return path
 
 
+_ROLLING_EPOCH_TAG_RE = re.compile(r"^(.*?(?:_epoch_|_ep))(\d+)$")
+
+
 class DriveCheckpointManager:
-    """Atomic `.pt.tmp -> os.replace` checkpoint persistence with Drive mirror (`SP-2B` §3.0)."""
+    """Atomic `.pt.tmp -> os.replace` checkpoint persistence with Drive mirror & rolling pruning (`SP-2B` §3.0)."""
 
     def __init__(
         self,
         local_dir: Path | str,
         drive_dir: Path | str | None = None,
+        *,
+        keep_last: int | None = 2,
     ) -> None:
         self.local_dir = Path(local_dir)
         self.drive_dir = Path(drive_dir) if drive_dir is not None else None
+        self.keep_last = int(keep_last) if (keep_last is not None and int(keep_last) > 0) else None
         self.local_dir.mkdir(parents=True, exist_ok=True)
         if self.drive_dir is not None:
             self.drive_dir.mkdir(parents=True, exist_ok=True)
@@ -242,13 +247,42 @@ class DriveCheckpointManager:
             raise ValueError(f"Unsafe checkpoint tag: {tag!r}")
         return clean
 
+    def _prune_rolling_checkpoints(self, directory: Path, stem: str) -> None:
+        if self.keep_last is None or not directory.is_dir():
+            return
+        m = _ROLLING_EPOCH_TAG_RE.match(stem)
+        if m is None:
+            return
+        prefix = m.group(1)
+        matching: list[tuple[int, Path]] = []
+        for p in directory.glob(f"{prefix}*.pt"):
+            if not p.is_file() or p.name.endswith(".tmp"):
+                continue
+            low = p.stem.lower()
+            if "best" in low or "final" in low:
+                continue
+            pm = _ROLLING_EPOCH_TAG_RE.match(p.stem)
+            if pm is not None and pm.group(1) == prefix:
+                matching.append((int(pm.group(2)), p))
+        if len(matching) <= self.keep_last:
+            return
+        matching.sort(key=lambda pair: pair[0], reverse=True)
+        for _ep_num, old_path in matching[self.keep_last :]:
+            try:
+                old_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def save(self, tag: str, state: dict[str, Any]) -> Path:
-        """Atomically persist `state` to `local_dir/<tag>.pt` and optionally mirror to `drive_dir`."""
+        """Atomically persist `state` to `local_dir/<tag>.pt`, mirror to `drive_dir`, and prune old epoch ckpts."""
         clean_tag = self._validate_tag(tag)
-        filename = f"{clean_tag}.pt" if not clean_tag.endswith(".pt") else clean_tag
+        stem = clean_tag[:-3] if clean_tag.endswith(".pt") else clean_tag
+        filename = f"{stem}.pt"
         local_path = _atomic_torch_save(self.local_dir / filename, state)
+        self._prune_rolling_checkpoints(self.local_dir, stem)
         if self.drive_dir is not None:
             _atomic_torch_save(self.drive_dir / filename, state)
+            self._prune_rolling_checkpoints(self.drive_dir, stem)
         return local_path
 
     def load_latest(self, tag_prefix: str = "") -> dict[str, Any] | None:
