@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod eval_frames;
 pub mod nav_integrity;
 
 use std::io::Read;
@@ -167,7 +168,7 @@ impl StudentTCalibrator {
     }
 }
 
-// ---- Multi-Contract XVS-Land 5-Output (v5.1), 6-Output (v5.2) & 7-Output (extended `runway_present_logit`) Parser ----
+// ---- Multi-Contract XVS-Land 5-Output, 6-Output & 7-Output (extended `runway_present_logit`) Parser ----
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum LandOutputContract {
@@ -214,7 +215,7 @@ pub fn resolve_land_input_hw(sess: &Session) -> (usize, usize) {
 }
 
 /// Inspect XVS-D2 ONNX session input shapes dynamically:
-/// `x_t` `[1, 6, H, W]` (`256x256` v5.2 OR `640x640` extended) and `h_prev_warped` `[1, C, H/4, W/4]`.
+/// `x_t` `[1, 6, H, W]` (`256x256` OR `640x640` high-res) and `h_prev_warped` `[1, C, H/4, W/4]`.
 pub fn resolve_d2_input_shapes(sess: &Session) -> (usize, usize, usize, usize, usize) {
     let mut in_h = D2_CROP_SIZE;
     let mut in_w = D2_CROP_SIZE;
@@ -459,7 +460,7 @@ pub const BEARING_TBC_MAX_GATE_RAD: f64 = 0.035;
 pub const BEARING_TBC_MAX_MISS_STREAK: u32 = 5;
 
 #[inline]
-fn round2(v: f64) -> f64 {
+pub(crate) fn round2(v: f64) -> f64 {
     if v.is_finite() {
         (v * 100.0).round() / 100.0
     } else {
@@ -468,7 +469,7 @@ fn round2(v: f64) -> f64 {
 }
 
 #[inline]
-fn round4(v: f64) -> f64 {
+pub(crate) fn round4(v: f64) -> f64 {
     if v.is_finite() {
         (v * 10_000.0).round() / 10_000.0
     } else {
@@ -1319,7 +1320,7 @@ fn hist_median_u32(hist: &[u32; 256], n: usize) -> f64 {
 }
 
 #[inline]
-fn hist_line_median_and_stuck(hist: &[u32; 256], len: usize) -> (f64, bool) {
+fn hist_line_median_and_stuck(hist: &[u32; 256], len: usize) -> (f64, bool, u64, u64) {
     let med = hist_median_u32(hist, len);
     let mut sum_u64 = 0u64;
     let mut sq_u64 = 0u64;
@@ -1335,7 +1336,7 @@ fn hist_line_median_and_stuck(hist: &[u32; 256], len: usize) -> (f64, bool) {
     let mean = (sum_u64 as f64) / lf;
     let std = (((sq_u64 as f64) / lf) - mean * mean).max(0.0).sqrt();
     if std < 1.0 {
-        return (med, true);
+        return (med, true, sum_u64, sq_u64);
     }
     let lo_b = ((med - 1.5).floor().max(0.0) as usize).min(255);
     let hi_b = ((med + 1.5).ceil().min(255.0) as usize).min(255);
@@ -1345,7 +1346,33 @@ fn hist_line_median_and_stuck(hist: &[u32; 256], len: usize) -> (f64, bool) {
             near += cnt as usize;
         }
     }
-    (med, ((near as f64) / lf) >= 0.70)
+    (med, ((near as f64) / lf) >= 0.70, sum_u64, sq_u64)
+}
+
+#[inline]
+fn dot_u8_slice(a: &[u8], b: &[u8]) -> u64 {
+    let mut total = 0u64;
+    for (ca, cb) in a.chunks(4096).zip(b.chunks(4096)) {
+        let mut acc = 0u32;
+        for (&x, &y) in ca.iter().zip(cb.iter()) {
+            acc += (x as u32) * (y as u32);
+        }
+        total += acc as u64;
+    }
+    total
+}
+
+#[inline]
+fn sum_u8_slice(a: &[u8]) -> u64 {
+    let mut total = 0u64;
+    for chunk in a.chunks(4096) {
+        let mut acc = 0u32;
+        for &x in chunk {
+            acc += x as u32;
+        }
+        total += acc as u64;
+    }
+    total
 }
 
 /// Detect stuck/dead sensor readout rows & columns (exact Wave-1/2 parity with Studio `rust_engine.rs`).
@@ -1363,15 +1390,9 @@ pub fn detect_dead_line_fpn_u8(plane: &[u8], w: usize, h: usize) -> (f64, f64) {
         for &px in row {
             hist[px as usize] += 1;
         }
-        for (v, &cnt) in hist.iter().enumerate() {
-            if cnt != 0 {
-                let c = cnt as u64;
-                let vu = v as u64;
-                frame_sum += c * vu;
-                frame_sq += c * vu * vu;
-            }
-        }
-        let (med, stuck) = hist_line_median_and_stuck(&hist, w);
+        let (med, stuck, r_sum, r_sq) = hist_line_median_and_stuck(&hist, w);
+        frame_sum += r_sum;
+        frame_sq += r_sq;
         row_med[y] = med;
         row_stuck[y] = stuck;
     }
@@ -1415,7 +1436,7 @@ pub fn detect_dead_line_fpn_u8(plane: &[u8], w: usize, h: usize) -> (f64, f64) {
             }
         }
         for (k, hist) in col_hists.iter().take(tile_w).enumerate() {
-            let (med, stuck) = hist_line_median_and_stuck(hist, h);
+            let (med, stuck, _, _) = hist_line_median_and_stuck(hist, h);
             col_med[x0 + k] = med;
             col_stuck[x0 + k] = stuck;
         }
@@ -1448,7 +1469,8 @@ pub fn detect_dead_line_fpn_u8(plane: &[u8], w: usize, h: usize) -> (f64, f64) {
     (dead_frac, fpn_score)
 }
 
-/// Detect spatially uncorrelated white/binary noise (exact Wave-1/2 parity with Studio `rust_engine.rs`).
+/// Detect spatially uncorrelated white/binary noise (exact Wave-1/2 parity with Studio `rust_engine.rs`,
+/// using auto-vectorizable integer dot-product covariance identities).
 pub fn detect_white_noise_fault_u8(plane: &[u8], w: usize, h: usize) -> (f64, f64) {
     if w < 4 || h < 4 || plane.len() != w * h {
         return (1.0, 1.0);
@@ -1456,10 +1478,16 @@ pub fn detect_white_noise_fault_u8(plane: &[u8], w: usize, h: usize) -> (f64, f6
     let n = (w * h) as f64;
     let mut sum_u64 = 0u64;
     let mut sq_u64 = 0u64;
-    for &px in plane {
-        let v = px as u64;
-        sum_u64 += v;
-        sq_u64 += v * v;
+    for chunk in plane.chunks(4096) {
+        let mut s = 0u32;
+        let mut q = 0u32;
+        for &px in chunk {
+            let v = px as u32;
+            s += v;
+            q += v * v;
+        }
+        sum_u64 += s as u64;
+        sq_u64 += q as u64;
     }
     let mean = (sum_u64 as f64) / n;
     let var = (((sq_u64 as f64) / n) - mean * mean).max(0.0);
@@ -1468,43 +1496,55 @@ pub fn detect_white_noise_fault_u8(plane: &[u8], w: usize, h: usize) -> (f64, f6
         return (1.0, 1.0);
     }
 
-    let mut lut = [0.0_f64; 256];
-    for (v, slot) in lut.iter_mut().enumerate() {
-        *slot = (v as f64) - mean;
-    }
-
-    let mut cov_h1 = 0.0_f64;
-    let mut cov_h2 = 0.0_f64;
-    let mut cov_v1 = 0.0_f64;
-    let mut cov_v2 = 0.0_f64;
+    let mut dot_h1 = 0u64;
+    let mut dot_h2 = 0u64;
+    let mut dot_v1 = 0u64;
+    let mut dot_v2 = 0u64;
+    let mut col0_sum = 0u64;
+    let mut col1_sum = 0u64;
+    let mut col_m2_sum = 0u64;
+    let mut col_m1_sum = 0u64;
 
     for y in 0..h {
         let row0 = &plane[y * w..(y + 1) * w];
-        for x in 0..(w - 2) {
-            let a = lut[row0[x] as usize];
-            cov_h1 += a * lut[row0[x + 1] as usize];
-            cov_h2 += a * lut[row0[x + 2] as usize];
-        }
-        cov_h1 += lut[row0[w - 2] as usize] * lut[row0[w - 1] as usize];
+        col0_sum += row0[0] as u64;
+        col1_sum += row0[1] as u64;
+        col_m2_sum += row0[w - 2] as u64;
+        col_m1_sum += row0[w - 1] as u64;
+
+        dot_h1 += dot_u8_slice(&row0[..w - 1], &row0[1..]);
+        dot_h2 += dot_u8_slice(&row0[..w - 2], &row0[2..]);
 
         if y + 1 < h {
             let row1 = &plane[(y + 1) * w..(y + 2) * w];
-            for (&p0, &p1) in row0.iter().zip(row1.iter()) {
-                cov_v1 += lut[p0 as usize] * lut[p1 as usize];
-            }
+            dot_v1 += dot_u8_slice(row0, row1);
         }
         if y + 2 < h {
             let row2 = &plane[(y + 2) * w..(y + 3) * w];
-            for (&p0, &p2) in row0.iter().zip(row2.iter()) {
-                cov_v2 += lut[p0 as usize] * lut[p2 as usize];
-            }
+            dot_v2 += dot_u8_slice(row0, row2);
         }
     }
+
+    let row0_sum = sum_u8_slice(&plane[..w]);
+    let row1_sum = sum_u8_slice(&plane[w..2 * w]);
+    let row_m2_sum = sum_u8_slice(&plane[(h - 2) * w..(h - 1) * w]);
+    let row_m1_sum = sum_u8_slice(&plane[(h - 1) * w..h * w]);
 
     let cnt_h1 = (h * (w - 1)).max(1) as f64;
     let cnt_h2 = (h * (w - 2)).max(1) as f64;
     let cnt_v1 = ((h - 1) * w).max(1) as f64;
     let cnt_v2 = ((h - 2) * w).max(1) as f64;
+
+    let mean_sq = mean * mean;
+    let sum_ab_h1 = ((sum_u64 - col_m1_sum) + (sum_u64 - col0_sum)) as f64;
+    let sum_ab_h2 = ((sum_u64 - col_m1_sum - col_m2_sum) + (sum_u64 - col0_sum - col1_sum)) as f64;
+    let sum_ab_v1 = ((sum_u64 - row_m1_sum) + (sum_u64 - row0_sum)) as f64;
+    let sum_ab_v2 = ((sum_u64 - row_m1_sum - row_m2_sum) + (sum_u64 - row0_sum - row1_sum)) as f64;
+
+    let cov_h1 = (dot_h1 as f64) - mean * sum_ab_h1 + cnt_h1 * mean_sq;
+    let cov_h2 = (dot_h2 as f64) - mean * sum_ab_h2 + cnt_h2 * mean_sq;
+    let cov_v1 = (dot_v1 as f64) - mean * sum_ab_v1 + cnt_v1 * mean_sq;
+    let cov_v2 = (dot_v2 as f64) - mean * sum_ab_v2 + cnt_v2 * mean_sq;
 
     let ac_h1 = (cov_h1 / cnt_h1) / var;
     let ac_v1 = (cov_v1 / cnt_v1) / var;
@@ -1753,6 +1793,15 @@ impl SensorHealthMonitor {
     }
 
     pub fn evaluate_eo_luma_plane(luma: &[f64], w: usize, h: usize) -> EoOpticalQuality {
+        Self::evaluate_eo_luma_plane_with_fpn_noise(luma, w, h, None)
+    }
+
+    pub(crate) fn evaluate_eo_luma_plane_with_fpn_noise(
+        luma: &[f64],
+        w: usize,
+        h: usize,
+        precomputed_fpn_noise: Option<(f64, f64, f64, f64)>,
+    ) -> EoOpticalQuality {
         if w < 24 || h < 16 || luma.len() != w * h {
             return EoOpticalQuality {
                 blur_score: 0.0,
@@ -1774,18 +1823,24 @@ impl SensorHealthMonitor {
             };
         }
 
-        let plane_u8: Vec<u8> = luma
-            .iter()
-            .map(|&v| {
-                if v.is_finite() {
-                    v.round().clamp(0.0, 255.0) as u8
-                } else {
-                    0u8
-                }
-            })
-            .collect();
-        let (dead_line_frac, fpn_score) = detect_dead_line_fpn_u8(&plane_u8, w, h);
-        let (spatial_autocorr, noise_score) = detect_white_noise_fault_u8(&plane_u8, w, h);
+        let (dead_line_frac, fpn_score, spatial_autocorr, noise_score) =
+            if let Some(pre) = precomputed_fpn_noise {
+                pre
+            } else {
+                let plane_u8: Vec<u8> = luma
+                    .iter()
+                    .map(|&v| {
+                        if v.is_finite() {
+                            v.round().clamp(0.0, 255.0) as u8
+                        } else {
+                            0u8
+                        }
+                    })
+                    .collect();
+                let (dlf, fs) = detect_dead_line_fpn_u8(&plane_u8, w, h);
+                let (ac, ns) = detect_white_noise_fault_u8(&plane_u8, w, h);
+                (dlf, fs, ac, ns)
+            };
         let fault_mult = (fpn_score * noise_score).clamp(0.0, 1.0);
 
         let (lap_var, focus_quality, glare_ratio, occlusion_ratio, q_opt_base) =
@@ -1849,9 +1904,7 @@ impl SensorHealthMonitor {
         }
     }
 
-    pub fn observe_eo_luma_u8(&mut self, luma_u8: &[u8], w: usize, h: usize) -> EoOpticalQuality {
-        let luma: Vec<f64> = luma_u8.iter().map(|&v| v as f64).collect();
-        let q = Self::evaluate_eo_luma_plane(&luma, w, h);
+    pub(crate) fn record_eo_quality(&mut self, q: EoOpticalQuality) {
         self.eo_blur_score = q.blur_score;
         self.eo_focus_quality = q.focus_quality;
         self.eo_glare_ratio = q.glare_ratio;
@@ -1868,6 +1921,12 @@ impl SensorHealthMonitor {
         self.sector_q_eo = q.sector_q_eo;
         self.min_sector_q_eo = q.min_sector_q_eo;
         self.degraded_sector_mask = q.degraded_sector_mask;
+    }
+
+    pub fn observe_eo_luma_u8(&mut self, luma_u8: &[u8], w: usize, h: usize) -> EoOpticalQuality {
+        let luma: Vec<f64> = luma_u8.iter().map(|&v| v as f64).collect();
+        let q = Self::evaluate_eo_luma_plane(&luma, w, h);
+        self.record_eo_quality(q);
         q
     }
 
@@ -1881,6 +1940,17 @@ impl SensorHealthMonitor {
         w: usize,
         h: usize,
         ffc_bits: u8,
+    ) -> LwirHealthStatus {
+        self.observe_lwir_plane_with_ffc_precomputed(lwir_u8, w, h, ffc_bits, None)
+    }
+
+    pub(crate) fn observe_lwir_plane_with_ffc_precomputed(
+        &mut self,
+        lwir_u8: &[u8],
+        w: usize,
+        h: usize,
+        ffc_bits: u8,
+        precomputed_fpn_noise: Option<(f64, f64, f64, f64)>,
     ) -> LwirHealthStatus {
         let ffc_imminent = (ffc_bits & LWIR_FFC_BIT_IMMINENT) != 0;
         let ffc_in_progress = (ffc_bits & LWIR_FFC_BIT_IN_PROGRESS) != 0;
@@ -1926,15 +1996,20 @@ impl SensorHealthMonitor {
             let over_ratio = (over_cnt as f64) / (n as f64);
             let under_ratio = (under_cnt as f64) / (n as f64);
 
-            let (dlf, fs) = if has_2d {
-                detect_dead_line_fpn_u8(lwir_u8, w, h)
+            let (dlf, fs, ac, ns) = if let Some(pre) = precomputed_fpn_noise {
+                pre
             } else {
-                (0.0, 1.0)
-            };
-            let (ac, ns) = if has_2d {
-                detect_white_noise_fault_u8(lwir_u8, w, h)
-            } else {
-                (1.0, 1.0)
+                let (d, f) = if has_2d {
+                    detect_dead_line_fpn_u8(lwir_u8, w, h)
+                } else {
+                    (0.0, 1.0)
+                };
+                let (a, s) = if has_2d {
+                    detect_white_noise_fault_u8(lwir_u8, w, h)
+                } else {
+                    (1.0, 1.0)
+                };
+                (d, f, a, s)
             };
 
             let sensor_clean_for_peak =
@@ -2028,11 +2103,11 @@ impl SensorHealthMonitor {
 
         let mad = if let Some(prev) = self.prev_lwir_u8.as_ref() {
             if prev.len() == lwir_u8.len() && !lwir_u8.is_empty() {
-                let mut acc = 0.0_f64;
+                let mut acc_u64 = 0u64;
                 for (&a, &b) in lwir_u8.iter().zip(prev.iter()) {
-                    acc += ((a as i32) - (b as i32)).abs() as f64;
+                    acc_u64 += a.abs_diff(b) as u64;
                 }
-                let m = acc / (lwir_u8.len() as f64);
+                let m = (acc_u64 as f64) / (lwir_u8.len() as f64);
                 if m < LWIR_NUC_FREEZE_MAD_THR {
                     self.lwir_freeze_ticks = self.lwir_freeze_ticks.saturating_add(1);
                 } else {
@@ -2051,7 +2126,12 @@ impl SensorHealthMonitor {
             -1.0
         };
         self.lwir_last_mad = mad;
-        self.prev_lwir_u8 = Some(lwir_u8.to_vec());
+        if let Some(prev) = self.prev_lwir_u8.as_mut() {
+            prev.clear();
+            prev.extend_from_slice(lwir_u8);
+        } else {
+            self.prev_lwir_u8 = Some(lwir_u8.to_vec());
+        }
 
         let mask_lwir_frame = self.lwir_nuc_frozen
             || ffc_imminent
@@ -2149,6 +2229,10 @@ pub fn is_forbidden_system_ort_path(path: &Path) -> bool {
 }
 
 pub fn resolve_ort_dylib_path() -> Result<PathBuf, String> {
+    resolve_ort_dylib_path_with_hint(None)
+}
+
+pub(crate) fn resolve_ort_dylib_path_with_hint(hint_dir: Option<&Path>) -> Result<PathBuf, String> {
     if let Ok(raw) = std::env::var("ORT_DYLIB_PATH") {
         let candidate = PathBuf::from(raw.trim());
         if is_forbidden_system_ort_path(&candidate) {
@@ -2171,6 +2255,16 @@ pub fn resolve_ort_dylib_path() -> Result<PathBuf, String> {
     } else {
         &["libonnxruntime.so"]
     };
+    if let Some(hint) = hint_dir {
+        for name in lib_names {
+            search_paths.push(hint.join(name));
+            search_paths.push(hint.join("lib").join(name));
+            if let Some(parent) = hint.parent() {
+                search_paths.push(parent.join(name));
+                search_paths.push(parent.join("lib").join(name));
+            }
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             for name in lib_names {
@@ -2226,7 +2320,7 @@ pub fn resolve_ort_dylib_path() -> Result<PathBuf, String> {
     Err("Could not locate bundled ONNX Runtime shared library; set ORT_DYLIB_PATH".to_string())
 }
 
-fn find_model_path(
+pub(crate) fn find_model_path(
     model_dir: &Path,
     explicit_model_dir: bool,
     direct_names: &[&str],
@@ -2235,6 +2329,13 @@ fn find_model_path(
     if explicit_model_dir {
         for name in direct_names {
             let p = model_dir.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        let nested_models = model_dir.join("models");
+        for name in direct_names {
+            let p = nested_models.join(name);
             if p.is_file() {
                 return Some(p);
             }
@@ -2496,9 +2597,15 @@ struct EdgeSelfCheckReport {
 static GLOBAL_EDGE_ORT_ENV: OnceLock<Result<Environment, String>> = OnceLock::new();
 
 fn acquire_edge_ort_env() -> Result<Environment, String> {
+    acquire_edge_ort_env_with_hint(None)
+}
+
+pub(crate) fn acquire_edge_ort_env_with_hint(
+    hint_dir: Option<&Path>,
+) -> Result<Environment, String> {
     GLOBAL_EDGE_ORT_ENV
         .get_or_init(|| {
-            let dll_path = resolve_ort_dylib_path()?;
+            let dll_path = resolve_ort_dylib_path_with_hint(hint_dir)?;
             let builder = ort::init_from(&dll_path).map_err(|e| format!("ort init error: {e}"))?;
             builder
                 .build()
@@ -2520,7 +2627,7 @@ fn resolve_ort_thread_budget() -> usize {
         })
 }
 
-fn build_optimized_ort_session(
+pub(crate) fn build_optimized_ort_session(
     env: &Environment,
     path: &Path,
     max_intra_threads: usize,
@@ -2632,7 +2739,7 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
     if let Ok(env) = acquire_edge_ort_env() {
         ort_loaded = true;
 
-        // 3.1 XVS-D2 (SHA-256 pinned fail-closed, dynamic 256x256 / 640x640 extended input shape, 1T pinned)
+        // 3.1 XVS-D2 (SHA-256 pinned fail-closed, dynamic 256x256 / 640x640 high-res input shape, 1T pinned)
         if let Some(d2_path) = find_model_path(
             model_dir,
             explicit_model_dir,
@@ -2859,7 +2966,7 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
             });
         }
 
-        // 3.3 XVS-Land v1.1.1 + StudentTCalibrator (6-output promoted + optional 7th output runway_present_logit, 1T pinned)
+        // 3.3 XVS-Land v1.1.2 + StudentTCalibrator (6-output promoted + optional 7th output runway_present_logit, 1T pinned)
         if let Some(land_path) = find_model_path(
             model_dir,
             explicit_model_dir,
@@ -3519,7 +3626,7 @@ fn run_self_check_with_model_dir(model_dir: &Path, explicit_model_dir: bool) -> 
     }
 }
 
-fn resolve_default_model_dir() -> (PathBuf, bool) {
+pub(crate) fn resolve_default_model_dir() -> (PathBuf, bool) {
     match std::env::var("OPENXVS_MODEL_DIR") {
         Ok(raw) if !raw.trim().is_empty() => (PathBuf::from(raw.trim()), true),
         _ => (PathBuf::from("/opt/openxvs/models"), false),
@@ -3610,7 +3717,7 @@ fn read_process_rss_mib() -> f64 {
     }
 }
 
-fn percentile_sorted(sorted: &[f64], q: f64) -> f64 {
+pub(crate) fn percentile_sorted(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
@@ -4177,8 +4284,8 @@ fn run_soak_mode(seconds: f64, hz: f64, model_dir_opt: Option<PathBuf>) -> Resul
 // Headless CLI Mode 2: `--replay <shadow_ndjson_path>` (Pure-Rust SHA-256 Chain + Replay)
 // ============================================================================
 
-const SHADOW_MODE_LOG_SCHEMA: &str = "openxvs.shadow_mode_log/1.0";
-const SHADOW_GENESIS_HASH: &str =
+pub(crate) const SHADOW_MODE_LOG_SCHEMA: &str = "openxvs.shadow_mode_log/1.0";
+pub(crate) const SHADOW_GENESIS_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Format an IEEE-754 finite `f64` identically to CPython `json.dumps(..., allow_nan=False)`.
@@ -5065,68 +5172,241 @@ fn run_parity_eval_mode(path_arg: &str) -> Result<serde_json::Value, String> {
     eval_parity_case(&doc)
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let is_self_check = args.is_empty()
-        || args[0] == "--self-check"
-        || args[0] == "--require-models"
-        || args[0] == "--model-dir";
-    if is_self_check {
+pub fn cli_help_text() -> String {
+    format!(
+        "openxvs-edge-infer v{EDGE_INFER_VERSION} — Headless Pure-Rust Edge Evaluation Runner\n\
+         {NON_FLIGHT_WATERMARK}\n\
+         NON_FLIGHT_SIM_ONLY={NON_FLIGHT_SIM_ONLY} | ACTUATOR_AUTHORITY={ACTUATOR_AUTHORITY} | OUTBOUND_MAVLINK_FRAMES=0\n\n\
+         USAGE:\n\
+           openxvs-edge-infer [--self-check] [--require-models] [--model-dir <DIR>]\n\
+           openxvs-edge-infer --eval-frames <DIR> [--mode all|eo|thermal|land] [--out <REPORT.JSON>]\n\
+                                                  [--tape <TAPE.NDJSON>] [--max-frames <N>] [--model-dir <DIR>]\n\
+           openxvs-edge-infer --soak [--seconds <N>] [--hz <F>] [--require-models] [--model-dir <DIR>]\n\
+           openxvs-edge-infer --replay <SHADOW.NDJSON>\n\
+           openxvs-edge-infer --parity-eval <TRACE.JSON | ->\n\
+           openxvs-edge-infer --help | -h | --version | -V\n\n\
+         EVAL-FRAMES OPTIONS:\n\
+           --eval-frames <DIR>       Directory of sorted .png/.jpg/.jpeg images to evaluate offline\n\
+           --mode <MODE>             Model pipeline: all (default), eo, thermal, land\n\
+           --out <REPORT.JSON>       Write full JSON evaluation report to file (default: stdout)\n\
+           --tape <TAPE.NDJSON>      Write SHA-256 hash-chained shadow flight tape verifiable by --replay\n\
+           --max-frames <N>          Evaluate at most N sorted frames (positive integer >= 1)\n\
+           --model-dir <DIR>         Explicit ONNX model directory (overrides OPENXVS_MODEL_DIR auto-discovery)\n\n\
+         SAFETY LIMITS:\n\
+           - Rejects corrupt, 0-byte, >16 MiB, or >4096x4096 images fail-closed without panicking\n\
+           - Enforces fail-closed SHA-256 pinning on all required ONNX models\n\
+           - Zero flight actuation, zero outbound MAVLink frames\n"
+    )
+}
+
+#[derive(Debug)]
+enum CliCommand {
+    Help,
+    Version,
+    SelfCheck {
+        require_models: bool,
+        model_dir: Option<PathBuf>,
+    },
+    Soak {
+        seconds: f64,
+        hz: f64,
+        model_dir: Option<PathBuf>,
+        require_models: bool,
+    },
+    Replay {
+        path: PathBuf,
+    },
+    ParityEval {
+        path_arg: String,
+    },
+    EvalFrames(eval_frames::EvalFramesConfig),
+}
+
+#[derive(Debug)]
+enum CliParseError {
+    General { message: String, exit_code: i32 },
+    EvalFrames(eval_frames::EvalFramesFailure),
+}
+
+fn require_flag_value<'a>(
+    args: &'a [String],
+    idx: usize,
+    flag: &str,
+) -> Result<&'a str, String> {
+    let Some(val) = args.get(idx + 1) else {
+        return Err(format!("Missing value for {flag}"));
+    };
+    if val.trim().is_empty() {
+        return Err(format!("Empty value for {flag}"));
+    }
+    Ok(val.as_str())
+}
+
+fn parse_cli_command(args: &[String]) -> Result<CliCommand, CliParseError> {
+    if args.is_empty() {
+        return Ok(CliCommand::SelfCheck {
+            require_models: false,
+            model_dir: None,
+        });
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return Ok(CliCommand::Help);
+    }
+    if args.len() == 1 && (args[0] == "--version" || args[0] == "-V") {
+        return Ok(CliCommand::Version);
+    }
+
+    let first = args[0].as_str();
+    if first == "--self-check" || first == "--require-models" || first == "--model-dir" {
         let mut require_models = false;
-        let mut model_dir_opt: Option<PathBuf> = None;
-        let mut i = if args.first().map(|s| s.as_str()) == Some("--self-check") {
-            1usize
-        } else {
-            0usize
-        };
+        let mut model_dir: Option<PathBuf> = None;
+        let mut i = usize::from(first == "--self-check");
         while i < args.len() {
             match args[i].as_str() {
                 "--require-models" => {
                     require_models = true;
                     i += 1;
                 }
-                "--model-dir" if i + 1 < args.len() => {
-                    model_dir_opt = Some(PathBuf::from(&args[i + 1]));
+                "--model-dir" => {
+                    let v = require_flag_value(args, i, "--model-dir").map_err(|m| {
+                        CliParseError::General {
+                            message: m,
+                            exit_code: 2,
+                        }
+                    })?;
+                    model_dir = Some(PathBuf::from(v));
                     i += 2;
                 }
                 other => {
-                    eprintln!("Unknown --self-check argument: {other}");
-                    std::process::exit(2);
+                    return Err(CliParseError::General {
+                        message: format!("Unknown --self-check argument: {other}"),
+                        exit_code: 2,
+                    });
                 }
             }
         }
-        eprintln!("[OPENXVS-EDGE v{EDGE_INFER_VERSION}] {NON_FLIGHT_WATERMARK}");
-        eprintln!(
-            "[OPENXVS-EDGE] NON_FLIGHT_SIM_ONLY={NON_FLIGHT_SIM_ONLY} ACTUATOR_AUTHORITY={ACTUATOR_AUTHORITY}"
-        );
-        let (model_dir, explicit_model_dir) = match model_dir_opt {
-            Some(p) => (p, true),
-            None => resolve_default_model_dir(),
-        };
-        let report = run_self_check_with_model_dir(&model_dir, explicit_model_dir);
-        let json = serde_json::to_string_pretty(&report).expect("serialize report");
-        println!("{json}");
-
-        let any_hard_error = report.models.iter().any(|m| {
-            m.status == "SHA256_MISMATCH_REJECTED"
-                || m.status.starts_with("ERROR:")
-                || m.status.starts_with("INVALID_OUTPUT")
+        return Ok(CliCommand::SelfCheck {
+            require_models,
+            model_dir,
         });
-        let all_models_loaded = report.ort_dylib_loaded
-            && report.models.len() >= 6
-            && report.models.iter().all(|m| m.loaded);
-        if any_hard_error || ((require_models || explicit_model_dir) && !all_models_loaded) {
-            std::process::exit(1);
-        }
-        return;
     }
 
-    match args[0].as_str() {
+    match first {
+        "--eval-frames" => {
+            let dir_str = require_flag_value(args, 0, "--eval-frames").map_err(|m| {
+                CliParseError::EvalFrames(eval_frames::EvalFramesFailure::new(
+                    "INVALID_CLI_ARGS",
+                    m,
+                ))
+            })?;
+            if dir_str.starts_with("--") {
+                return Err(CliParseError::EvalFrames(
+                    eval_frames::EvalFramesFailure::new(
+                        "INVALID_CLI_ARGS",
+                        format!("Expected input directory after --eval-frames, got flag '{dir_str}'"),
+                    ),
+                ));
+            }
+            let input_dir = PathBuf::from(dir_str);
+            let mut mode = eval_frames::EvalMode::All;
+            let mut out_path: Option<PathBuf> = None;
+            let mut tape_path: Option<PathBuf> = None;
+            let mut max_frames: Option<usize> = None;
+            let mut model_dir: Option<PathBuf> = None;
+
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--mode" => {
+                        let v = require_flag_value(args, i, "--mode").map_err(|m| {
+                            CliParseError::EvalFrames(eval_frames::EvalFramesFailure::new(
+                                "INVALID_CLI_ARGS",
+                                m,
+                            ))
+                        })?;
+                        mode = eval_frames::EvalMode::parse(v).map_err(|m| {
+                            CliParseError::EvalFrames(eval_frames::EvalFramesFailure::new(
+                                "INVALID_MODE",
+                                m,
+                            ))
+                        })?;
+                        i += 2;
+                    }
+                    "--out" => {
+                        let v = require_flag_value(args, i, "--out").map_err(|m| {
+                            CliParseError::EvalFrames(eval_frames::EvalFramesFailure::new(
+                                "INVALID_CLI_ARGS",
+                                m,
+                            ))
+                        })?;
+                        out_path = Some(PathBuf::from(v));
+                        i += 2;
+                    }
+                    "--tape" => {
+                        let v = require_flag_value(args, i, "--tape").map_err(|m| {
+                            CliParseError::EvalFrames(eval_frames::EvalFramesFailure::new(
+                                "INVALID_CLI_ARGS",
+                                m,
+                            ))
+                        })?;
+                        tape_path = Some(PathBuf::from(v));
+                        i += 2;
+                    }
+                    "--max-frames" => {
+                        let v = require_flag_value(args, i, "--max-frames").map_err(|m| {
+                            CliParseError::EvalFrames(eval_frames::EvalFramesFailure::new(
+                                "INVALID_MAX_FRAMES",
+                                m,
+                            ))
+                        })?;
+                        let parsed = v.trim().parse::<usize>().map_err(|_| {
+                            CliParseError::EvalFrames(eval_frames::EvalFramesFailure::new(
+                                "INVALID_MAX_FRAMES",
+                                format!("--max-frames must be a positive integer >= 1, got '{v}'"),
+                            ))
+                        })?;
+                        if parsed == 0 {
+                            return Err(CliParseError::EvalFrames(
+                                eval_frames::EvalFramesFailure::new(
+                                    "INVALID_MAX_FRAMES",
+                                    "--max-frames must be a positive integer >= 1, got 0",
+                                ),
+                            ));
+                        }
+                        max_frames = Some(parsed);
+                        i += 2;
+                    }
+                    "--model-dir" => {
+                        let v = require_flag_value(args, i, "--model-dir").map_err(|m| {
+                            CliParseError::EvalFrames(eval_frames::EvalFramesFailure::new(
+                                "INVALID_CLI_ARGS",
+                                m,
+                            ))
+                        })?;
+                        model_dir = Some(PathBuf::from(v));
+                        i += 2;
+                    }
+                    other => {
+                        return Err(CliParseError::EvalFrames(
+                            eval_frames::EvalFramesFailure::new(
+                                "UNKNOWN_CLI_FLAG",
+                                format!("Unknown --eval-frames argument: {other}"),
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            Ok(CliCommand::EvalFrames(eval_frames::EvalFramesConfig {
+                input_dir,
+                mode,
+                out_path,
+                tape_path,
+                max_frames,
+                model_dir,
+            }))
+        }
         "--soak" => {
-            eprintln!("[OPENXVS-EDGE v{EDGE_INFER_VERSION}] {NON_FLIGHT_WATERMARK}");
-            eprintln!(
-                "[OPENXVS-EDGE] NON_FLIGHT_SIM_ONLY={NON_FLIGHT_SIM_ONLY} ACTUATOR_AUTHORITY={ACTUATOR_AUTHORITY}"
-            );
             let mut seconds = 30.0_f64;
             let mut hz = 5.0_f64;
             let mut model_dir: Option<PathBuf> = None;
@@ -5134,16 +5414,34 @@ fn main() {
             let mut i = 1usize;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--seconds" if i + 1 < args.len() => {
-                        seconds = args[i + 1].parse::<f64>().unwrap_or(f64::NAN);
+                    "--seconds" => {
+                        let v = require_flag_value(args, i, "--seconds").map_err(|m| {
+                            CliParseError::General {
+                                message: m,
+                                exit_code: 2,
+                            }
+                        })?;
+                        seconds = v.parse::<f64>().unwrap_or(f64::NAN);
                         i += 2;
                     }
-                    "--hz" if i + 1 < args.len() => {
-                        hz = args[i + 1].parse::<f64>().unwrap_or(f64::NAN);
+                    "--hz" => {
+                        let v = require_flag_value(args, i, "--hz").map_err(|m| {
+                            CliParseError::General {
+                                message: m,
+                                exit_code: 2,
+                            }
+                        })?;
+                        hz = v.parse::<f64>().unwrap_or(f64::NAN);
                         i += 2;
                     }
-                    "--model-dir" if i + 1 < args.len() => {
-                        model_dir = Some(PathBuf::from(&args[i + 1]));
+                    "--model-dir" => {
+                        let v = require_flag_value(args, i, "--model-dir").map_err(|m| {
+                            CliParseError::General {
+                                message: m,
+                                exit_code: 2,
+                            }
+                        })?;
+                        model_dir = Some(PathBuf::from(v));
                         i += 2;
                     }
                     "--require-models" => {
@@ -5151,11 +5449,165 @@ fn main() {
                         i += 1;
                     }
                     other => {
-                        eprintln!("Unknown --soak argument: {other}");
-                        std::process::exit(2);
+                        return Err(CliParseError::General {
+                            message: format!("Unknown --soak argument: {other}"),
+                            exit_code: 2,
+                        });
                     }
                 }
             }
+            Ok(CliCommand::Soak {
+                seconds,
+                hz,
+                model_dir,
+                require_models,
+            })
+        }
+        "--replay" => {
+            if args.len() != 2 || args[1].trim().is_empty() {
+                return Err(CliParseError::General {
+                    message: "Usage: openxvs-edge-infer --replay <shadow_ndjson_path>".to_string(),
+                    exit_code: 2,
+                });
+            }
+            Ok(CliCommand::Replay {
+                path: PathBuf::from(&args[1]),
+            })
+        }
+        "--parity-eval" => {
+            if args.len() != 2 || args[1].trim().is_empty() {
+                return Err(CliParseError::General {
+                    message: "Usage: openxvs-edge-infer --parity-eval <trace_json_path | ->"
+                        .to_string(),
+                    exit_code: 2,
+                });
+            }
+            Ok(CliCommand::ParityEval {
+                path_arg: args[1].clone(),
+            })
+        }
+        other => Err(CliParseError::General {
+            message: format!(
+                "Unknown CLI flag '{other}'. Run with --help for usage. Supported modes: --self-check, --eval-frames, --soak, --replay, --parity-eval"
+            ),
+            exit_code: 2,
+        }),
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = match parse_cli_command(&args) {
+        Ok(c) => c,
+        Err(CliParseError::General { message, exit_code }) => {
+            eprintln!("[OPENXVS-EDGE CLI ERROR] {message}");
+            std::process::exit(exit_code);
+        }
+        Err(CliParseError::EvalFrames(fail)) => {
+            eprintln!("[OPENXVS-EDGE EVAL-FRAMES ERROR] {}", fail.message);
+            let err_rep = fail.into_error_report();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&err_rep).expect("serialize eval_frames error report")
+            );
+            std::process::exit(1);
+        }
+    };
+
+    match cmd {
+        CliCommand::Help => {
+            print!("{}", cli_help_text());
+        }
+        CliCommand::Version => {
+            println!(
+                "openxvs-edge-infer {EDGE_INFER_VERSION} (NON_FLIGHT_SIM_ONLY={NON_FLIGHT_SIM_ONLY}, ACTUATOR_AUTHORITY={ACTUATOR_AUTHORITY})"
+            );
+        }
+        CliCommand::SelfCheck {
+            require_models,
+            model_dir: model_dir_opt,
+        } => {
+            eprintln!("[OPENXVS-EDGE v{EDGE_INFER_VERSION}] {NON_FLIGHT_WATERMARK}");
+            eprintln!(
+                "[OPENXVS-EDGE] NON_FLIGHT_SIM_ONLY={NON_FLIGHT_SIM_ONLY} ACTUATOR_AUTHORITY={ACTUATOR_AUTHORITY}"
+            );
+            let (model_dir, explicit_model_dir) = match model_dir_opt {
+                Some(p) => (p, true),
+                None => resolve_default_model_dir(),
+            };
+            let report = run_self_check_with_model_dir(&model_dir, explicit_model_dir);
+            let json = serde_json::to_string_pretty(&report).expect("serialize report");
+            println!("{json}");
+
+            let any_hard_error = report.models.iter().any(|m| {
+                m.status == "SHA256_MISMATCH_REJECTED"
+                    || m.status.starts_with("ERROR:")
+                    || m.status.starts_with("INVALID_OUTPUT")
+            });
+            let all_models_loaded = report.ort_dylib_loaded
+                && report.models.len() >= 6
+                && report.models.iter().all(|m| m.loaded);
+            if any_hard_error || ((require_models || explicit_model_dir) && !all_models_loaded) {
+                std::process::exit(1);
+            }
+        }
+        CliCommand::EvalFrames(cfg) => {
+            eprintln!("[OPENXVS-EDGE v{EDGE_INFER_VERSION}] {NON_FLIGHT_WATERMARK}");
+            eprintln!(
+                "[OPENXVS-EDGE] NON_FLIGHT_SIM_ONLY={NON_FLIGHT_SIM_ONLY} ACTUATOR_AUTHORITY={ACTUATOR_AUTHORITY}"
+            );
+            match eval_frames::run_eval_frames(&cfg) {
+                Ok(rep) => {
+                    if cfg.out_path.is_some() {
+                        let brief_out = serde_json::json!({
+                            "mode": rep.mode,
+                            "ok": rep.ok,
+                            "eval_mode": rep.eval_mode,
+                            "version": rep.version,
+                            "non_flight_sim_only": rep.non_flight_sim_only,
+                            "actuator_authority": rep.actuator_authority,
+                            "outbound_mavlink_frames": rep.outbound_mavlink_frames,
+                            "watermark": rep.watermark,
+                            "report_written": true,
+                            "tape_written": rep.tape_written,
+                            "tape_sha256_head": rep.tape_sha256_head,
+                            "summary": rep.summary,
+                        });
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&brief_out)
+                                .expect("serialize eval_frames summary")
+                        );
+                    } else {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&rep)
+                                .expect("serialize eval_frames report")
+                        );
+                    }
+                }
+                Err(fail) => {
+                    eprintln!("[OPENXVS-EDGE EVAL-FRAMES ERROR] {}", fail.message);
+                    let err_rep = fail.into_error_report();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&err_rep)
+                            .expect("serialize eval_frames error report")
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        CliCommand::Soak {
+            seconds,
+            hz,
+            model_dir,
+            require_models,
+        } => {
+            eprintln!("[OPENXVS-EDGE v{EDGE_INFER_VERSION}] {NON_FLIGHT_WATERMARK}");
+            eprintln!(
+                "[OPENXVS-EDGE] NON_FLIGHT_SIM_ONLY={NON_FLIGHT_SIM_ONLY} ACTUATOR_AUTHORITY={ACTUATOR_AUTHORITY}"
+            );
             match run_soak_mode(seconds, hz, model_dir) {
                 Ok(rep) => {
                     let ok = rep.pass && (!require_models || rep.models_loaded.len() >= 6);
@@ -5173,13 +5625,9 @@ fn main() {
                 }
             }
         }
-        "--replay" => {
-            if args.len() < 2 {
-                eprintln!("Usage: openxvs-edge-infer --replay <shadow_ndjson_path>");
-                std::process::exit(2);
-            }
+        CliCommand::Replay { path } => {
             eprintln!("[OPENXVS-EDGE v{EDGE_INFER_VERSION}] {NON_FLIGHT_WATERMARK}");
-            let rep = verify_and_replay_shadow_ndjson(Path::new(&args[1]));
+            let rep = verify_and_replay_shadow_ndjson(&path);
             let ok = rep.valid;
             println!(
                 "{}",
@@ -5189,30 +5637,18 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        "--parity-eval" => {
-            if args.len() < 2 {
-                eprintln!("Usage: openxvs-edge-infer --parity-eval <trace_json_path | ->");
+        CliCommand::ParityEval { path_arg } => match run_parity_eval_mode(&path_arg) {
+            Ok(out) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&out).expect("serialize parity output")
+                );
+            }
+            Err(e) => {
+                eprintln!("[OPENXVS-EDGE PARITY-EVAL ERROR] {e}");
                 std::process::exit(2);
             }
-            match run_parity_eval_mode(&args[1]) {
-                Ok(out) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&out).expect("serialize parity output")
-                    );
-                }
-                Err(e) => {
-                    eprintln!("[OPENXVS-EDGE PARITY-EVAL ERROR] {e}");
-                    std::process::exit(2);
-                }
-            }
-        }
-        other => {
-            eprintln!(
-                "Unknown CLI flag '{other}'. Supported modes: (default/--self-check [--require-models] [--model-dir <DIR>]), --soak --seconds <N> --hz <F> [--require-models], --replay <shadow.ndjson>, --parity-eval <trace.json | ->"
-            );
-            std::process::exit(2);
-        }
+        },
     }
 }
 
@@ -5711,7 +6147,7 @@ mod tests {
             Some(&[2.0_f32]),
             &cal,
         )
-        .expect("extended present parse");
+        .expect("extended 7-output present parse");
         assert_eq!(p_ok.contract, LandOutputContract::V53SevenOutputRunwayPresence);
         assert!(p_ok.runway_present_admitted);
         assert_eq!(p_ok.runway_gate_mode, "NOMINAL");
@@ -5726,7 +6162,7 @@ mod tests {
             Some(&[-1.0_f32]),
             &cal,
         )
-        .expect("extended absent parse");
+        .expect("extended 7-output absent parse");
         assert_eq!(p_no.contract, LandOutputContract::V53SevenOutputRunwayPresence);
         assert!(!p_no.runway_present_admitted);
         assert_eq!(p_no.runway_gate_mode, "P0_INVALID_INHIBIT");
@@ -5741,7 +6177,7 @@ mod tests {
             Some(&[f32::NAN]),
             &cal,
         )
-        .expect("extended nan logit fails closed");
+        .expect("extended 7-output nan logit fails closed");
         assert!(!p_nan.runway_present_admitted);
         assert_eq!(p_nan.runway_gate_mode, "P0_INVALID_INHIBIT");
 
@@ -5846,5 +6282,85 @@ mod tests {
             "steps": [{ "vis_ne_m": [10.0] }],
         });
         assert!(eval_parity_case(&bad_vis).is_err());
+    }
+
+    #[test]
+    fn test_edge_cli_help_and_eval_frames_argument_hardening() {
+        let help = cli_help_text();
+        assert!(help.contains("--eval-frames <DIR>"));
+        assert!(help.contains("--mode all|eo|thermal|land"));
+        assert!(help.contains("--out <REPORT.JSON>"));
+        assert!(help.contains("--tape <TAPE.NDJSON>"));
+        assert!(help.contains("--max-frames <N>"));
+        assert!(help.contains("--model-dir <DIR>"));
+        assert!(help.contains("--replay <SHADOW.NDJSON>"));
+        assert!(help.contains(NON_FLIGHT_WATERMARK));
+
+        let s = |vals: &[&str]| vals.iter().map(|v| (*v).to_string()).collect::<Vec<_>>();
+
+        assert!(matches!(parse_cli_command(&s(&["--help"])), Ok(CliCommand::Help)));
+        assert!(matches!(parse_cli_command(&s(&["-h"])), Ok(CliCommand::Help)));
+        assert!(matches!(
+            parse_cli_command(&s(&["--eval-frames", "--help"])),
+            Ok(CliCommand::Help)
+        ));
+        assert!(matches!(
+            parse_cli_command(&s(&["--version"])),
+            Ok(CliCommand::Version)
+        ));
+
+        // Valid full --eval-frames invocation
+        match parse_cli_command(&s(&[
+            "--eval-frames",
+            "frames_dir",
+            "--mode",
+            "thermal",
+            "--out",
+            "report.json",
+            "--tape",
+            "tape.ndjson",
+            "--max-frames",
+            "25",
+            "--model-dir",
+            "models",
+        ])) {
+            Ok(CliCommand::EvalFrames(cfg)) => {
+                assert_eq!(cfg.input_dir, PathBuf::from("frames_dir"));
+                assert_eq!(cfg.mode, eval_frames::EvalMode::Thermal);
+                assert_eq!(cfg.out_path, Some(PathBuf::from("report.json")));
+                assert_eq!(cfg.tape_path, Some(PathBuf::from("tape.ndjson")));
+                assert_eq!(cfg.max_frames, Some(25));
+                assert_eq!(cfg.model_dir, Some(PathBuf::from("models")));
+            }
+            other => panic!("Expected EvalFrames command, got {other:?}"),
+        }
+
+        // Edge cases must fail cleanly (no panics!)
+        for bad_args in [
+            s(&["--eval-frames"]),
+            s(&["--eval-frames", "--mode", "eo"]),
+            s(&["--eval-frames", "dir", "--mode"]),
+            s(&["--eval-frames", "dir", "--mode", "bogus"]),
+            s(&["--eval-frames", "dir", "--out"]),
+            s(&["--eval-frames", "dir", "--tape"]),
+            s(&["--eval-frames", "dir", "--model-dir"]),
+            s(&["--eval-frames", "dir", "--max-frames"]),
+            s(&["--eval-frames", "dir", "--max-frames", "0"]),
+            s(&["--eval-frames", "dir", "--max-frames", "-3"]),
+            s(&["--eval-frames", "dir", "--max-frames", "abc"]),
+            s(&["--eval-frames", "dir", "--unknown-flag"]),
+            s(&["--self-check", "--model-dir"]),
+            s(&["--soak", "--seconds"]),
+            s(&["--soak", "--hz"]),
+            s(&["--replay"]),
+            s(&["--replay", "a.ndjson", "extra.ndjson"]),
+            s(&["--parity-eval"]),
+            s(&["--unknown-top-level"]),
+        ] {
+            assert!(
+                parse_cli_command(&bad_args).is_err(),
+                "Expected CLI parse error for {bad_args:?}"
+            );
+        }
     }
 }

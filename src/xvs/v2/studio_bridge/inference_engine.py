@@ -378,6 +378,9 @@ class D2TrackerState:
         hid_c: int = 24,
         focal_px: float = AOT_FOCAL_PX,
         input_hw: tuple[int, int] = (D2_CROP_SIZE, D2_CROP_SIZE),
+        *,
+        reject_static_clutter: bool = True,
+        tbc_config: TrackBeforeConfirmConfig | None = None,
     ) -> None:
         self.hid_c = int(hid_c)
         self.focal_px = float(focal_px)
@@ -387,23 +390,35 @@ class D2TrackerState:
             dtype=np.float32,
         )
         self.gray_hist: list[tuple[np.ndarray, int, int]] = []
+        self.full_gray_hist: list[tuple[np.ndarray, int, int]] = []
+        self.tile_gray_hist: dict[tuple[int, int, int, int], list[tuple[np.ndarray, int, int]]] = {}
+        self.tile_h_prev: dict[tuple[int, int, int, int], np.ndarray] = {}
+        self.tile_frame_hw: tuple[int, int] | None = None
         self.active_range_ctrl = ActiveRangeController(
             ActiveRangeConfig(q_hat_conformal=0.955, sigma_bearing_rad=2.86 / self.focal_px)
         )
         self.active_range_age: int = 0
         self.last_size_px: float | None = None
-        self.bearing_tbc = BearingTrackBeforeConfirm(
-            TrackBeforeConfirmConfig(
+        resolved_tbc_cfg = (
+            tbc_config
+            if tbc_config is not None
+            else TrackBeforeConfirmConfig(
                 confirm_m=DEFAULT_CONFIRM_M,
                 confirm_n=DEFAULT_CONFIRM_N,
                 default_eo_meas_std_rad=2.86 / self.focal_px,
+                reject_static_clutter=bool(reject_static_clutter),
             )
         )
+        self.bearing_tbc = BearingTrackBeforeConfirm(resolved_tbc_cfg)
         self.last_tbc_result: TbcStepResult | None = None
 
     def reset(self) -> None:
         self.h_prev.fill(0.0)
         self.gray_hist.clear()
+        self.full_gray_hist.clear()
+        self.tile_gray_hist.clear()
+        self.tile_h_prev.clear()
+        self.tile_frame_hw = None
         self.active_range_ctrl = ActiveRangeController(
             ActiveRangeConfig(q_hat_conformal=0.955, sigma_bearing_rad=2.86 / self.focal_px)
         )
@@ -474,7 +489,16 @@ class StudioInferenceEngine:
             if _HAS_XVS_NAV
             else None
         )
-        self._nav_lighterglue = LighterGlueFallbackRunner() if _HAS_XVS_NAV else None
+        self._nav_lighterglue = (
+            LighterGlueFallbackRunner(
+                onnx_path=self.bundle.nav_lighterglue_onnx_path,
+                expected_sha256=(
+                    self.bundle.nav_lighterglue_sha256 if self.bundle.nav_lighterglue_sha256 else None
+                ),
+            )
+            if _HAS_XVS_NAV
+            else None
+        )
         self._aot_manifest: dict[str, Any] | None = None
         self._studio_manifest: dict[str, Any] | None = None
 
@@ -485,10 +509,22 @@ class StudioInferenceEngine:
         # Real-world sensor health monitor (LWIR NUC freeze, optical blur/glare/occlusion, timestamp skew)
         self._sensor_health = SensorHealthMonitor()
 
-    def new_d2_tracker_state(self, focal_px: float = AOT_FOCAL_PX) -> D2TrackerState:
+    def new_d2_tracker_state(
+        self,
+        focal_px: float = AOT_FOCAL_PX,
+        *,
+        reject_static_clutter: bool = True,
+        tbc_config: TrackBeforeConfirmConfig | None = None,
+    ) -> D2TrackerState:
         """Allocate a fresh job-isolated `D2TrackerState` (never touches `demo_tick` state)."""
         d2_hw = getattr(self.bundle, "d2_input_hw", (D2_CROP_SIZE, D2_CROP_SIZE))
-        return D2TrackerState(hid_c=self.bundle.d2_hid_c, focal_px=focal_px, input_hw=d2_hw)
+        return D2TrackerState(
+            hid_c=self.bundle.d2_hid_c,
+            focal_px=focal_px,
+            input_hw=d2_hw,
+            reject_static_clutter=reject_static_clutter,
+            tbc_config=tbc_config,
+        )
 
     def new_nav_cusum_filter(self) -> DualBankEsEkfCusum:
         """Allocate a fresh local-only Dual-Bank ES-EKF + 8-Arm Cholesky Page's CUSUM spoof-guard."""
@@ -614,34 +650,106 @@ class StudioInferenceEngine:
 
     # ---- Channel 1: XVS-D2 + XVS-ActiveRange ----
 
+    @staticmethod
+    def _extract_spec_tile_f32(full_gray: np.ndarray, spec: Any) -> np.ndarray:
+        """Extract one horizon-tile crop from a full-frame grayscale image as float32 `(tile_h, tile_w)`."""
+        crop = full_gray[spec.y0 : spec.y1, spec.x0 : spec.x1]
+        if crop.shape[0] != spec.tile_h or crop.shape[1] != spec.tile_w:
+            crop = cv2.resize(crop, (spec.tile_w, spec.tile_h), interpolation=cv2.INTER_LINEAR)
+        return crop.astype(np.float32, copy=False)
+
+    @staticmethod
+    def _warm_start_tile_hidden(
+        full_h: np.ndarray,
+        spec: Any,
+        full_hw: tuple[int, int],
+        target_h_hw: tuple[int, int],
+    ) -> np.ndarray:
+        """Warm-start a tile's ConvGRU hidden grid from the matching sub-region of prior full-frame `h_prev`."""
+        fh, fw = int(full_hw[0]), int(full_hw[1])
+        _, channels, hh, hw = full_h.shape
+        th, tw = int(target_h_hw[0]), int(target_h_hw[1])
+        if fh <= 0 or fw <= 0 or hh <= 0 or hw <= 0 or th <= 0 or tw <= 0:
+            return np.zeros((1, channels, max(1, th), max(1, tw)), dtype=np.float32)
+        hy0 = max(0, min(hh - 1, int(math.floor(float(spec.y0) / float(fh) * float(hh)))))
+        hy1 = max(hy0 + 1, min(hh, int(math.ceil(float(spec.y1) / float(fh) * float(hh)))))
+        hx0 = max(0, min(hw - 1, int(math.floor(float(spec.x0) / float(fw) * float(hw)))))
+        hx1 = max(hx0 + 1, min(hw, int(math.ceil(float(spec.x1) / float(fw) * float(hw)))))
+        sub = full_h[0, :, hy0:hy1, hx0:hx1]
+        out = np.empty((1, channels, th, tw), dtype=np.float32)
+        for c0 in range(0, channels, 4):
+            c1 = min(channels, c0 + 4)
+            slab = np.ascontiguousarray(np.transpose(sub[c0:c1], (1, 2, 0)))
+            rs = cv2.resize(slab, (tw, th), interpolation=cv2.INTER_LINEAR)
+            if rs.ndim == 2:
+                out[0, c0] = rs
+            else:
+                out[0, c0:c1] = np.transpose(rs, (2, 0, 1))
+        return out
+
     def _run_d2_single_probe(
         self,
         crop_gray: np.ndarray,
         score_thr: float,
-    ) -> tuple[tuple[float, float, float, float, float] | None, float]:
-        """Run a stateless 1-step `XVS-D2` ONNX probe on a `(d2_h, d2_w)` tile for high-res fallback."""
-        if self.bundle.d2_session is None:
-            return None, 0.0
+        *,
+        prev_gray_1: np.ndarray | None = None,
+        prev_gray_5: np.ndarray | None = None,
+        dx1: float = 0.0,
+        dy1: float = 0.0,
+        dx5: float = 0.0,
+        dy5: float = 0.0,
+        h_prev: np.ndarray | None = None,
+        return_hidden: bool = False,
+    ) -> Any:
+        """Run a stateful or cold-start `XVS-D2` ONNX probe on a `(d2_h, d2_w)` tile."""
         d2_h, d2_w = getattr(self.bundle, "d2_input_hw", (D2_CROP_SIZE, D2_CROP_SIZE))
+        h_shape = (1, self.bundle.d2_hid_c, max(1, d2_h // 4), max(1, d2_w // 4))
+        if self.bundle.d2_session is None:
+            if return_hidden:
+                return None, 0.0, np.zeros(h_shape, dtype=np.float32)
+            return None, 0.0
+
         c0 = _scene_normalize_gray(crop_gray)
         zeros = np.zeros((d2_h, d2_w), dtype=np.float32)
-        x_t = np.stack([c0, zeros, zeros, zeros, zeros, zeros], axis=0)[np.newaxis, :, :, :]
-        h_zero = np.zeros((1, self.bundle.d2_hid_c, d2_h // 4, d2_w // 4), dtype=np.float32)
+        if prev_gray_1 is not None and prev_gray_1.shape == (d2_h, d2_w):
+            w1, r1 = _warp_gray_and_mask(prev_gray_1.astype(np.float32, copy=False), float(dx1), float(dy1))
+            c1 = _scene_normalize_gray(w1) * r1
+        else:
+            c1 = zeros
+            r1 = zeros
+        if prev_gray_5 is not None and prev_gray_5.shape == (d2_h, d2_w):
+            w5, r5 = _warp_gray_and_mask(prev_gray_5.astype(np.float32, copy=False), float(dx5), float(dy5))
+            c2 = _scene_normalize_gray(w5) * r5
+        else:
+            c2 = zeros
+            r5 = zeros
+        c3 = (c0 - c1) * r1
+        c4 = (c0 - c2) * r5
+        c5 = r1 * r5
+        x_t = np.stack([c0, c1, c2, c3, c4, c5], axis=0)[np.newaxis, :, :, :].astype(np.float32)
+        if h_prev is not None and h_prev.shape == h_shape:
+            h_in = _warp_hidden_state(h_prev.astype(np.float32, copy=False), float(dx1), float(dy1), stride=4.0)
+        else:
+            h_in = np.zeros(h_shape, dtype=np.float32)
+
         with self._d2_ort_lock:
             outs = self.bundle.d2_session.run(
                 None,
                 {
                     "x_t": x_t.astype(self.bundle.d2_x_dtype),
-                    "h_prev_warped": h_zero.astype(self.bundle.d2_h_dtype),
+                    "h_prev_warped": h_in.astype(self.bundle.d2_h_dtype),
                 },
             )
-        return _decode_d2_top(
+        det_t, max_p_t = _decode_d2_top(
             outs[0].astype(np.float32),
             outs[1].astype(np.float32),
             outs[2].astype(np.float32),
             outs[4].astype(np.float32),
             score_thr=score_thr,
         )
+        if return_hidden:
+            return det_t, max_p_t, outs[5].astype(np.float32)
+        return det_t, max_p_t
 
     def infer_eo_sky(
         self,
@@ -704,15 +812,42 @@ class StudioInferenceEngine:
         crop_gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
         c0 = _scene_normalize_gray(crop_gray)
 
+        track_hd_tile_hist = bool(
+            multi_crop_fallback and not use_native_subcrop and max(w_in, h_in) > 384
+        )
+        gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if track_hd_tile_hist else None
+
         det: tuple[float, float, float, float, float] | None = None
         det_frame_box: tuple[float, float, float, float] | None = None
         weak_tbc_det: tuple[float, float, float, float, float] | None = None
         weak_tbc_box: tuple[float, float, float, float] | None = None
         max_prob = 0.0
 
+        prev_full_h_before_step: np.ndarray | None = None
+        had_prior_full_frames = False
+        prev_full_1: tuple[np.ndarray, int, int] | None = None
+        prev_full_5: tuple[np.ndarray, int, int] | None = None
+        tile_hist_snap: dict[tuple[int, int, int, int], list[tuple[np.ndarray, int, int]]] = {}
+        tile_h_snap: dict[tuple[int, int, int, int], np.ndarray] = {}
+
         with self._d2_ort_lock:
             if state.h_prev.shape[2:] != (d2_h // 4, d2_w // 4):
                 state.h_prev = np.zeros((1, state.hid_c, d2_h // 4, d2_w // 4), dtype=np.float32)
+            had_prior_full_frames = len(state.gray_hist) >= 1
+            if track_hd_tile_hist and gray_full is not None:
+                prev_full_h_before_step = state.h_prev.copy()
+                if state.tile_frame_hw != (h_in, w_in):
+                    state.full_gray_hist.clear()
+                    state.tile_gray_hist.clear()
+                    state.tile_h_prev.clear()
+                    state.tile_frame_hw = (h_in, w_in)
+                if len(state.full_gray_hist) >= 1 and state.full_gray_hist[-1][0].shape == (h_in, w_in):
+                    prev_full_1 = state.full_gray_hist[-1]
+                if len(state.full_gray_hist) >= 5 and state.full_gray_hist[-5][0].shape == (h_in, w_in):
+                    prev_full_5 = state.full_gray_hist[-5]
+                tile_hist_snap = {k: list(v) for k, v in state.tile_gray_hist.items()}
+                tile_h_snap = {k: v.copy() for k, v in state.tile_h_prev.items()}
+
             if len(state.gray_hist) >= 1 and state.gray_hist[-1][0].shape == (d2_h, d2_w):
                 g1, cx1, cy1 = state.gray_hist[-1]
                 dx1 = float(cx1 - gmc_x)
@@ -785,75 +920,121 @@ class StudioInferenceEngine:
                             sy_m = float(h_in) / float(d2_h)
                             weak_tbc_box = (wx1 * sx_m, wy1 * sy_m, wx2 * sx_m, wy2 * sy_m)
 
-        # Smart multi-crop / adaptive horizon-tiling fallback OUTSIDE the main state lock
+            if track_hd_tile_hist and gray_full is not None:
+                state.full_gray_hist.append((gray_full.copy(), gmc_x, gmc_y))
+                if len(state.full_gray_hist) > 6:
+                    state.full_gray_hist.pop(0)
+
+        # Stateful native-resolution horizon-tiling fallback (both 256x256 and 640x640 D2)
         if (
             self.bundle.d2_session is not None
             and det is None
-            and multi_crop_fallback
-            and not use_native_subcrop
-            and max(w_in, h_in) > 384
+            and track_hd_tile_hist
+            and gray_full is not None
         ):
-            if d2_h >= 640 and d2_w >= 640:
-                gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-                tiles_h, specs_h = extract_horizon_tiles(
-                    gray_full, tile_hw=(d2_h, d2_w), overlap_frac=0.10, cover_full_width=True
-                )
-                per_tile_dets: list[list[dict[str, Any]]] = []
-                for tile_img in tiles_h:
-                    tdet, tprob = self._run_d2_single_probe(tile_img.astype(np.float32), score_thr=score_thr)
-                    if tprob > max_prob:
-                        max_prob = tprob
-                    if tdet is not None:
-                        tu = 0.5 * (tdet[0] + tdet[2])
-                        tv = 0.5 * (tdet[1] + tdet[3])
-                        per_tile_dets.append(
-                            [{"u_px": tu, "v_px": tv, "w": tdet[2] - tdet[0], "h": tdet[3] - tdet[1], "score": tdet[4]}]
-                        )
-                    else:
-                        per_tile_dets.append([])
-                merged_h = merge_tile_detections(per_tile_dets, specs_h, nms_radius_px=12.0)
-                if merged_h:
-                    top_m = merged_h[0]
-                    bw_m = float(top_m["w"])
-                    bh_m = float(top_m["h"])
-                    det_frame_box = (
-                        float(top_m["u_px"]) - 0.5 * bw_m,
-                        float(top_m["v_px"]) - 0.5 * bh_m,
-                        float(top_m["u_px"]) + 0.5 * bw_m,
-                        float(top_m["v_px"]) + 0.5 * bh_m,
+            tiles_h, specs_h = extract_horizon_tiles(
+                gray_full, tile_hw=(d2_h, d2_w), overlap_frac=0.10, cover_full_width=True
+            )
+            per_tile_dets: list[list[dict[str, Any]]] = []
+            updated_tile_h: dict[tuple[int, int, int, int], np.ndarray] = {}
+            updated_tile_gray: dict[tuple[int, int, int, int], tuple[np.ndarray, int, int]] = {}
+            expected_h_shape = (1, state.hid_c, max(1, d2_h // 4), max(1, d2_w // 4))
+            can_warm_from_full = (
+                had_prior_full_frames
+                and prev_full_h_before_step is not None
+                and bool(np.any(prev_full_h_before_step != 0.0))
+            )
+            for tile_img, spec in zip(tiles_h, specs_h):
+                tile_key = (int(spec.x0), int(spec.y0), int(spec.x1), int(spec.y1))
+                tile_f32 = tile_img.astype(np.float32, copy=False)
+
+                prev_tile_1: np.ndarray | None = None
+                t_dx1, t_dy1 = 0.0, 0.0
+                if prev_full_1 is not None:
+                    prev_tile_1 = self._extract_spec_tile_f32(prev_full_1[0], spec)
+                    t_dx1 = float(prev_full_1[1] - gmc_x) * float(spec.scale_x)
+                    t_dy1 = float(prev_full_1[2] - gmc_y) * float(spec.scale_y)
+                elif tile_key in tile_hist_snap and len(tile_hist_snap[tile_key]) >= 1:
+                    tg1, tcx1, tcy1 = tile_hist_snap[tile_key][-1]
+                    if tg1.shape == (d2_h, d2_w):
+                        prev_tile_1 = tg1
+                        t_dx1 = float(tcx1 - gmc_x) * float(spec.scale_x)
+                        t_dy1 = float(tcy1 - gmc_y) * float(spec.scale_y)
+
+                prev_tile_5: np.ndarray | None = None
+                t_dx5, t_dy5 = 0.0, 0.0
+                if prev_full_5 is not None:
+                    prev_tile_5 = self._extract_spec_tile_f32(prev_full_5[0], spec)
+                    t_dx5 = float(prev_full_5[1] - gmc_x) * float(spec.scale_x)
+                    t_dy5 = float(prev_full_5[2] - gmc_y) * float(spec.scale_y)
+                elif tile_key in tile_hist_snap and len(tile_hist_snap[tile_key]) >= 5:
+                    tg5, tcx5, tcy5 = tile_hist_snap[tile_key][-5]
+                    if tg5.shape == (d2_h, d2_w):
+                        prev_tile_5 = tg5
+                        t_dx5 = float(tcx5 - gmc_x) * float(spec.scale_x)
+                        t_dy5 = float(tcy5 - gmc_y) * float(spec.scale_y)
+
+                t_h_prev: np.ndarray | None = None
+                if tile_key in tile_h_snap and tile_h_snap[tile_key].shape == expected_h_shape:
+                    t_h_prev = tile_h_snap[tile_key]
+                elif can_warm_from_full and prev_full_h_before_step is not None:
+                    t_h_prev = self._warm_start_tile_hidden(
+                        prev_full_h_before_step,
+                        spec,
+                        (h_in, w_in),
+                        (max(1, d2_h // 4), max(1, d2_w // 4)),
                     )
-                    det = (*det_frame_box, float(top_m["score"]))
-            else:
-                tile_w = min(w_in, max(d2_w, w_in // 2))
-                tile_h = min(h_in, max(d2_h, h_in // 2))
-                sky_y = max(0, min(h_in - tile_h, int(h_in * 0.08)))
-                tile_origins = [
-                    (max(0, (w_in - tile_w) // 2), sky_y),
-                    (0, sky_y),
-                    (max(0, w_in - tile_w), sky_y),
-                ]
-                best_tile_det: tuple[float, float, float, float, float] | None = None
-                best_tile_box: tuple[float, float, float, float] | None = None
-                for tx0, ty0 in tile_origins:
-                    patch = bgr[ty0 : ty0 + tile_h, tx0 : tx0 + tile_w]
-                    p_rs = cv2.resize(patch, (d2_w, d2_h), interpolation=cv2.INTER_AREA)
-                    p_gray = cv2.cvtColor(p_rs, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                    tdet, tprob = self._run_d2_single_probe(p_gray, score_thr=score_thr)
-                    if tprob > max_prob:
-                        max_prob = tprob
-                    if tdet is not None and (best_tile_det is None or tdet[4] > best_tile_det[4]):
-                        best_tile_det = tdet
-                        tsx = float(tile_w) / float(d2_w)
-                        tsy = float(tile_h) / float(d2_h)
-                        best_tile_box = (
-                            tx0 + tdet[0] * tsx,
-                            ty0 + tdet[1] * tsy,
-                            tx0 + tdet[2] * tsx,
-                            ty0 + tdet[3] * tsy,
-                        )
-                if best_tile_det is not None and best_tile_box is not None:
-                    det = best_tile_det
-                    det_frame_box = best_tile_box
+
+                tdet, tprob, h_next_tile = self._run_d2_single_probe(
+                    tile_f32,
+                    score_thr=score_thr,
+                    prev_gray_1=prev_tile_1,
+                    prev_gray_5=prev_tile_5,
+                    dx1=t_dx1,
+                    dy1=t_dy1,
+                    dx5=t_dx5,
+                    dy5=t_dy5,
+                    h_prev=t_h_prev,
+                    return_hidden=True,
+                )
+                updated_tile_h[tile_key] = h_next_tile
+                updated_tile_gray[tile_key] = (tile_f32.copy(), gmc_x, gmc_y)
+                if tprob > max_prob:
+                    max_prob = tprob
+                if tdet is not None:
+                    tu = 0.5 * (tdet[0] + tdet[2])
+                    tv = 0.5 * (tdet[1] + tdet[3])
+                    per_tile_dets.append(
+                        [{"u_px": tu, "v_px": tv, "w": tdet[2] - tdet[0], "h": tdet[3] - tdet[1], "score": tdet[4]}]
+                    )
+                else:
+                    per_tile_dets.append([])
+
+            with self._d2_ort_lock:
+                for tk, th_arr in updated_tile_h.items():
+                    state.tile_h_prev[tk] = th_arr
+                for tk, tg_rec in updated_tile_gray.items():
+                    hist_list = state.tile_gray_hist.setdefault(tk, [])
+                    hist_list.append(tg_rec)
+                    if len(hist_list) > 8:
+                        hist_list.pop(0)
+                while len(state.tile_h_prev) > 16:
+                    oldest_k = next(iter(state.tile_h_prev))
+                    state.tile_h_prev.pop(oldest_k, None)
+                    state.tile_gray_hist.pop(oldest_k, None)
+
+            merged_h = merge_tile_detections(per_tile_dets, specs_h, nms_radius_px=12.0)
+            if merged_h:
+                top_m = merged_h[0]
+                bw_m = float(top_m["w"])
+                bh_m = float(top_m["h"])
+                det_frame_box = (
+                    float(top_m["u_px"]) - 0.5 * bw_m,
+                    float(top_m["v_px"]) - 0.5 * bh_m,
+                    float(top_m["u_px"]) + 0.5 * bw_m,
+                    float(top_m["v_px"]) + 0.5 * bh_m,
+                )
+                det = (*det_frame_box, float(top_m["score"]))
 
         with self._d2_ort_lock:
             if det is not None and det_frame_box is not None:
@@ -1200,7 +1381,7 @@ class StudioInferenceEngine:
                     out["runway_present_logit"].detach().cpu().float().reshape(-1)[0].item()
                 )
 
-        # Fail-closed validation: 5-output v5.1, 6-output v5.2, or 7-output extended (`runway_present_logit`)
+        # Fail-closed validation: 5-output, 6-output, or 7-output extended (`runway_present_logit`)
         keyline_sigmas_px = validate_keyline_sigmas_px(raw_keyline_sigma_px, expected_count=keylines.shape[0])
         runway_present_prob: float | None = None
         runway_present = True
@@ -1219,7 +1400,7 @@ class StudioInferenceEngine:
 
         cov_cal = self.bundle.land_calibrator.calibrate_covariance(cov_raw).numpy().astype(np.float64)
 
-        # Optional 4-DoF Horizon-Constrained Huber-Tukey IRLS MAP-PnPL (strictly skipped on extended runway_present fail-closed!)
+        # Optional 4-DoF Horizon-Constrained Huber-Tukey IRLS MAP-PnPL (strictly skipped on runway_present fail-closed!)
         pnpl_payload: dict[str, Any] | None = None
         if solve_pnpl and runway_present:
             hdg_default = math.radians(297.7)
@@ -1410,10 +1591,23 @@ class StudioInferenceEngine:
         eo_rgb = cv2.cvtColor(eo_vis, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         lwir_2ch, lwir_u8 = _derive_lwir_2ch_from_bgr(bgr, lwir_bgr, hw=(128, 160))
 
+        # BUG-03 fix: assess native-resolution EO & LWIR frames BEFORE INTER_AREA downscaling
+        # so 720p white-noise & 1080p 1-px dead-line FPN stripes trigger fail-closed immediately.
+        eo_health_frame = (
+            np.clip(
+                bgr.astype(np.float32) * (1.0 - 0.88 * fog_c) + 220.0 * (0.88 * fog_c),
+                0.0,
+                255.0,
+            ).astype(np.uint8)
+            if fog_c > 0.01
+            else bgr
+        )
+        lwir_health_frame = lwir_bgr if lwir_bgr is not None else lwir_u8
+
         active_sh = self._sensor_health if sensor_health_monitor is None else sensor_health_monitor
         th_sensor_health = active_sh.assess_thermal_pair(
-            eo_vis,
-            lwir_u8,
+            eo_health_frame,
+            lwir_health_frame,
             q_eo_nominal=float(q_eo),
             q_lwir_nominal=float(q_lwir),
             vacuity=0.0,
@@ -1753,7 +1947,12 @@ class StudioInferenceEngine:
 
         if tier2b_triggered and dq.shape[0] > 0 and dr.shape[0] > 0:
             q2_idx, m2_idx, m2_scores = self._nav_lighterglue.match(
-                kq, dq, kr, dr, img_hw=(h_in, w_in)
+                kq,
+                dq,
+                kr,
+                dr,
+                img_hw=(h_in, w_in),
+                img_hw_m=(h_ref, w_ref),
             )
             tier2b_matches = int(q2_idx.size)
             if tier2b_matches > tier2a_matches:
@@ -1978,6 +2177,7 @@ class StudioInferenceEngine:
             "xfeat_backend": self._nav_xfeat.backend,
             "xfeat_onnx_sha256": self._nav_xfeat.onnx_sha256,
             "lighterglue_backend": self._nav_lighterglue.backend,
+            "lighterglue_onnx_sha256": self._nav_lighterglue.onnx_sha256,
             "tier_used": stage2_tier_used,
             "query_keypoints": int(kq.shape[0]),
             "ref_keypoints": int(kr.shape[0]),

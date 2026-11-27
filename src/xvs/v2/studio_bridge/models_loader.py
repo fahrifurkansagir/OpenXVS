@@ -438,12 +438,26 @@ def _format_source_path(path: Path) -> str:
     return str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
 
 
+def _resolve_cpu_ort_threads(default_cap: int = 6) -> int:
+    """Resolve CPU ORT `intra_op_num_threads`, respecting positive `OMP_NUM_THREADS` thermal caps."""
+    n_phys = max(1, min(int(default_cap), (os.cpu_count() or 4) // 2))
+    raw_omp = os.environ.get("OMP_NUM_THREADS", "").strip()
+    if raw_omp:
+        try:
+            omp_val = int(raw_omp)
+        except ValueError:
+            omp_val = 0
+        if omp_val >= 1:
+            n_phys = min(n_phys, omp_val)
+    return max(1, n_phys)
+
+
 def _create_ort_session(onnx_path: Path, base_dev_str: str) -> tuple[ort.InferenceSession, str]:
     """Create an optimized ONNX Runtime session preferring CUDA when requested & available.
 
     On CPU, binds `intra_op_num_threads` to the physical-core estimate (`cpu_count // 2`, capped
-    at 6) with `allow_spinning=0` and `inter_op_num_threads=1` to eliminate spin-lock contention
-    against concurrent PyTorch / `ffmpeg` H.264 encoder threads during live `.mp4` jobs.
+    at 6 and clamped to `<= OMP_NUM_THREADS` when set) with `allow_spinning=0` and
+    `inter_op_num_threads=1` to eliminate spin-lock contention and honor thermal thread locks.
     """
     avail_providers = ort.get_available_providers()
     providers = (
@@ -454,7 +468,7 @@ def _create_ort_session(onnx_path: Path, base_dev_str: str) -> tuple[ort.Inferen
     sess_opts = ort.SessionOptions()
     sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     if providers == ["CPUExecutionProvider"]:
-        n_phys = max(1, min(6, (os.cpu_count() or 4) // 2))
+        n_phys = _resolve_cpu_ort_threads(default_cap=6)
         sess_opts.intra_op_num_threads = n_phys
         sess_opts.inter_op_num_threads = 1
         sess_opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
@@ -698,7 +712,7 @@ def _verify_v5_nav_artifact(
 
 
 def _validate_land_ort_io(sess: ort.InferenceSession) -> tuple[bool, bool, bool]:
-    """Verify XVS-Land ONNX IO: 5-output (v4.5/v5.1), 6-output (v5.2), OR 7-output (extended + `runway_present_logit`)."""
+    """Verify XVS-Land ONNX IO: 5-output, 6-output, OR 7-output extended (`runway_present_logit`)."""
     inps = sess.get_inputs()
     outs = sess.get_outputs()
     if len(inps) != 1 or inps[0].name != "roi_crop":

@@ -2225,20 +2225,31 @@ class StudioHilBridgeManager:
             wants_vision = (prev_src != EKF3_SOURCE_VISION_OPTICAL) and (
                 self._gnss_spoof_alarm or not self._gnss_healthy
             )
-            ekf_state, datum_decision = self._datum_guard.gate_ekf3_switch_latch(
-                self._ekf3_latch,
-                timestamp_s=latch_ts,
-                gnss_healthy=self._gnss_healthy,
-                spoof_alarm=self._gnss_spoof_alarm,
-                z_visual_m=self._visual_alt_m,
-                z_baro_msl_m=float(st["alt_msl_m"]),
-                visual_datum=self._visual_datum,
-                geoid_undulation_m=self._visual_geoid_undulation_m,
-                apply_geoid_conversion=self._apply_geoid_conversion,
-            )
-            self._last_datum_decision = datum_decision
-            if wants_vision and not datum_decision.allowed:
-                self._datum_inhibited_switches += 1
+            if wants_vision:
+                ekf_state, datum_decision = self._datum_guard.gate_ekf3_switch_latch(
+                    self._ekf3_latch,
+                    timestamp_s=latch_ts,
+                    gnss_healthy=self._gnss_healthy,
+                    spoof_alarm=self._gnss_spoof_alarm,
+                    z_visual_m=self._visual_alt_m,
+                    z_baro_msl_m=float(st["alt_msl_m"]),
+                    visual_datum=self._visual_datum,
+                    geoid_undulation_m=self._visual_geoid_undulation_m,
+                    apply_geoid_conversion=self._apply_geoid_conversion,
+                )
+                self._last_datum_decision = datum_decision
+                if not datum_decision.allowed:
+                    self._datum_inhibited_switches += 1
+            else:
+                # Only gate pre-switch vertical datum alignment on transitions INTO EKF3=2;
+                # once EKF3=2 is already latched (or during nominal GNSS cruise), advance the
+                # latch dwell timer directly without overwriting last_datum_decision on DAA climbs.
+                ekf_state = self._ekf3_latch.step(
+                    timestamp_s=latch_ts,
+                    gnss_healthy=self._gnss_healthy,
+                    spoof_alarm=self._gnss_spoof_alarm,
+                )
+                datum_decision = self._last_datum_decision
         else:
             ekf_state = self._ekf3_latch.step(
                 timestamp_s=latch_ts,
