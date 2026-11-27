@@ -5,7 +5,7 @@ direct `.onnx` models (`xvs_d2_web_fp16.onnx`, `xvs_d2_edge_fp16.onnx`).
 
 Features:
 - Accepts `--onnx <path>` OR `--results-archive <tar.zst>` (safe Python 3.14
-  `compression.zstd` + `tarfile` extraction with strict path-traversal & link guard).
+  `compression.zstd` / `zstandard` + `tarfile` extraction with strict path-traversal & link guard).
 - Accepts `--aot-dir <dir>`, `--images-glob <pattern>`, OR `--smoke-synthetic`
   (60-frame deterministic KSFO aerial flyby with a 6-12 px moving target & GT boxes).
 - Runs genuine `onnxruntime` 6-channel dual-interval (`x_t [1, 6, H, W]`) + persistent
@@ -20,7 +20,6 @@ Features:
 from __future__ import annotations
 
 import argparse
-from compression import zstd
 from dataclasses import dataclass
 import glob
 import io
@@ -95,6 +94,18 @@ def _is_safe_tar_member(member: tarfile.TarInfo) -> bool:
     return True
 
 
+def _decompress_zstd_bytes(raw: bytes) -> bytes:
+    """Decompress `.zst` payload using Python 3.14 stdlib `compression.zstd` or `zstandard`."""
+    try:
+        from compression import zstd as stdlib_zstd  # type: ignore[import-not-found]
+
+        return stdlib_zstd.decompress(raw)
+    except ImportError:
+        import zstandard  # type: ignore[import-not-found]
+
+        return zstandard.ZstdDecompressor().decompress(raw)
+
+
 def extract_onnx_from_results_archive(archive_path: Path, dest_dir: Path) -> Path:
     """Safely extract `xvs_d2_web_fp16.onnx` or `xvs_d2_edge_fp16.onnx` from a `.tar.zst`."""
     if not archive_path.is_file():
@@ -102,7 +113,7 @@ def extract_onnx_from_results_archive(archive_path: Path, dest_dir: Path) -> Pat
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     raw_zst = archive_path.read_bytes()
-    tar_bytes = zstd.decompress(raw_zst)
+    tar_bytes = _decompress_zstd_bytes(raw_zst)
 
     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
         safe_onnx: dict[str, tarfile.TarInfo] = {}
